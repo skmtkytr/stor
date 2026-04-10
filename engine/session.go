@@ -42,6 +42,7 @@ type Session struct {
 	// Config from engine
 	peerID      [20]byte
 	downloadDir string
+	tmpDir      string // temp dir for in-progress downloads; empty = use downloadDir
 	port        uint16
 	dlCfg       download.DownloadConfig
 	numWant     int
@@ -53,11 +54,12 @@ type Session struct {
 }
 
 // NewSession creates a session from a persisted record.
-func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir string, port uint16, dlCfg download.DownloadConfig, numWant int, d *dhtpkg.DHT, pl *PeerListener) *Session {
+func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir, tmpDir string, port uint16, dlCfg download.DownloadConfig, numWant int, d *dhtpkg.DHT, pl *PeerListener) *Session {
 	return &Session{
 		record:      record,
 		peerID:      peerID,
 		downloadDir: downloadDir,
+		tmpDir:      tmpDir,
 		port:        port,
 		dlCfg:       dlCfg,
 		numWant:     numWant,
@@ -79,14 +81,33 @@ func (s *Session) Record() *TorrentRecord {
 func (s *Session) Snap() download.ProgressSnap {
 	s.mu.RLock()
 	p := s.progress
+	u := s.uploader
 	state := s.record.State
 	s.mu.RUnlock()
 
 	if p != nil {
 		snap := p.Snap()
 		snap.State = string(state)
+		// Add upload stats if seeding
+		if u != nil {
+			snap.UpSpeed = u.TotalUploadSpeed()
+			snap.ActivePeers += u.PeerCount()
+		}
 		return snap
 	}
+
+	// Seeding without download progress (resumed as seeder)
+	if u != nil {
+		return download.ProgressSnap{
+			State:       string(state),
+			Total:       s.record.TotalBytes,
+			Downloaded:  s.record.TotalBytes,
+			Percent:     100,
+			UpSpeed:     u.TotalUploadSpeed(),
+			ActivePeers: u.PeerCount(),
+		}
+	}
+
 	return download.ProgressSnap{
 		State: string(state),
 		Total: s.record.TotalBytes,
@@ -175,7 +196,14 @@ func (s *Session) run(ctx context.Context) error {
 	// Step 3: Download
 	tl := download.TotalSize(s.tf)
 	numPieces := len(s.tf.Info.PieceHashes)
-	savePath := filepath.Join(s.downloadDir, s.tf.Info.Name)
+	finalPath := filepath.Join(s.downloadDir, s.tf.Info.Name)
+
+	// Use tmpDir for in-progress downloads if configured
+	dlDir := s.downloadDir
+	if s.tmpDir != "" {
+		dlDir = s.tmpDir
+	}
+	savePath := filepath.Join(dlDir, s.tf.Info.Name)
 
 	// Resume: verify existing pieces on disk
 	var haveBitfield peer.Bitfield
@@ -251,6 +279,15 @@ func (s *Session) run(ctx context.Context) error {
 
 	// Stop download-phase announcer before closing peerCh to avoid send-on-closed-channel panic
 	announceCancel()
+
+	// Move from tmpDir to downloadDir if configured
+	if s.tmpDir != "" && savePath != finalPath {
+		slog.Info("moving completed download", "id", s.record.ID, "from", savePath, "to", finalPath)
+		if err := os.Rename(savePath, finalPath); err != nil {
+			return fmt.Errorf("session: move to download dir: %w", err)
+		}
+		savePath = finalPath
+	}
 
 	// Close peer injection channel (download is done)
 	s.mu.Lock()

@@ -19,6 +19,7 @@ import (
 // Config holds engine configuration.
 type Config struct {
 	DownloadDir string
+	TmpDir      string // temp dir for in-progress downloads; empty = use DownloadDir
 	StatePath   string // path to state.json
 	ListenPort  uint16
 	MaxActive   int // max concurrent downloading torrents
@@ -52,13 +53,15 @@ type TorrentInfo struct {
 
 // EngineStats is global daemon stats.
 type EngineStats struct {
-	TotalDownSpeed int64 `json:"total_down_speed"`
-	ActiveTorrents int   `json:"active_torrents"`
-	TotalTorrents  int   `json:"total_torrents"`
-	MaxActive      int   `json:"max_active"`
-	TotalPeers     int   `json:"total_peers"`
-	DHTNodes       int   `json:"dht_nodes"`
-	FreeSpace      int64 `json:"free_space"`
+	TotalDownSpeed  int64 `json:"total_down_speed"`
+	TotalUpSpeed    int64 `json:"total_up_speed"`
+	ActiveTorrents  int   `json:"active_torrents"`
+	SeedingTorrents int   `json:"seeding_torrents"`
+	TotalTorrents   int   `json:"total_torrents"`
+	MaxActive       int   `json:"max_active"`
+	TotalPeers      int   `json:"total_peers"`
+	DHTNodes        int   `json:"dht_nodes"`
+	FreeSpace       int64 `json:"free_space"`
 }
 
 // Engine manages all torrent sessions.
@@ -137,6 +140,11 @@ func (e *Engine) Start() error {
 	if err := os.MkdirAll(e.cfg.DownloadDir, 0o755); err != nil {
 		return fmt.Errorf("engine: create download dir: %w", err)
 	}
+	if e.cfg.TmpDir != "" {
+		if err := os.MkdirAll(e.cfg.TmpDir, 0o755); err != nil {
+			return fmt.Errorf("engine: create tmp dir: %w", err)
+		}
+	}
 
 	// Start shared DHT node
 	d, err := dht.New(":0", dht.WithAlpha(e.cfg.DHTAlpha))
@@ -162,7 +170,7 @@ func (e *Engine) Start() error {
 	records := e.store.All()
 	slog.Info("restoring sessions", "count", len(records))
 	for _, r := range records {
-		s := NewSession(r, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht, e.listener)
+		s := NewSession(r, e.peerID, e.cfg.DownloadDir, e.cfg.TmpDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht, e.listener)
 
 		e.sessions[r.ID] = s
 
@@ -249,7 +257,7 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 		}
 	}
 
-	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht, e.listener)
+	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.TmpDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht, e.listener)
 	e.sessions[id] = s
 	e.store.Put(record)
 	_ = e.store.Save()
@@ -397,6 +405,10 @@ func (e *Engine) GetStats() *EngineStats {
 		if snap.State == string(StateDownloading) {
 			stats.ActiveTorrents++
 			stats.TotalDownSpeed += snap.DownSpeed
+		}
+		if snap.State == string(StateSeeding) {
+			stats.SeedingTorrents++
+			stats.TotalUpSpeed += snap.UpSpeed
 		}
 	}
 

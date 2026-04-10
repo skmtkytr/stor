@@ -16,6 +16,7 @@ import (
 type Config struct {
 	Port        int    `toml:"port"`
 	DownloadDir string `toml:"download_dir"`
+	TmpDir      string `toml:"tmp_dir"` // temp dir for in-progress downloads; empty = use download_dir
 	APIKey      string `toml:"api_key"`
 	StatePath   string // always derived from config file dir
 	MaxActive   int    `toml:"max_active"`
@@ -130,6 +131,8 @@ func parseTOML(data string, cfg *Config) {
 			}
 		case "download_dir":
 			cfg.DownloadDir = val
+		case "tmp_dir":
+			cfg.TmpDir = val
 		case "api_key":
 			cfg.APIKey = val
 		case "max_active":

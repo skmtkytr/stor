@@ -117,6 +117,7 @@ func runDaemon() {
 
 	engCfg := engine.Config{
 		DownloadDir: cfg.DownloadDir,
+		TmpDir:      cfg.TmpDir,
 		StatePath:   cfg.StatePath,
 		ListenPort:  6881,
 		MaxActive:   cfg.MaxActive,
