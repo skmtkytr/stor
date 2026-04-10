@@ -29,22 +29,43 @@
 		{ id: "queue", label: "#", width: 45, minWidth: 35, align: "center" },
 	];
 
-	let cols = $state<ColDef[]>(loadCols());
+	let cols = $state<ColDef[]>(defaultCols.map((c) => ({ ...c })));
 	let selected = $state(new Set<string>());
 	let lastIdx = $state<number | null>(null);
 	let sortKey = $state<string>("queue_position");
 	let sortDesc = $state(false);
+	let container: HTMLDivElement;
+	let initialized = $state(false);
 
 	// --- Persistence ---
-	function loadCols(): ColDef[] {
+	function loadCols(): ColDef[] | null {
 		try {
 			const saved = JSON.parse(localStorage.getItem("stor_cols") ?? "null");
-			if (Array.isArray(saved) && saved.length === defaultCols.length) {
-				return defaultCols.map((d, i) => ({ ...d, width: saved[i] ?? d.width }));
+			if (Array.isArray(saved) && saved.length === defaultCols.length &&
+				saved.every((w: number) => w >= 30 && w <= 5000)) {
+				return defaultCols.map((d, i) => ({ ...d, width: saved[i] }));
 			}
 		} catch { /* ignore */ }
-		return defaultCols.map((c) => ({ ...c }));
+		return null;
 	}
+
+	function initCols() {
+		const saved = loadCols();
+		if (saved) {
+			cols = saved;
+		} else if (container) {
+			// Fit to container: Name gets remaining space
+			const containerW = container.clientWidth;
+			const fixedSum = defaultCols.slice(1).reduce((s, c) => s + c.width, 0);
+			const nameW = Math.max(defaultCols[0].minWidth, containerW - fixedSum);
+			cols = defaultCols.map((c, i) => ({ ...c, width: i === 0 ? nameW : c.width }));
+		}
+		initialized = true;
+	}
+
+	$effect(() => {
+		if (container && !initialized) initCols();
+	});
 
 	function saveCols() {
 		localStorage.setItem("stor_cols", JSON.stringify(cols.map((c) => c.width)));
@@ -183,7 +204,7 @@
 <ContextMenu.Root>
 	<ContextMenu.Trigger class="w-full">
 		<div class="rounded-lg border bg-card overflow-hidden">
-			<div class="overflow-x-auto">
+			<div class="overflow-x-auto" bind:this={container}>
 				<table style="table-layout: fixed; width: max({tableWidth}px, 100%);">
 					{#each cols as col}
 						<col style="width: {col.width}px;" />
