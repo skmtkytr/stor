@@ -1,0 +1,16 @@
+version: '3'
+
+services:
+  stor:
+    image: ghcr.io/skmtkytr/stor:latest
+    container_name: stor
+    ports:
+      - "9090:9090"
+      - "6881:6881"
+      - "6881:6881/udp"
+    volumes:
+      - ./config:/config
+      - ./data:/data
+    environment:
+      - TZ=Asia/Tokyo
+    restart: unless-stopped

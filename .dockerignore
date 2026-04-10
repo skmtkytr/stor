@@ -1,0 +1,9 @@
+stor
+*.torrent
+ui/frontend/node_modules
+ui/frontend/.svelte-kit
+ui/dist
+.git
+.claude
+.svelte-kit
+node_modules

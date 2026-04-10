@@ -5,100 +5,89 @@ A BitTorrent client written from scratch in Go. No external torrent libraries �
 ## Features
 
 **Protocol**
-- BEP 3 — BitTorrent core protocol with choking algorithm
-- BEP 5 — DHT (Kademlia-based distributed hash table)
-- BEP 9 — Magnet link metadata exchange (ut_metadata)
-- BEP 10 — Extension protocol
+- BEP 3 — Core protocol with choking algorithm
+- BEP 5 — Kademlia DHT
+- BEP 9/10 — Magnet links via extension protocol
 - BEP 15 — UDP tracker
 - BEP 23 — Compact peer lists
 
-**Daemon**
-- JSON-RPC 2.0 API with bearer token auth
-- Persistent torrent queue with auto-resume
-- Configurable concurrent downloads, peer limits, DHT tuning
-- CORS support for browser extensions
-
-**Web UI**
-- Real-time torrent list with Deluge-inspired layout
-- Toolbar with add/pause/resume/remove actions
-- State filter tabs with counts
-- Dynamic sorting (re-sorts on every poll)
-- Progress bars with state labels and color coding
-- Status bar: peers, DHT nodes, download speed, free disk space
-
-**Chrome Extension**
-- Intercepts `.torrent` and `magnet:` links on any page
-- Right-click "Download with stor" context menu
-- Popup with torrent list, sort, filter, and inline actions
-- Configurable with connection test
+**Architecture**: Daemon + Web UI + Chrome Extension — like Deluge, but a single static binary.
 
 ## Quick Start
 
 ```sh
-# Build everything (daemon + web UI)
-make
+make && ./stor daemon
+```
 
-# Start the daemon
-./stor daemon
+First run generates `~/.config/stor/config.toml` with an API key. Open `http://localhost:9090`.
 
-# Or one-shot download
+### Docker
+
+```yaml
+services:
+  stor:
+    image: ghcr.io/skmtkytr/stor:latest
+    ports:
+      - "9090:9090"
+      - "6881:6881"
+      - "6881:6881/udp"
+    volumes:
+      - ./config:/config
+      - ./data:/data
+    restart: unless-stopped
+```
+
+### One-shot
+
+```sh
 ./stor magnet:?xt=urn:btih:...
-./stor path/to/file.torrent
+./stor path/to/file.torrent [output-dir]
 ```
-
-On first run, the daemon creates `~/.config/stor/config.toml` with a generated API key:
-
-```toml
-port = 9090
-download_dir = "/home/user/Downloads"
-api_key = "sk-..."
-state_path = "/home/user/.config/stor/state.json"
-max_active = 5
-```
-
-Open `http://localhost:9090` to access the web UI.
 
 ## Configuration
 
-All performance parameters are tunable via `config.toml` (zero or omitted = default):
+`config.toml` — all values optional (shown = defaults):
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `max_active` | 5 | Max concurrent downloading torrents |
-| `max_peers` | 100 | Max peer connections per torrent |
-| `max_pipeline` | 16 | Outstanding block requests per peer |
-| `dial_timeout` | 3 | Peer connection timeout (seconds) |
-| `numwant` | 200 | Peers requested from trackers |
-| `dht_alpha` | 8 | DHT lookup parallelism |
+```toml
+port = 9090
+download_dir = "~/Downloads"
+max_active = 5
+
+# Performance tuning
+max_peers = 100
+max_pipeline = 16
+dial_timeout = 3
+numwant = 200
+dht_alpha = 8
+```
 
 ## Chrome Extension
 
-Load `extension/` as an unpacked extension in `chrome://extensions`. Configure the daemon URL and API key in the extension options page.
+Load `extension/` as unpacked in `chrome://extensions`. Intercepts `.torrent` and `magnet:` links, right-click menu, popup with torrent management.
 
 ## Architecture
 
 ```
-cmd/stor/       CLI entry point (daemon + one-shot modes)
-daemon/         HTTP server, JSON-RPC dispatcher, config
-engine/         Torrent lifecycle, queue management, session orchestration
-download/       Piece-level download with peer manager and choking algorithm
-peer/           Wire protocol: handshake, messages, extensions
-tracker/        HTTP and UDP tracker announce
-dht/            Kademlia DHT (routing table, iterative lookup, get_peers)
-magnet/         Magnet URI parsing and metadata fetch
-torrent/        .torrent file parsing
-bencode/        Bencoding encoder/decoder
+cmd/stor/       CLI (daemon + one-shot)
+daemon/         HTTP server, JSON-RPC 2.0, config
+engine/         Session lifecycle, queue, parallel magnet resolution
+download/       Piece download, peer manager, BEP 3 choking
+peer/           Wire protocol, extensions (BEP 10)
+tracker/        HTTP + UDP announce
+dht/            Kademlia routing, iterative lookup, get_peers
+magnet/         URI parsing, metadata fetch (BEP 9)
+torrent/        .torrent parsing
+bencode/        Encoder/decoder
 ui/             SvelteKit web UI (embedded in binary)
 extension/      Chrome extension (Manifest V3)
 ```
 
 ## Building
 
-Requirements: Go 1.26+, Bun (for web UI)
+Go 1.26+, Bun
 
 ```sh
 make          # lint + test + build
-make test     # tests only
 make build    # binary only
 make ui       # web UI only
 ```
