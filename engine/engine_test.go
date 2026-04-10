@@ -51,10 +51,12 @@ func newTestEngine(t *testing.T) *Engine {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := Config{
-		DownloadDir: filepath.Join(dir, "downloads"),
-		StatePath:   filepath.Join(dir, "state.json"),
-		ListenPort:  6881,
-		MaxActive:   3,
+		DownloadDir:     filepath.Join(dir, "downloads"),
+		StatePath:       filepath.Join(dir, "state.json"),
+		ListenPort:      0,
+		MaxActive:       3,
+		DisableDHT:      true,
+		DisableListener: true,
 	}
 	eng, err := New(cfg)
 	if err != nil {
@@ -65,7 +67,7 @@ func newTestEngine(t *testing.T) *Engine {
 	}
 	t.Cleanup(func() {
 		_ = eng.Stop()
-		_ = os.RemoveAll(cfg.DownloadDir)
+		_ = os.RemoveAll(dir)
 	})
 	return eng
 }
