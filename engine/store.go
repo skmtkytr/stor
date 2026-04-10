@@ -19,19 +19,29 @@ const (
 	StateError       State = "error"
 )
 
+// Priority controls queue ordering. Lower value = higher priority.
+type Priority int
+
+const (
+	PriorityHigh   Priority = 0
+	PriorityNormal Priority = 1
+	PriorityLow    Priority = 2
+)
+
 // TorrentRecord is the persisted state of a single torrent.
 type TorrentRecord struct {
-	ID          string `json:"id"` // hex info hash
-	Name        string `json:"name"`
-	Source      string `json:"source"` // magnet URI or .torrent path
-	SavePath    string `json:"save_path"`
-	TotalBytes  int64  `json:"total_bytes"`
-	State       State  `json:"state"`
-	AddedAt     int64  `json:"added_at"` // unix timestamp
-	CompletedAt int64  `json:"completed_at"`
-	TorrentData []byte `json:"torrent_data"` // raw bencoded .torrent (for resume)
-	Bitfield    []byte `json:"bitfield"`     // which pieces we have
-	Error       string `json:"error,omitempty"`
+	ID          string   `json:"id"` // hex info hash
+	Name        string   `json:"name"`
+	Source      string   `json:"source"` // magnet URI or .torrent path
+	SavePath    string   `json:"save_path"`
+	TotalBytes  int64    `json:"total_bytes"`
+	State       State    `json:"state"`
+	Priority    Priority `json:"priority"`
+	AddedAt     int64    `json:"added_at"` // unix timestamp
+	CompletedAt int64    `json:"completed_at"`
+	TorrentData []byte   `json:"torrent_data"` // raw bencoded .torrent (for resume)
+	Bitfield    []byte   `json:"bitfield"`     // which pieces we have
+	Error       string   `json:"error,omitempty"`
 }
 
 // Store persists torrent records to a JSON file.

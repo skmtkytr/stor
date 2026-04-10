@@ -26,6 +26,7 @@ type TorrentInfo struct {
 	Name        string                `json:"name"`
 	Source      string                `json:"source"`
 	State       State                 `json:"state"`
+	Priority    Priority              `json:"priority"`
 	Progress    download.ProgressSnap `json:"progress"`
 	SavePath    string                `json:"save_path"`
 	TotalBytes  int64                 `json:"total_bytes"`
@@ -39,6 +40,7 @@ type EngineStats struct {
 	TotalDownSpeed int64 `json:"total_down_speed"`
 	ActiveTorrents int   `json:"active_torrents"`
 	TotalTorrents  int   `json:"total_torrents"`
+	MaxActive      int   `json:"max_active"`
 }
 
 // Engine manages all torrent sessions.
@@ -289,6 +291,7 @@ func (e *Engine) GetStats() *EngineStats {
 
 	stats := &EngineStats{
 		TotalTorrents: len(e.sessions),
+		MaxActive:     e.cfg.MaxActive,
 	}
 	for _, s := range e.sessions {
 		snap := s.Snap()
@@ -305,6 +308,43 @@ func (e *Engine) PeerID() string {
 	return hex.EncodeToString(e.peerID[:])
 }
 
+// SetPriority changes a torrent's queue priority.
+func (e *Engine) SetPriority(id string, priority Priority) error {
+	e.mu.RLock()
+	s, ok := e.sessions[id]
+	e.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("engine: torrent %s not found", id)
+	}
+
+	s.mu.Lock()
+	s.record.Priority = priority
+	s.mu.Unlock()
+
+	e.saveState()
+	e.startQueued()
+	return nil
+}
+
+// SetMaxActive changes the max concurrent downloads and adjusts the queue.
+func (e *Engine) SetMaxActive(n int) {
+	if n < 1 {
+		n = 1
+	}
+	e.mu.Lock()
+	e.cfg.MaxActive = n
+	e.mu.Unlock()
+	e.startQueued()
+}
+
+// MaxActive returns the current max concurrent downloads.
+func (e *Engine) MaxActive() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.cfg.MaxActive
+}
+
 func (e *Engine) sessionToInfo(s *Session) *TorrentInfo {
 	r := s.Record()
 	snap := s.Snap()
@@ -313,6 +353,7 @@ func (e *Engine) sessionToInfo(s *Session) *TorrentInfo {
 		Name:        r.Name,
 		Source:      r.Source,
 		State:       r.State,
+		Priority:    r.Priority,
 		Progress:    snap,
 		SavePath:    r.SavePath,
 		TotalBytes:  r.TotalBytes,
@@ -338,21 +379,52 @@ func (e *Engine) onSessionDone(id string) {
 	e.startQueued()
 }
 
-// startQueued starts queued (paused/adding) torrents if under MaxActive.
+// startQueued starts queued torrents in priority order if under MaxActive.
 func (e *Engine) startQueued() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	active := e.activeCount()
+	if active >= e.cfg.MaxActive {
+		return
+	}
+
+	// Collect queued sessions, sort by priority then add time
+	var queued []*Session
 	for _, s := range e.sessions {
+		r := s.Record()
+		if r.State == StateAdding {
+			queued = append(queued, s)
+		}
+	}
+
+	// Sort: lower priority value first (high=0 before normal=1 before low=2),
+	// then earlier AddedAt first
+	sortSessions(queued)
+
+	for _, s := range queued {
 		if active >= e.cfg.MaxActive {
 			break
 		}
-		r := s.Record()
-		if r.State == StateAdding {
-			s.Start(e.ctx, e.onSessionDone)
-			active++
+		s.Start(e.ctx, e.onSessionDone)
+		active++
+	}
+}
+
+func sortSessions(sessions []*Session) {
+	for i := 1; i < len(sessions); i++ {
+		key := sessions[i]
+		kr := key.Record()
+		j := i - 1
+		for j >= 0 {
+			jr := sessions[j].Record()
+			if jr.Priority < kr.Priority || (jr.Priority == kr.Priority && jr.AddedAt <= kr.AddedAt) {
+				break
+			}
+			sessions[j+1] = sessions[j]
+			j--
 		}
+		sessions[j+1] = key
 	}
 }
 

@@ -82,8 +82,12 @@ func (h *RPCHandler) dispatch(method string, params json.RawMessage) (any, *rpcE
 		return h.torrentGet(params)
 	case "torrent.list":
 		return h.torrentList()
+	case "torrent.setPriority":
+		return h.torrentSetPriority(params)
 	case "daemon.stats":
 		return h.daemonStats()
+	case "daemon.setMaxActive":
+		return h.daemonSetMaxActive(params)
 	case "daemon.version":
 		return h.daemonVersion()
 	default:
@@ -188,8 +192,37 @@ func (h *RPCHandler) torrentList() (any, *rpcErr) {
 	return h.engine.ListTorrents(), nil
 }
 
+func (h *RPCHandler) torrentSetPriority(params json.RawMessage) (any, *rpcErr) {
+	var p struct {
+		ID       string `json:"id"`
+		Priority int    `json:"priority"` // 0=high, 1=normal, 2=low
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.ID == "" {
+		return nil, &rpcErr{Code: -32602, Message: "invalid params: id required"}
+	}
+	if p.Priority < 0 || p.Priority > 2 {
+		return nil, &rpcErr{Code: -32602, Message: "invalid params: priority must be 0 (high), 1 (normal), or 2 (low)"}
+	}
+
+	if err := h.engine.SetPriority(p.ID, engine.Priority(p.Priority)); err != nil {
+		return nil, &rpcErr{Code: -32000, Message: err.Error()}
+	}
+	return struct{}{}, nil
+}
+
 func (h *RPCHandler) daemonStats() (any, *rpcErr) {
 	return h.engine.GetStats(), nil
+}
+
+func (h *RPCHandler) daemonSetMaxActive(params json.RawMessage) (any, *rpcErr) {
+	var p struct {
+		MaxActive int `json:"max_active"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.MaxActive < 1 {
+		return nil, &rpcErr{Code: -32602, Message: "invalid params: max_active must be >= 1"}
+	}
+	h.engine.SetMaxActive(p.MaxActive)
+	return map[string]int{"max_active": p.MaxActive}, nil
 }
 
 func (h *RPCHandler) daemonVersion() (any, *rpcErr) {
