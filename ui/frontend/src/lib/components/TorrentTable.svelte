@@ -120,19 +120,9 @@
 		resizing = idx;
 		const startX = e.pageX;
 		const startW = cols[idx].width;
-		const nextIdx = idx + 1;
-		const startNextW = nextIdx < cols.length ? cols[nextIdx].width : 0;
 
 		const onMove = (ev: MouseEvent) => {
-			const delta = ev.pageX - startX;
-			const newW = Math.max(cols[idx].minWidth, startW + delta);
-			const actualDelta = newW - startW;
-			cols[idx] = { ...cols[idx], width: newW };
-			// Compensate: shrink/grow the next column
-			if (nextIdx < cols.length) {
-				const newNextW = Math.max(cols[nextIdx].minWidth, startNextW - actualDelta);
-				cols[nextIdx] = { ...cols[nextIdx], width: newNextW };
-			}
+			cols[idx] = { ...cols[idx], width: Math.max(cols[idx].minWidth, startW + ev.pageX - startX) };
 		};
 		const onUp = () => {
 			resizing = null;
@@ -194,7 +184,7 @@
 	<ContextMenu.Trigger class="w-full">
 		<div class="rounded-lg border bg-card overflow-hidden">
 			<div class="overflow-x-auto">
-				<table style="table-layout: fixed; width: {tableWidth}px;">
+				<table style="table-layout: fixed; width: max({tableWidth}px, 100%);">
 					{#each cols as col}
 						<col style="width: {col.width}px;" />
 					{/each}
