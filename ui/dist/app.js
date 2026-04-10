@@ -363,26 +363,42 @@ function toast(msg, isError) {
   setTimeout(() => { el.className = "toast"; }, 3000);
 }
 
-// --- Column resize ---
+// --- Column resize (persistent) ---
+
+const COL_WIDTHS_KEY = "stor_col_widths";
 
 (function initColumnResize() {
   const table = $("#torrent-table");
   const cols = [...table.querySelectorAll("colgroup col")];
   const ths = [...table.querySelectorAll("thead th")];
 
-  // Snapshot initial rendered widths into col elements as px values
-  // so table-layout:fixed uses them as the baseline
+  // Restore saved widths or snapshot initial render
+  const saved = (() => {
+    try { return JSON.parse(localStorage.getItem(COL_WIDTHS_KEY)); } catch { return null; }
+  })();
+
   requestAnimationFrame(() => {
     ths.forEach((th, i) => {
-      if (cols[i]) cols[i].style.width = th.offsetWidth + "px";
+      if (!cols[i]) return;
+      if (saved && saved[i]) {
+        cols[i].style.width = saved[i] + "px";
+      } else {
+        cols[i].style.width = th.offsetWidth + "px";
+      }
     });
   });
+
+  function saveWidths() {
+    const widths = ths.map((th) => th.offsetWidth);
+    localStorage.setItem(COL_WIDTHS_KEY, JSON.stringify(widths));
+  }
 
   ths.forEach((th, i) => {
     const handle = document.createElement("div");
     handle.className = "col-resize";
     th.appendChild(handle);
 
+    // Drag to resize
     handle.addEventListener("mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -399,10 +415,26 @@ function toast(msg, isError) {
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
         document.body.style.cursor = "";
+        saveWidths();
       };
       document.body.style.cursor = "col-resize";
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+    });
+
+    // Double-click to auto-fit
+    handle.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // Temporarily remove fixed layout to measure content
+      table.style.tableLayout = "auto";
+      cols[i].style.width = "";
+      requestAnimationFrame(() => {
+        const autoW = th.offsetWidth;
+        table.style.tableLayout = "fixed";
+        cols[i].style.width = Math.max(40, autoW) + "px";
+        saveWidths();
+      });
     });
   });
 })();
