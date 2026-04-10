@@ -36,11 +36,9 @@ type Config struct {
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
-	configDir := filepath.Join(home, ".config", "stor")
 	return Config{
 		Port:        9090,
 		DownloadDir: filepath.Join(home, "Downloads"),
-		StatePath:   filepath.Join(configDir, "state.json"),
 		MaxActive:   5,
 		LogLevel:    "info",
 	}
