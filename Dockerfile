@@ -15,7 +15,7 @@ COPY --from=ui-builder /src/ui/dist ./ui/dist
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /stor ./cmd/stor
 
 # --- Runtime stage ---
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12
 
 LABEL org.opencontainers.image.source="https://github.com/skmtkytr/stor"
 LABEL org.opencontainers.image.description="BitTorrent client written from scratch in Go"

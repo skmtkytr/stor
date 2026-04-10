@@ -1,9 +1,8 @@
-version: '3'
-
 services:
   stor:
     image: ghcr.io/skmtkytr/stor:latest
     container_name: stor
+    user: "1000:1000"
     ports:
       - "9090:9090"
       - "6881:6881"
