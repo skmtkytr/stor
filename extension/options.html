@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>stor - Settings</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, sans-serif; background: #0d1117; color: #c9d1d9; padding: 40px; max-width: 500px; margin: 0 auto; }
+    h1 { color: #58a6ff; margin-bottom: 1.5rem; }
+    label { display: block; margin-bottom: 0.25rem; font-size: 14px; color: #8b949e; }
+    input { width: 100%; padding: 8px 12px; margin-bottom: 1rem; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; font-size: 14px; }
+    button { padding: 8px 20px; background: #238636; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
+    button:hover { background: #2ea043; }
+    .saved { color: #3fb950; margin-left: 10px; display: none; }
+  </style>
+</head>
+<body>
+  <h1>stor Settings</h1>
+
+  <label for="url">Daemon URL</label>
+  <input type="text" id="url" placeholder="http://192.168.1.100:9090">
+
+  <label for="key">API Key</label>
+  <input type="password" id="key" placeholder="sk-...">
+
+  <button id="save">Save</button>
+  <span class="saved" id="saved">Saved!</span>
+
+  <script>
+    const $ = (sel) => document.querySelector(sel);
+
+    chrome.storage.sync.get(["daemonUrl", "apiKey"], (cfg) => {
+      if (cfg.daemonUrl) $("#url").value = cfg.daemonUrl;
+      if (cfg.apiKey) $("#key").value = cfg.apiKey;
+    });
+
+    $("#save").addEventListener("click", () => {
+      chrome.storage.sync.set({
+        daemonUrl: $("#url").value.trim(),
+        apiKey: $("#key").value.trim(),
+      }, () => {
+        const el = $("#saved");
+        el.style.display = "inline";
+        setTimeout(() => el.style.display = "none", 2000);
+      });
+    });
+  </script>
+</body>
+</html>
