@@ -12,6 +12,7 @@ type Progress struct {
 	totalBytes  int64
 	completed   atomic.Int32
 	downloaded  atomic.Int64
+	activePeers atomic.Int32
 	startTime   time.Time
 }
 
@@ -30,10 +31,21 @@ func (p *Progress) Add(bytes int) {
 	p.downloaded.Add(int64(bytes))
 }
 
+// PeerConnect increments the active peer count.
+func (p *Progress) PeerConnect() {
+	p.activePeers.Add(1)
+}
+
+// PeerDisconnect decrements the active peer count.
+func (p *Progress) PeerDisconnect() {
+	p.activePeers.Add(-1)
+}
+
 // String returns the current progress line.
 func (p *Progress) String() string {
 	completed := int(p.completed.Load())
 	downloaded := p.downloaded.Load()
+	peers := p.activePeers.Load()
 	elapsed := time.Since(p.startTime).Seconds()
 
 	pct := float64(0)
@@ -46,11 +58,12 @@ func (p *Progress) String() string {
 		speed = float64(downloaded) / elapsed
 	}
 
-	return fmt.Sprintf("\r[%5.1f%%] %d/%d pieces | %s / %s | %s/s",
+	return fmt.Sprintf("\r[%5.1f%%] %d/%d pieces | %s / %s | %s/s | %d peers",
 		pct,
 		completed, p.totalPieces,
 		formatBytes(downloaded), formatBytes(p.totalBytes),
 		formatBytes(int64(speed)),
+		peers,
 	)
 }
 
