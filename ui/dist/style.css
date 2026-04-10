@@ -123,23 +123,27 @@ header h1 { font-size: 1.25rem; color: #58a6ff; }
 #torrent-table td {
   font-size: 0.8rem;
 }
-/* Column widths: Name stretches, others fixed */
-#torrent-table th:nth-child(1),
-#torrent-table td:nth-child(1) { width: auto; white-space: normal; } /* Name - takes remaining space */
-#torrent-table th:nth-child(2),
-#torrent-table td:nth-child(2) { width: 80px; }  /* Size */
-#torrent-table th:nth-child(3),
-#torrent-table td:nth-child(3) { width: 140px; }  /* Progress */
-#torrent-table th:nth-child(4),
-#torrent-table td:nth-child(4) { width: 80px; }  /* Speed */
-#torrent-table th:nth-child(5),
-#torrent-table td:nth-child(5) { width: 70px; }  /* ETA */
-#torrent-table th:nth-child(6),
-#torrent-table td:nth-child(6) { width: 50px; }  /* Peers */
-#torrent-table th:nth-child(7),
-#torrent-table td:nth-child(7) { width: 90px; }  /* State */
-#torrent-table th:nth-child(8),
-#torrent-table td:nth-child(8) { width: 110px; }  /* Queue */
+/* Default column widths (user can resize by dragging header borders) */
+#torrent-table th { position: relative; }
+#torrent-table col:nth-child(1) { width: 30%; }  /* Name */
+#torrent-table col:nth-child(2) { width: 80px; }  /* Size */
+#torrent-table col:nth-child(3) { width: 140px; } /* Progress */
+#torrent-table col:nth-child(4) { width: 80px; }  /* Speed */
+#torrent-table col:nth-child(5) { width: 70px; }  /* ETA */
+#torrent-table col:nth-child(6) { width: 50px; }  /* Peers */
+#torrent-table col:nth-child(7) { width: 90px; }  /* State */
+#torrent-table col:nth-child(8) { width: 110px; } /* Queue */
+
+/* Resize handle */
+.col-resize {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+}
+.col-resize:hover { background: #58a6ff44; }
 #torrent-table tr:hover { background: #161b22; }
 
 .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }

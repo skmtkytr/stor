@@ -363,6 +363,42 @@ function toast(msg, isError) {
   setTimeout(() => { el.className = "toast"; }, 3000);
 }
 
+// --- Column resize ---
+
+(function initColumnResize() {
+  const table = $("#torrent-table");
+  const cols = table.querySelectorAll("colgroup col");
+  const ths = table.querySelectorAll("thead th");
+
+  ths.forEach((th, i) => {
+    const handle = document.createElement("div");
+    handle.className = "col-resize";
+    th.appendChild(handle);
+
+    let startX, startW;
+
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startX = e.pageX;
+      startW = th.offsetWidth;
+      document.body.style.cursor = "col-resize";
+
+      const onMove = (e) => {
+        const w = Math.max(40, startW + e.pageX - startX);
+        cols[i].style.width = w + "px";
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  });
+})();
+
 // --- Settings ---
 
 $("#max-active-input").addEventListener("change", setMaxActive);
