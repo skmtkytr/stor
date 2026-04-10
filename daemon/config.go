@@ -17,7 +17,7 @@ type Config struct {
 	Port        int    `toml:"port"`
 	DownloadDir string `toml:"download_dir"`
 	APIKey      string `toml:"api_key"`
-	StatePath   string `toml:"state_path"`
+	StatePath   string // always derived from config file dir
 	MaxActive   int    `toml:"max_active"`
 
 	// Logging
@@ -76,10 +76,8 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.MaxActive < 1 {
 		cfg.MaxActive = 5
 	}
-	// If state_path is empty or uses a non-existent home dir, default to config dir
-	if cfg.StatePath == "" {
-		cfg.StatePath = filepath.Join(filepath.Dir(path), "state.json")
-	}
+	// Always place state.json next to config file
+	cfg.StatePath = filepath.Join(filepath.Dir(path), "state.json")
 
 	return cfg, nil
 }
@@ -98,10 +96,9 @@ func (c *Config) Save() error {
 port = %d
 download_dir = %q
 api_key = %q
-state_path = %q
 max_active = %d
 log_level = %q
-`, c.Port, c.DownloadDir, c.APIKey, c.StatePath, c.MaxActive, c.LogLevel)
+`, c.Port, c.DownloadDir, c.APIKey, c.MaxActive, c.LogLevel)
 
 	return os.WriteFile(c.path, []byte(content), 0o600)
 }
@@ -135,8 +132,6 @@ func parseTOML(data string, cfg *Config) {
 			cfg.DownloadDir = val
 		case "api_key":
 			cfg.APIKey = val
-		case "state_path":
-			cfg.StatePath = val
 		case "max_active":
 			if n, err := strconv.Atoi(val); err == nil {
 				cfg.MaxActive = n
