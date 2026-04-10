@@ -18,11 +18,28 @@ import (
 const (
 	// BlockSize is the standard request block size (16 KiB).
 	BlockSize = 16384
-	// MaxPipeline is the number of outstanding requests per peer.
-	MaxPipeline = 10
-	// MaxPeers is the maximum number of concurrent peer connections.
-	MaxPeers = 30
+
+	// Defaults for configurable parameters.
+	DefaultMaxPipeline = 16
+	DefaultMaxPeers    = 100
+	DefaultDialTimeout = 3 // seconds
 )
+
+// DownloadConfig holds tunable parameters for the download engine.
+type DownloadConfig struct {
+	MaxPeers    int // max concurrent peer connections
+	MaxPipeline int // outstanding requests per peer
+	DialTimeout int // peer dial timeout in seconds
+}
+
+// DefaultDownloadConfig returns default download config.
+func DefaultDownloadConfig() DownloadConfig {
+	return DownloadConfig{
+		MaxPeers:    DefaultMaxPeers,
+		MaxPipeline: DefaultMaxPipeline,
+		DialTimeout: DefaultDialTimeout,
+	}
+}
 
 // PieceResult contains a downloaded and verified piece.
 type PieceResult struct {
@@ -45,13 +62,80 @@ type Client struct {
 	peerID         [20]byte
 	infoHash       [20]byte
 	bitfield       peer.Bitfield
-	choked         bool
+	choked         bool // we are choked by peer
+	choking        bool // we are choking peer
 	sentInterested bool
+	maxPipeline    int
+	Addr           string // peer address for identification
+
+	// Speed tracking
+	downloaded int64     // bytes downloaded from this peer
+	speedStart time.Time // start of current measurement window
+	lastSpeed  float64   // bytes/sec from last measurement
+}
+
+// Speed returns the current download speed in bytes/sec.
+func (c *Client) Speed() float64 {
+	elapsed := time.Since(c.speedStart).Seconds()
+	if elapsed < 1 {
+		return c.lastSpeed
+	}
+	c.lastSpeed = float64(c.downloaded) / elapsed
+	return c.lastSpeed
+}
+
+// ResetSpeed resets the speed measurement window.
+func (c *Client) ResetSpeed() {
+	c.lastSpeed = c.Speed()
+	c.downloaded = 0
+	c.speedStart = time.Now()
+}
+
+// SendChoke sends a choke message to the peer.
+func (c *Client) SendChoke() error {
+	if c.choking {
+		return nil
+	}
+	msg := &peer.Message{ID: peer.MsgChoke}
+	if err := msg.Write(c.w); err != nil {
+		return err
+	}
+	if err := c.w.Flush(); err != nil {
+		return err
+	}
+	c.choking = true
+	return nil
+}
+
+// SendUnchoke sends an unchoke message to the peer.
+func (c *Client) SendUnchoke() error {
+	if !c.choking {
+		return nil
+	}
+	msg := &peer.Message{ID: peer.MsgUnchoke}
+	if err := msg.Write(c.w); err != nil {
+		return err
+	}
+	if err := c.w.Flush(); err != nil {
+		return err
+	}
+	c.choking = false
+	return nil
+}
+
+// IsChoking returns whether we are choking this peer.
+func (c *Client) IsChoking() bool {
+	return c.choking
 }
 
 // NewClient connects to a peer, performs the handshake, and receives the bitfield.
 func NewClient(p tracker.Peer, infoHash, peerID [20]byte) (*Client, error) {
-	conn, err := net.DialTimeout("tcp", p.String(), 5*time.Second)
+	return NewClientWithTimeout(p, infoHash, peerID, DefaultDialTimeout)
+}
+
+// NewClientWithTimeout connects to a peer with a configurable dial timeout.
+func NewClientWithTimeout(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int) (*Client, error) {
+	conn, err := net.DialTimeout("tcp", p.String(), time.Duration(dialTimeoutSec)*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("download: connect to %s failed: %w", p, err)
 	}
@@ -77,12 +161,15 @@ func NewClient(p tracker.Peer, infoHash, peerID [20]byte) (*Client, error) {
 	}
 
 	c := &Client{
-		conn:     conn,
-		r:        bufio.NewReaderSize(conn, 64*1024),
-		w:        bufio.NewWriterSize(conn, 32*1024),
-		peerID:   peerID,
-		infoHash: infoHash,
-		choked:   true,
+		conn:        conn,
+		r:           bufio.NewReaderSize(conn, 64*1024),
+		w:           bufio.NewWriterSize(conn, 32*1024),
+		peerID:      peerID,
+		infoHash:    infoHash,
+		choked:      true,
+		maxPipeline: DefaultMaxPipeline,
+		Addr:        p.String(),
+		speedStart:  time.Now(),
 	}
 
 	msg, err := peer.ReadMessage(c.r)
@@ -166,7 +253,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 
 	for downloaded < pw.Length {
 		flushed := false
-		for backlog < MaxPipeline && requested < pw.Length {
+		for backlog < c.maxPipeline && requested < pw.Length {
 			blockSize := BlockSize
 			if requested+blockSize > pw.Length {
 				blockSize = pw.Length - requested
@@ -204,6 +291,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 			}
 			copy(buf[begin:], block)
 			downloaded += len(block)
+			c.downloaded += int64(len(block))
 			backlog--
 		case peer.MsgChoke:
 			c.choked = true
@@ -230,7 +318,7 @@ func startWorkers(peers []tracker.Peer, infoHash, peerID [20]byte, workCh chan P
 	resultCh := make(chan PieceResult, cap(workCh))
 
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, MaxPeers)
+	sem := make(chan struct{}, DefaultMaxPeers)
 
 	for _, p := range peers {
 		wg.Add(1)
@@ -373,6 +461,11 @@ func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Pe
 // DownloadToFileCtx is like DownloadToFile but accepts a context for cancellation.
 // Progress is provided externally so the caller can read snapshots.
 func DownloadToFileCtx(ctx context.Context, tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer, path string, progress *Progress) error {
+	return DownloadToFileCtxWithConfig(ctx, tf, peerID, peers, path, progress, DefaultDownloadConfig())
+}
+
+// DownloadToFileCtxWithConfig is like DownloadToFileCtx but with tunable parameters.
+func DownloadToFileCtxWithConfig(ctx context.Context, tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer, path string, progress *Progress, cfg DownloadConfig) error {
 	tl := TotalSize(tf)
 	numPieces := len(tf.Info.PieceHashes)
 	peers = deduplicatePeers(peers)
@@ -388,7 +481,7 @@ func DownloadToFileCtx(ctx context.Context, tf *torrent.TorrentFile, peerID [20]
 	}
 
 	workCh := buildWorkQueue(tf, tl)
-	resultCh := startWorkersCtx(ctx, peers, tf.InfoHash, peerID, workCh, progress)
+	resultCh := startWorkersCtxWithConfig(ctx, peers, tf.InfoHash, peerID, workCh, progress, cfg)
 
 	pieceLength := int(tf.Info.PieceLength)
 	for completed := 0; completed < numPieces; {
@@ -414,12 +507,16 @@ func DownloadToFileCtx(ctx context.Context, tf *torrent.TorrentFile, peerID [20]
 	return nil
 }
 
-// startWorkersCtx is like startWorkers but respects context cancellation.
-func startWorkersCtx(ctx context.Context, peers []tracker.Peer, infoHash, peerID [20]byte, workCh chan PieceWork, progress *Progress) <-chan PieceResult {
+// startWorkersCtxWithConfig launches peer workers with tunable parameters.
+// Includes a PeerManager that runs the BEP 3 §5 choking algorithm.
+func startWorkersCtxWithConfig(ctx context.Context, peers []tracker.Peer, infoHash, peerID [20]byte, workCh chan PieceWork, progress *Progress, cfg DownloadConfig) <-chan PieceResult {
 	resultCh := make(chan PieceResult, cap(workCh))
 
+	pm := NewPeerManager(DefaultUnchokeSlots)
+	go pm.Run(ctx)
+
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, MaxPeers)
+	sem := make(chan struct{}, cfg.MaxPeers)
 
 	for _, p := range peers {
 		wg.Add(1)
@@ -433,11 +530,15 @@ func startWorkersCtx(ctx context.Context, peers []tracker.Peer, infoHash, peerID
 				defer func() { <-sem }()
 			}
 
-			client, err := NewClient(p, infoHash, peerID)
+			client, err := NewClientWithTimeout(p, infoHash, peerID, cfg.DialTimeout)
 			if err != nil {
 				return
 			}
+			client.maxPipeline = cfg.MaxPipeline
 			defer func() { _ = client.Close() }()
+
+			pm.Register(client)
+			defer pm.Unregister(client)
 
 			progress.PeerConnect()
 			defer progress.PeerDisconnect()

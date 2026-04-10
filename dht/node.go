@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	// Alpha is the concurrency parameter for iterative lookups.
-	Alpha = 3
+	// DefaultAlpha is the default concurrency parameter for iterative lookups.
+	DefaultAlpha = 8
 	// LookupTimeout is the maximum time for a single lookup.
 	LookupTimeout = 15 * time.Second
 	// QueryTimeout is the timeout for a single KRPC query.
@@ -23,6 +23,7 @@ type DHT struct {
 	id    ID
 	conn  *net.UDPConn
 	table *RoutingTable
+	alpha int // lookup concurrency
 
 	// Pending transactions: txnID → response channel
 	pending sync.Map // string → chan *KRPCMessage
@@ -35,8 +36,25 @@ type DHT struct {
 	closed chan struct{}
 }
 
+// Option configures a DHT node.
+type Option func(*DHT)
+
+// WithAlpha sets the lookup concurrency parameter.
+func WithAlpha(alpha int) Option {
+	return func(d *DHT) {
+		if alpha > 0 {
+			d.alpha = alpha
+		}
+	}
+}
+
+// Alpha returns the current lookup concurrency.
+func (d *DHT) Alpha() int {
+	return d.alpha
+}
+
 // New creates and starts a new DHT node.
-func New(listenAddr string) (*DHT, error) {
+func New(listenAddr string, opts ...Option) (*DHT, error) {
 	addr, err := net.ResolveUDPAddr("udp", listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("dht: resolve addr: %w", err)
@@ -55,7 +73,11 @@ func New(listenAddr string) (*DHT, error) {
 		id:     id,
 		conn:   conn,
 		table:  NewRoutingTable(id),
+		alpha:  DefaultAlpha,
 		closed: make(chan struct{}),
+	}
+	for _, opt := range opts {
+		opt(d)
 	}
 	d.rotateToken()
 
@@ -313,7 +335,7 @@ func (d *DHT) iterativeLookup(target ID, getPeers bool) ([]string, error) {
 		// Sort by distance
 		sortEntries(entries, target)
 		for _, e := range entries {
-			if !e.queried && len(toQuery) < Alpha {
+			if !e.queried && len(toQuery) < d.alpha {
 				toQuery = append(toQuery, e.node)
 				e.queried = true
 			}

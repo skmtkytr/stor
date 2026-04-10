@@ -46,6 +46,7 @@ type AnnounceRequest struct {
 	Downloaded  int64
 	Left        int64
 	Event       Event
+	NumWant     int // peers requested; 0 means use default (200)
 }
 
 // AnnounceResponse contains the tracker's response.
@@ -99,6 +100,11 @@ func buildAnnounceURL(req AnnounceRequest) (*url.URL, error) {
 	q.Set("downloaded", strconv.FormatInt(req.Downloaded, 10))
 	q.Set("left", strconv.FormatInt(req.Left, 10))
 	q.Set("compact", "1")
+	numWant := req.NumWant
+	if numWant <= 0 {
+		numWant = 200
+	}
+	q.Set("numwant", strconv.Itoa(numWant))
 
 	if req.Event != EventNone {
 		q.Set("event", string(req.Event))

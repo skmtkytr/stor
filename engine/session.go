@@ -42,15 +42,19 @@ type Session struct {
 	peerID      [20]byte
 	downloadDir string
 	port        uint16
+	dlCfg       download.DownloadConfig
+	numWant     int
 }
 
 // NewSession creates a session from a persisted record.
-func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir string, port uint16) *Session {
+func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir string, port uint16, dlCfg download.DownloadConfig, numWant int) *Session {
 	return &Session{
 		record:      record,
 		peerID:      peerID,
 		downloadDir: downloadDir,
 		port:        port,
+		dlCfg:       dlCfg,
+		numWant:     numWant,
 	}
 }
 
@@ -156,7 +160,7 @@ func (s *Session) run(ctx context.Context) error {
 	s.mu.Unlock()
 
 	savePath := filepath.Join(s.downloadDir, s.tf.Info.Name)
-	err = download.DownloadToFileCtx(ctx, s.tf, s.peerID, peers, savePath, progress)
+	err = download.DownloadToFileCtxWithConfig(ctx, s.tf, s.peerID, peers, savePath, progress, s.dlCfg)
 	if err != nil {
 		return err
 	}
@@ -319,6 +323,7 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 				Port:        s.port,
 				Left:        tl,
 				Event:       tracker.EventStarted,
+				NumWant:     s.numWant,
 			}
 			resp, err := tracker.Announce(req)
 			if err != nil {
@@ -394,6 +399,7 @@ func (s *Session) getPeersFromTrackers(ctx context.Context, trackers []string, i
 				Port:        s.port,
 				Left:        1,
 				Event:       tracker.EventStarted,
+				NumWant:     s.numWant,
 			}
 			resp, err := tracker.Announce(req)
 			if err != nil {

@@ -106,6 +106,11 @@ func runDaemon() {
 		StatePath:   cfg.StatePath,
 		ListenPort:  6881,
 		MaxActive:   cfg.MaxActive,
+		MaxPeers:    cfg.MaxPeers,
+		MaxPipeline: cfg.MaxPipeline,
+		DialTimeout: cfg.DialTimeout,
+		NumWant:     cfg.NumWant,
+		DHTAlpha:    cfg.DHTAlpha,
 	}
 
 	eng, err := engine.New(engCfg)

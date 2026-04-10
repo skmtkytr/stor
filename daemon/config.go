@@ -19,6 +19,13 @@ type Config struct {
 	StatePath   string `toml:"state_path"`
 	MaxActive   int    `toml:"max_active"`
 
+	// Performance tuning (0 = use defaults)
+	MaxPeers    int `toml:"max_peers"`
+	MaxPipeline int `toml:"max_pipeline"`
+	DialTimeout int `toml:"dial_timeout"`
+	NumWant     int `toml:"numwant"`
+	DHTAlpha    int `toml:"dht_alpha"`
+
 	path string // file path for saving back
 }
 
@@ -122,6 +129,26 @@ func parseTOML(data string, cfg *Config) {
 		case "max_active":
 			if n, err := strconv.Atoi(val); err == nil {
 				cfg.MaxActive = n
+			}
+		case "max_peers":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.MaxPeers = n
+			}
+		case "max_pipeline":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.MaxPipeline = n
+			}
+		case "dial_timeout":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.DialTimeout = n
+			}
+		case "numwant":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.NumWant = n
+			}
+		case "dht_alpha":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.DHTAlpha = n
 			}
 		}
 	}
