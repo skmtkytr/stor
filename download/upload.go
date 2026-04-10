@@ -189,3 +189,14 @@ func (u *Uploader) PeerCount() int {
 	defer u.mu.Unlock()
 	return len(u.clients)
 }
+
+// TotalUploadSpeed returns the sum of upload speeds across all connected peers.
+func (u *Uploader) TotalUploadSpeed() int64 {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	var total float64
+	for _, c := range u.clients {
+		total += c.UploadSpeed()
+	}
+	return int64(total)
+}

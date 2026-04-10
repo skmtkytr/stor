@@ -95,9 +95,11 @@
 
 	<!-- Speed -->
 	<td class="px-3 text-right text-xs tabular-nums text-zinc-400 whitespace-nowrap">
-		{torrent.state === "downloading" && torrent.progress.down_speed
-			? formatSpeed(torrent.progress.down_speed)
-			: ""}
+		{#if torrent.state === "downloading" && torrent.progress.down_speed}
+			{formatSpeed(torrent.progress.down_speed)}
+		{:else if torrent.state === "seeding" && torrent.progress.up_speed}
+			<span class="text-emerald-400">&uarr;{formatSpeed(torrent.progress.up_speed)}</span>
+		{/if}
 	</td>
 
 	<!-- ETA -->
@@ -109,7 +111,7 @@
 
 	<!-- Peers -->
 	<td class="px-3 text-right text-xs tabular-nums text-zinc-400">
-		{torrent.state === "downloading" && torrent.progress.active_peers
+		{(torrent.state === "downloading" || torrent.state === "seeding") && torrent.progress.active_peers
 			? torrent.progress.active_peers
 			: ""}
 	</td>

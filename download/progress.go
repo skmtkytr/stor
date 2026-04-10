@@ -86,6 +86,7 @@ type ProgressSnap struct {
 	Total       int64   `json:"total"`
 	Percent     float64 `json:"percent"`
 	DownSpeed   int64   `json:"down_speed"`
+	UpSpeed     int64   `json:"up_speed"`
 	ActivePeers int     `json:"active_peers"`
 	TotalPieces int     `json:"total_pieces"`
 	DonePieces  int     `json:"done_pieces"`

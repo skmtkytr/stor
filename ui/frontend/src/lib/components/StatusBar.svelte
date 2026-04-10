@@ -36,6 +36,9 @@
 			<span>
 				DL: <span class="text-zinc-300">{formatSpeed(s.total_down_speed)}</span>
 			</span>
+			<span>
+				UL: <span class="text-emerald-300">{formatSpeed(s.total_up_speed)}</span>
+			</span>
 		</div>
 	{:else}
 		<span>Connecting...</span>

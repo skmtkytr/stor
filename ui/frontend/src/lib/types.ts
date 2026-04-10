@@ -27,6 +27,7 @@ export interface ProgressSnap {
 	total: number;
 	percent: number;
 	down_speed: number;
+	up_speed: number;
 	active_peers: number;
 	total_pieces: number;
 	done_pieces: number;
@@ -34,7 +35,9 @@ export interface ProgressSnap {
 
 export interface EngineStats {
 	total_down_speed: number;
+	total_up_speed: number;
 	active_torrents: number;
+	seeding_torrents: number;
 	total_torrents: number;
 	max_active: number;
 	total_peers: number;
