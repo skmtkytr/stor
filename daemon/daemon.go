@@ -5,11 +5,13 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/skmtkytr/stor/engine"
+	"github.com/skmtkytr/stor/ui"
 )
 
 // Daemon is the HTTP server that exposes the engine via JSON-RPC and serves the Web UI.
@@ -36,7 +38,8 @@ func New(eng *engine.Engine, cfg Config) *Daemon {
 	mux.Handle("GET /api/torrents", d.authMiddleware(http.HandlerFunc(d.handleListTorrents)))
 
 	// Web UI (no auth — static files only, API key entered in browser)
-	mux.Handle("GET /", http.HandlerFunc(d.handleUI))
+	uiFS, _ := fs.Sub(ui.FS, "dist")
+	mux.Handle("GET /", http.FileServerFS(uiFS))
 
 	d.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
@@ -115,20 +118,6 @@ func (d *Daemon) handleAdd(w http.ResponseWriter, r *http.Request) {
 // handleListTorrents is a REST convenience for polling.
 func (d *Daemon) handleListTorrents(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, d.engine.ListTorrents())
-}
-
-// handleUI serves the embedded Web UI.
-func (d *Daemon) handleUI(w http.ResponseWriter, r *http.Request) {
-	// For now, serve a minimal placeholder. Will be replaced by embed.FS in Step 8.
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = fmt.Fprint(w, `<!DOCTYPE html>
-<html><head><title>stor</title></head>
-<body><h1>stor</h1><p>Web UI placeholder. See Step 8.</p></body>
-</html>`)
 }
 
 // authMiddleware checks the Authorization: Bearer <key> header.
