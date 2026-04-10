@@ -67,6 +67,46 @@ func (p *Progress) String() string {
 	)
 }
 
+// ProgressSnap is a point-in-time snapshot for serialization (RPC, etc.).
+type ProgressSnap struct {
+	State       string  `json:"state"`
+	Downloaded  int64   `json:"downloaded"`
+	Total       int64   `json:"total"`
+	Percent     float64 `json:"percent"`
+	DownSpeed   int64   `json:"down_speed"`
+	ActivePeers int     `json:"active_peers"`
+	TotalPieces int     `json:"total_pieces"`
+	DonePieces  int     `json:"done_pieces"`
+}
+
+// Snap returns a serializable snapshot of the current progress.
+func (p *Progress) Snap() ProgressSnap {
+	completed := int(p.completed.Load())
+	downloaded := p.downloaded.Load()
+	peers := int(p.activePeers.Load())
+	elapsed := time.Since(p.startTime).Seconds()
+
+	pct := float64(0)
+	if p.totalBytes > 0 {
+		pct = float64(downloaded) / float64(p.totalBytes) * 100
+	}
+
+	var speed int64
+	if elapsed > 0 {
+		speed = int64(float64(downloaded) / elapsed)
+	}
+
+	return ProgressSnap{
+		Downloaded:  downloaded,
+		Total:       p.totalBytes,
+		Percent:     pct,
+		DownSpeed:   speed,
+		ActivePeers: peers,
+		TotalPieces: p.totalPieces,
+		DonePieces:  completed,
+	}
+}
+
 func formatBytes(b int64) string {
 	switch {
 	case b >= 1<<30:

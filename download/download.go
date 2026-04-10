@@ -2,6 +2,7 @@ package download
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha1"
 	"fmt"
 	"net"
@@ -366,6 +367,116 @@ func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Pe
 	fmt.Println()
 
 	return nil
+}
+
+// DownloadToFileCtx is like DownloadToFile but accepts a context for cancellation.
+// Progress is provided externally so the caller can read snapshots.
+func DownloadToFileCtx(ctx context.Context, tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer, path string, progress *Progress) error {
+	tl := totalSize(tf)
+	numPieces := len(tf.Info.PieceHashes)
+	peers = deduplicatePeers(peers)
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := f.Truncate(tl); err != nil {
+		return fmt.Errorf("download: truncate failed: %w", err)
+	}
+
+	workCh := buildWorkQueue(tf, tl)
+	resultCh := startWorkersCtx(ctx, peers, tf.InfoHash, peerID, workCh, progress)
+
+	pieceLength := int(tf.Info.PieceLength)
+	for completed := 0; completed < numPieces; {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case res, ok := <-resultCh:
+			if !ok {
+				if completed < numPieces {
+					return fmt.Errorf("download: workers finished at %d/%d pieces", completed, numPieces)
+				}
+				return nil
+			}
+			offset := int64(res.Index) * int64(pieceLength)
+			if _, err := f.WriteAt(res.Data, offset); err != nil {
+				return fmt.Errorf("download: write piece %d failed: %w", res.Index, err)
+			}
+			progress.Add(len(res.Data))
+			completed++
+		}
+	}
+
+	return nil
+}
+
+// startWorkersCtx is like startWorkers but respects context cancellation.
+func startWorkersCtx(ctx context.Context, peers []tracker.Peer, infoHash, peerID [20]byte, workCh chan PieceWork, progress *Progress) <-chan PieceResult {
+	resultCh := make(chan PieceResult, cap(workCh))
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, MaxPeers)
+
+	for _, p := range peers {
+		wg.Add(1)
+		go func(p tracker.Peer) {
+			defer wg.Done()
+
+			select {
+			case <-ctx.Done():
+				return
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			}
+
+			client, err := NewClient(p, infoHash, peerID)
+			if err != nil {
+				return
+			}
+			defer func() { _ = client.Close() }()
+
+			progress.PeerConnect()
+			defer progress.PeerDisconnect()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case pw, ok := <-workCh:
+					if !ok {
+						return
+					}
+					if !client.HasPiece(pw.Index) {
+						workCh <- pw
+						continue
+					}
+
+					data, err := client.DownloadPiece(pw)
+					if err != nil {
+						workCh <- pw
+						return
+					}
+
+					select {
+					case resultCh <- PieceResult{Index: pw.Index, Data: data}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}(p)
+	}
+
+	go func() {
+		wg.Wait()
+		close(workCh)
+		close(resultCh)
+	}()
+
+	return resultCh
 }
 
 func deduplicatePeers(peers []tracker.Peer) []tracker.Peer {
