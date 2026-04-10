@@ -14,12 +14,9 @@ var (
 // Decode decodes a bencoded byte slice into a Go value.
 // Returns one of: string, int64, []any, map[string]any.
 func Decode(data []byte) (any, error) {
-	val, rest, err := decodeValue(data)
+	val, _, err := decodeValue(data)
 	if err != nil {
 		return nil, err
-	}
-	if len(rest) > 0 {
-		return nil, fmt.Errorf("%w: trailing data after value", ErrInvalidFormat)
 	}
 	return val, nil
 }
@@ -163,8 +160,8 @@ func decodeDict(data []byte) (map[string]any, []byte, error) {
 			return nil, nil, err
 		}
 
-		// Keys must be sorted
-		if len(dict) > 0 && key <= prevKey {
+		// Keys must be sorted (allow duplicates — last value wins, like libtorrent)
+		if len(dict) > 0 && key < prevKey {
 			return nil, nil, fmt.Errorf("%w: dict keys not sorted: %q after %q", ErrInvalidFormat, key, prevKey)
 		}
 		prevKey = key

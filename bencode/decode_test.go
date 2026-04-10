@@ -128,6 +128,7 @@ func TestDecodeDict(t *testing.T) {
 		{"nested", "d4:infod4:name4:testee", 1, false},
 		{"non-string key", "di1e3:fooe", 0, true},
 		{"unsorted keys", "d4:spam4:eggs3:cow3:mooe", 0, true},
+		{"duplicate keys", "d3:cow3:moo3:cow4:moose", 1, false},
 		{"no end", "d3:cow3:moo", 0, true},
 	}
 	for _, tt := range tests {
