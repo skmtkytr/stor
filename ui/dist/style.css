@@ -187,9 +187,8 @@ header h1 { font-size: 1.25rem; color: #58a6ff; }
 .actions button:hover { background: #30363d; }
 .actions button.danger:hover { background: #f8514933; color: #f85149; }
 
-/* Checkbox column */
-.chk-col { width: 30px; text-align: center; }
-.chk-col input { cursor: pointer; accent-color: #58a6ff; }
+/* Row selection */
+#torrent-table tbody tr { cursor: default; user-select: none; }
 tr.selected { background: #1f6feb22 !important; }
 
 /* Selection count */

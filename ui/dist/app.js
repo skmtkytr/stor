@@ -177,11 +177,9 @@ function renderTorrents(torrents) {
     const size = t.total_bytes ? formatBytes(t.total_bytes) : "-";
     const name = t.name || t.id.slice(0, 12) + "...";
     const qpos = t.queue_position != null ? t.queue_position : "-";
-    const chk = selected.has(t.id) ? "checked" : "";
     const rowCls = selected.has(t.id) ? "selected" : "";
 
     return `<tr class="${rowCls}" data-id="${t.id}">
-      <td class="chk-col"><input type="checkbox" ${chk} data-id="${t.id}"></td>
       <td title="${t.id}">
         <div class="name">${esc(name)}</div>
         ${t.error ? `<div class="error-detail">${esc(t.error)}</div>` : ""}
@@ -225,40 +223,52 @@ function renderStats(stats) {
   $("#sel-count").textContent = selCount ? `${selCount} selected` : "";
 }
 
-// --- Selection: checkbox click + shift range ---
+// --- Selection: click row, Shift+click range, Ctrl/Cmd+click toggle ---
 
 $("#torrent-list").addEventListener("click", (e) => {
-  const cb = e.target.closest("input[type=checkbox]");
-  if (!cb) return;
-  const id = cb.dataset.id;
+  // Don't interfere with button clicks inside rows
+  if (e.target.closest("button")) return;
+
+  const row = e.target.closest("tr[data-id]");
+  if (!row) return;
+  const id = row.dataset.id;
   const idx = currentTorrents.findIndex((t) => t.id === id);
 
   if (e.shiftKey && lastChecked !== null) {
+    // Range select
     const from = Math.min(lastChecked, idx);
     const to = Math.max(lastChecked, idx);
+    if (!e.ctrlKey && !e.metaKey) selected.clear();
     for (let i = from; i <= to; i++) {
       selected.add(currentTorrents[i].id);
     }
-  } else {
+  } else if (e.ctrlKey || e.metaKey) {
+    // Toggle single
     if (selected.has(id)) selected.delete(id);
     else selected.add(id);
+  } else {
+    // Single select (replace)
+    selected.clear();
+    selected.add(id);
   }
   lastChecked = idx;
   renderTorrents(currentTorrents);
 });
 
-// Select all / none
-function selectAll() {
-  currentTorrents.forEach((t) => selected.add(t.id));
-  renderTorrents(currentTorrents);
-}
-function selectNone() {
-  selected.clear();
-  lastChecked = null;
-  renderTorrents(currentTorrents);
-}
-window.selectAll = selectAll;
-window.selectNone = selectNone;
+// Keyboard shortcuts: Ctrl+A select all, Escape deselect
+document.addEventListener("keydown", (e) => {
+  if (e.key === "a" && (e.ctrlKey || e.metaKey) && !e.target.closest("input")) {
+    e.preventDefault();
+    currentTorrents.forEach((t) => selected.add(t.id));
+    renderTorrents(currentTorrents);
+  }
+  if (e.key === "Escape") {
+    selected.clear();
+    lastChecked = null;
+    renderTorrents(currentTorrents);
+    ctxMenu.classList.remove("visible");
+  }
+});
 
 // --- Context menu ---
 

@@ -44,7 +44,6 @@
     <table id="torrent-table">
       <thead>
         <tr>
-          <th class="chk-col"><input type="checkbox" id="select-all-cb" title="Select all"></th>
           <th>Name</th>
           <th>Size</th>
           <th>Progress</th>
@@ -75,11 +74,5 @@
   <div id="toast" class="toast"></div>
 
   <script src="app.js"></script>
-  <script>
-    // Select all checkbox
-    document.getElementById("select-all-cb").addEventListener("change", function() {
-      if (this.checked) selectAll(); else selectNone();
-    });
-  </script>
 </body>
 </html>
