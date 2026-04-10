@@ -2,7 +2,7 @@ import type { TorrentInfo, EngineStats } from "./types";
 
 const API_KEY_STORAGE = "stor_api_key";
 
-let apiKey = $state(typeof localStorage !== "undefined" ? localStorage.getItem(API_KEY_STORAGE) ?? "" : "");
+let apiKey = typeof localStorage !== "undefined" ? localStorage.getItem(API_KEY_STORAGE) ?? "" : "";
 
 export function getApiKey(): string {
 	return apiKey;
