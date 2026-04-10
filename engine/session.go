@@ -162,17 +162,38 @@ func (s *Session) Pause() {
 }
 
 // run executes the torrent lifecycle: resolve → download (with upload) → seed.
+// If resumed from StateSeeding/StateComplete, skips straight to seed.
 func (s *Session) run(ctx context.Context) error {
 	if err := s.phaseResolve(ctx); err != nil {
 		return err
 	}
+
+	// If already completed (resumed seeding), skip download
+	if s.record.State == StateSeeding || s.record.State == StateComplete {
+		savePath := s.record.SavePath
+		if savePath == "" {
+			savePath = filepath.Join(s.downloadDir, s.tf.Info.Name)
+		}
+		// Verify we actually have the file
+		if _, err := os.Stat(savePath); err == nil {
+			slog.Info("resuming as seeder", "id", s.record.ID, "name", s.tf.Info.Name)
+			s.mu.Lock()
+			s.record.State = StateSeeding
+			s.record.SavePath = savePath
+			s.mu.Unlock()
+			return s.phaseSeedDirect(ctx, savePath)
+		}
+		// File missing — need to re-download
+		slog.Warn("seeding file missing, re-downloading", "id", s.record.ID, "path", savePath)
+	}
+
 	if err := s.phaseDownload(ctx); err != nil {
 		return err
 	}
 	return s.phaseSeed(ctx)
 }
 
-// phaseResolve obtains the TorrentFile and initial peers.
+// phaseResolve obtains the TorrentFile. If not yet seeding, also finds peers.
 func (s *Session) phaseResolve(ctx context.Context) error {
 	if s.tf == nil {
 		slog.Info("resolving metadata", "id", s.record.ID)
@@ -180,6 +201,11 @@ func (s *Session) phaseResolve(ctx context.Context) error {
 			return err
 		}
 		slog.Info("metadata resolved", "id", s.record.ID, "name", s.tf.Info.Name, "pieces", len(s.tf.Info.PieceHashes))
+	}
+
+	// If resuming as seeder, don't change state or look for peers
+	if s.record.State == StateSeeding || s.record.State == StateComplete {
+		return nil
 	}
 
 	s.mu.Lock()
@@ -320,6 +346,37 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 
 	slog.Info("download complete", "id", s.record.ID, "name", s.tf.Info.Name, "save_path", savePath)
 	return nil
+}
+
+// phaseSeedDirect starts seeding from a known-complete file (resume path).
+func (s *Session) phaseSeedDirect(ctx context.Context, savePath string) error {
+	numPieces := len(s.tf.Info.PieceHashes)
+	fullBF := make(peer.Bitfield, (numPieces+7)/8)
+	for i := range numPieces {
+		fullBF.SetPiece(i)
+	}
+
+	// Set up progress for stats
+	tl := download.TotalSize(s.tf)
+	progress := download.NewProgress(numPieces, tl)
+	progress.SetInitial(numPieces, tl, int64(s.tf.Info.PieceLength))
+	s.mu.Lock()
+	s.progress = progress
+	s.record.TotalBytes = tl
+	s.mu.Unlock()
+
+	// Start uploader
+	up := download.NewUploader(s.tf, savePath, s.peerID, fullBF)
+	s.mu.Lock()
+	s.uploader = up
+	s.mu.Unlock()
+	go up.Run(ctx)
+
+	if s.listener != nil {
+		s.listener.Register(s.tf.InfoHash, s)
+	}
+
+	return s.phaseSeed(ctx)
 }
 
 // phaseSeed keeps the session alive, serving pieces until stopped.
