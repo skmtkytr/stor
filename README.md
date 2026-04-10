@@ -1,25 +1,31 @@
 # stor
 
-A BitTorrent client written from scratch in Go. No external torrent libraries — every layer from bencoding to DHT is implemented following the BEP specifications.
+[日本語](README.ja.md)
 
-## Features
+A BitTorrent client built from the ground up in Go — no third-party torrent libraries. Every layer, from bencoding to Kademlia DHT, follows the BEP specifications directly.
 
-**Protocol**
-- BEP 3 — Core protocol with choking algorithm
-- BEP 5 — Kademlia DHT
-- BEP 9/10 — Magnet links via extension protocol
-- BEP 15 — UDP tracker
-- BEP 23 — Compact peer lists
+## Why
 
-**Architecture**: Daemon + Web UI + Chrome Extension — like Deluge, but a single static binary.
+Most Go BitTorrent implementations wrap anacrolix/torrent or similar. stor exists to understand the protocol by implementing it, and to ship a self-contained daemon that replaces a Deluge + WebUI + browser extension stack with a single binary.
 
-## Quick Start
+## Protocol Support
+
+| BEP | Spec | Status |
+|-----|------|--------|
+| 3 | The BitTorrent Protocol | Implemented (incl. choking algorithm) |
+| 5 | DHT Protocol | Implemented |
+| 9 | Extension for Peers to Send Metadata Files | Implemented |
+| 10 | Extension Protocol | Implemented |
+| 15 | UDP Tracker Protocol | Implemented |
+| 23 | Tracker Returns Compact Peer Lists | Implemented |
+
+## Getting Started
 
 ```sh
 make && ./stor daemon
 ```
 
-First run generates `~/.config/stor/config.toml` with an API key. Open `http://localhost:9090`.
+On first launch, a config file is created at `~/.config/stor/config.toml` with a generated API key. The web UI is served at `http://localhost:9090`.
 
 ### Docker
 
@@ -37,7 +43,9 @@ services:
     restart: unless-stopped
 ```
 
-### One-shot
+Multi-arch image (amd64 / arm64). ~9 MB (distroless).
+
+### Standalone Download
 
 ```sh
 ./stor magnet:?xt=urn:btih:...
@@ -46,50 +54,55 @@ services:
 
 ## Configuration
 
-`config.toml` — all values optional (shown = defaults):
+All parameters in `config.toml` are optional. Shown values are defaults.
 
 ```toml
 port = 9090
 download_dir = "~/Downloads"
 max_active = 5
 
-# Performance tuning
-max_peers = 100
-max_pipeline = 16
-dial_timeout = 3
-numwant = 200
-dht_alpha = 8
+# Peer and tracker tuning
+max_peers = 100       # concurrent connections per torrent
+max_pipeline = 16     # outstanding block requests per peer
+dial_timeout = 3      # seconds
+numwant = 200         # peers requested per tracker announce
+dht_alpha = 8         # DHT lookup concurrency
 ```
 
 ## Chrome Extension
 
-Load `extension/` as unpacked in `chrome://extensions`. Intercepts `.torrent` and `magnet:` links, right-click menu, popup with torrent management.
+Load `extension/` as an unpacked extension. Features:
 
-## Architecture
+- Automatic interception of `.torrent` and `magnet:` links
+- Context menu integration
+- Popup with torrent list and inline controls
+- Configurable per-option with connection test
+
+## Project Structure
 
 ```
-cmd/stor/       CLI (daemon + one-shot)
-daemon/         HTTP server, JSON-RPC 2.0, config
-engine/         Session lifecycle, queue, parallel magnet resolution
-download/       Piece download, peer manager, BEP 3 choking
-peer/           Wire protocol, extensions (BEP 10)
-tracker/        HTTP + UDP announce
-dht/            Kademlia routing, iterative lookup, get_peers
-magnet/         URI parsing, metadata fetch (BEP 9)
-torrent/        .torrent parsing
-bencode/        Encoder/decoder
-ui/             SvelteKit web UI (embedded in binary)
-extension/      Chrome extension (Manifest V3)
+cmd/stor/       Entry point — daemon and standalone modes
+daemon/         HTTP server, JSON-RPC 2.0 API, configuration
+engine/         Torrent lifecycle, queue scheduling, parallel magnet resolution
+download/       Piece-level I/O, peer manager, BEP 3 choking
+peer/           Wire protocol, BEP 10 extension negotiation
+tracker/        HTTP and UDP announce clients
+dht/            Kademlia routing table, iterative lookup, get_peers
+magnet/         Magnet URI parsing, BEP 9 metadata fetch
+torrent/        .torrent file parser
+bencode/        Bencoding codec
+ui/             SvelteKit SPA, embedded in the binary at build time
+extension/      Chrome extension, Manifest V3
 ```
 
-## Building
+## Building from Source
 
-Go 1.26+, Bun
+Requires Go 1.26+ and Bun.
 
 ```sh
-make          # lint + test + build
-make build    # binary only
-make ui       # web UI only
+make            # fmt → vet → lint → test → build
+make test       # tests only
+make build      # binary only (includes UI build)
 ```
 
 ## License
