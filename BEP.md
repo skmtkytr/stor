@@ -53,7 +53,7 @@ ref: https://www.bittorrent.org/beps/bep_0000.html
 
 | BEP | タイトル | 状態 | 対応パッケージ | 実装状況 |
 |-----|---------|------|--------------|---------|
-| [BEP 5](https://www.bittorrent.org/beps/bep_0005.html) | DHT Protocol | Accepted | `dht/` | ⬜ 未着手 |
+| [BEP 5](https://www.bittorrent.org/beps/bep_0005.html) | DHT Protocol | Accepted | `dht/` | ✅ 完了 |
 
 **BEP 5 (DHT):**
 - Kademlia ベースの分散ハッシュテーブル

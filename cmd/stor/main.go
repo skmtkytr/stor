@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/skmtkytr/stor/bencode"
+	dhtpkg "github.com/skmtkytr/stor/dht"
 	"github.com/skmtkytr/stor/download"
 	"github.com/skmtkytr/stor/magnet"
 	"github.com/skmtkytr/stor/peer"
@@ -324,6 +325,14 @@ func printTorrentInfo(tf *torrent.TorrentFile) {
 	}
 }
 
+// Well-known DHT bootstrap nodes.
+var dhtBootstrapNodes = []string{
+	"router.bittorrent.com:6881",
+	"dht.transmissionbt.com:6881",
+	"router.utorrent.com:6881",
+	"dht.libtorrent.org:25401",
+}
+
 func announceToTrackers(tf *torrent.TorrentFile, peerID [20]byte) ([]tracker.Peer, error) {
 	var allPeers []tracker.Peer
 	var mu sync.Mutex
@@ -348,8 +357,9 @@ func announceToTrackers(tf *torrent.TorrentFile, peerID [20]byte) ([]tracker.Pee
 	}
 	trackers = unique
 
-	fmt.Printf("\nContacting %d tracker(s)...\n", len(trackers))
+	fmt.Printf("\nContacting %d tracker(s) + DHT...\n", len(trackers))
 
+	// Tracker announces (parallel)
 	for _, tr := range trackers {
 		wg.Add(1)
 		go func(tr string) {
@@ -375,16 +385,66 @@ func announceToTrackers(tf *torrent.TorrentFile, peerID [20]byte) ([]tracker.Pee
 				fmt.Fprintf(os.Stderr, "  tracker %s: %v\n", tr, err)
 				return
 			}
-			fmt.Printf("  %s: %d peers\n", tr, len(resp.Peers))
+			fmt.Printf("  tracker %s: %d peers\n", tr, len(resp.Peers))
 			mu.Lock()
 			allPeers = append(allPeers, resp.Peers...)
 			mu.Unlock()
 		}(tr)
 	}
+
+	// DHT lookup (parallel with trackers)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		d, err := dhtpkg.New(":0")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  DHT: start failed: %v\n", err)
+			return
+		}
+		defer func() { _ = d.Close() }()
+
+		if err := d.Bootstrap(dhtBootstrapNodes); err != nil {
+			fmt.Fprintf(os.Stderr, "  DHT: bootstrap failed: %v\n", err)
+			return
+		}
+
+		fmt.Printf("  DHT: bootstrapped (%d nodes)\n", d.TableSize())
+
+		peerAddrs, err := d.GetPeers(tf.InfoHash)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  DHT: get_peers failed: %v\n", err)
+			return
+		}
+
+		var dhtPeers []tracker.Peer
+		for _, addr := range peerAddrs {
+			host, portStr, err := net.SplitHostPort(addr)
+			if err != nil {
+				continue
+			}
+			ip := net.ParseIP(host)
+			if ip == nil {
+				continue
+			}
+			var port uint16
+			if _, err := fmt.Sscanf(portStr, "%d", &port); err == nil {
+				dhtPeers = append(dhtPeers, tracker.Peer{IP: ip, Port: port})
+			}
+		}
+
+		if len(dhtPeers) > 0 {
+			fmt.Printf("  DHT: %d peers\n", len(dhtPeers))
+			mu.Lock()
+			allPeers = append(allPeers, dhtPeers...)
+			mu.Unlock()
+		}
+	}()
+
 	wg.Wait()
 
 	if len(allPeers) == 0 {
-		return nil, fmt.Errorf("no peers found from any tracker")
+		return nil, fmt.Errorf("no peers found from any tracker or DHT")
 	}
 
 	fmt.Printf("Total: %d peers\n", len(allPeers))
