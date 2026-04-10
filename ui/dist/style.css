@@ -123,7 +123,7 @@ header h1 { font-size: 1.25rem; color: #58a6ff; }
 #torrent-table td {
   font-size: 0.8rem;
 }
-/* Column resize */
+/* Column resize — default widths are set as inline styles on <col> in HTML */
 #torrent-table th { position: relative; }
 .col-resize {
   position: absolute;

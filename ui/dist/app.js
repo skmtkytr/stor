@@ -372,21 +372,19 @@ const COL_WIDTHS_KEY = "stor_col_widths";
   const cols = [...table.querySelectorAll("colgroup col")];
   const ths = [...table.querySelectorAll("thead th")];
 
-  // Restore saved widths or snapshot initial render
+  // Restore saved widths, with sanity checks
   const saved = (() => {
-    try { return JSON.parse(localStorage.getItem(COL_WIDTHS_KEY)); } catch { return null; }
+    try {
+      const v = JSON.parse(localStorage.getItem(COL_WIDTHS_KEY));
+      if (Array.isArray(v) && v.length === cols.length && v.every((w) => w >= 40 && w <= 2000)) return v;
+    } catch { /* ignore */ }
+    return null;
   })();
 
-  requestAnimationFrame(() => {
-    ths.forEach((th, i) => {
-      if (!cols[i]) return;
-      if (saved && saved[i]) {
-        cols[i].style.width = saved[i] + "px";
-      } else {
-        cols[i].style.width = th.offsetWidth + "px";
-      }
-    });
-  });
+  if (saved) {
+    saved.forEach((w, i) => { if (cols[i]) cols[i].style.width = w + "px"; });
+  }
+  // If no saved widths, the inline styles on <col> in HTML provide defaults
 
   function saveWidths() {
     const widths = ths.map((th) => th.offsetWidth);
