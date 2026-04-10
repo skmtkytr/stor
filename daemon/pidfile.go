@@ -21,7 +21,7 @@ func AcquirePIDFile(path string) error {
 	// Check for existing PID file
 	if data, err := os.ReadFile(path); err == nil {
 		pidStr := strings.TrimSpace(string(data))
-		if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
+		if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 && pid != os.Getpid() {
 			// Check if process is alive
 			proc, err := os.FindProcess(pid)
 			if err == nil {
