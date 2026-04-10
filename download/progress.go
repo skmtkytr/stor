@@ -25,6 +25,18 @@ func NewProgress(totalPieces int, totalBytes int64) *Progress {
 	}
 }
 
+// SetInitial sets the initial completed pieces count for resume.
+// pieceLength is used to estimate downloaded bytes for already-verified pieces.
+func (p *Progress) SetInitial(completedPieces int, totalBytes int64, pieceLength int64) {
+	p.completed.Store(int32(completedPieces))
+	// Estimate bytes from completed pieces (last piece may be shorter)
+	estimated := int64(completedPieces) * pieceLength
+	if estimated > totalBytes {
+		estimated = totalBytes
+	}
+	p.downloaded.Store(estimated)
+}
+
 // Add records a completed piece.
 func (p *Progress) Add(bytes int) {
 	p.completed.Add(1)

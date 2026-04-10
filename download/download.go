@@ -361,6 +361,24 @@ func startWorkers(peers []tracker.Peer, infoHash, peerID [20]byte, workCh chan P
 	return resultCh
 }
 
+// buildWorkQueueWithBitfield builds a work queue, skipping pieces present in have.
+func buildWorkQueueWithBitfield(tf *torrent.TorrentFile, totalLength int64, have peer.Bitfield) chan PieceWork {
+	numPieces := len(tf.Info.PieceHashes)
+	workCh := make(chan PieceWork, numPieces)
+	for i, hash := range tf.Info.PieceHashes {
+		if have != nil && have.HasPiece(i) {
+			continue // already downloaded
+		}
+		length := int(tf.Info.PieceLength)
+		remaining := int(totalLength) - i*int(tf.Info.PieceLength)
+		if remaining < length {
+			length = remaining
+		}
+		workCh <- PieceWork{Index: i, Hash: hash, Length: length}
+	}
+	return workCh
+}
+
 func buildWorkQueue(tf *torrent.TorrentFile, totalLength int64) chan PieceWork {
 	numPieces := len(tf.Info.PieceHashes)
 	workCh := make(chan PieceWork, numPieces)
@@ -467,6 +485,7 @@ type DownloadParams struct {
 	Path     string
 	Progress *Progress
 	Cfg      DownloadConfig
+	Have     peer.Bitfield // pieces already downloaded (for resume)
 }
 
 // DownloadToFileCtx is like DownloadToFile but accepts a context for cancellation.
@@ -484,13 +503,14 @@ func DownloadToFileCtxWithConfig(ctx context.Context, tf *torrent.TorrentFile, p
 }
 
 // DownloadWithParams runs a download session with full control over parameters.
-// Supports dynamic peer injection via PeerCh.
+// Supports dynamic peer injection via PeerCh and resume via Have bitfield.
 func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 	tl := TotalSize(p.TF)
 	numPieces := len(p.TF.Info.PieceHashes)
 	peers := deduplicatePeers(p.Peers)
 
-	f, err := os.Create(p.Path)
+	// Open file for resume (preserve existing data)
+	f, err := os.OpenFile(p.Path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return err
 	}
@@ -500,11 +520,28 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 		return fmt.Errorf("download: truncate failed: %w", err)
 	}
 
-	workCh := buildWorkQueue(p.TF, tl)
+	// Count already-completed pieces and build work queue for remaining
+	alreadyDone := 0
+	if p.Have != nil {
+		for i := range numPieces {
+			if p.Have.HasPiece(i) {
+				alreadyDone++
+			}
+		}
+	}
+
+	workCh := buildWorkQueueWithBitfield(p.TF, tl, p.Have)
+	remaining := numPieces - alreadyDone
+
+	// Initialize progress with already-completed pieces
+	if alreadyDone > 0 {
+		p.Progress.SetInitial(alreadyDone, tl, int64(p.TF.Info.PieceLength))
+	}
+
 	resultCh := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, workCh, p.PeerCh, p.Progress, p.Cfg)
 
 	pieceLength := int(p.TF.Info.PieceLength)
-	for completed := 0; completed < numPieces; {
+	for completed := 0; completed < remaining; {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

@@ -172,14 +172,24 @@ func (s *Session) run(ctx context.Context) error {
 	// Step 3: Download
 	tl := download.TotalSize(s.tf)
 	numPieces := len(s.tf.Info.PieceHashes)
+	savePath := filepath.Join(s.downloadDir, s.tf.Info.Name)
+
+	// Resume: verify existing pieces on disk
+	var haveBitfield peer.Bitfield
+	bf, verified, err := download.VerifyPieces(savePath, s.tf)
+	if err == nil && verified > 0 {
+		haveBitfield = bf
+		s.mu.Lock()
+		s.record.Bitfield = []byte(bf)
+		s.mu.Unlock()
+		slog.Info("resume: verified existing pieces", "id", s.record.ID, "verified", verified, "total", numPieces)
+	}
 
 	progress := download.NewProgress(numPieces, tl)
 	s.mu.Lock()
 	s.progress = progress
 	s.record.TotalBytes = tl
 	s.mu.Unlock()
-
-	savePath := filepath.Join(s.downloadDir, s.tf.Info.Name)
 
 	// Create peer channel for dynamic injection (used by re-announce in the future)
 	peerCh := make(chan []tracker.Peer, 16)
@@ -239,6 +249,7 @@ func (s *Session) run(ctx context.Context) error {
 		Path:     savePath,
 		Progress: progress,
 		Cfg:      s.dlCfg,
+		Have:     haveBitfield,
 	}); err != nil {
 		return err
 	}
