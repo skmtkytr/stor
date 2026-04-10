@@ -20,8 +20,12 @@
 	let lastIdx = $state<number | null>(null);
 	let sortKey = $state<string>("queue");
 	let sortDesc = $state(false);
+	let sortVersion = $state(0); // bumped on sort change to trigger re-sort
 	let container: HTMLDivElement;
 	let initialized = $state(false);
+
+	// Stable order: sort once per sort-change, then just update data in place
+	let sortedIds = $state<string[]>([]);
 
 	const visibleCols = $derived(columns.filter((c) => c.visible));
 
@@ -30,7 +34,6 @@
 		if (container && !initialized && columns.length > 0) {
 			const saved = loadColConfig();
 			if (!saved) {
-				// First load: stretch Name to fill
 				const containerW = container.clientWidth;
 				const others = columns.filter((c) => c.id !== "name" && c.visible);
 				const fixedSum = others.reduce((s, c) => s + c.width, 0);
@@ -67,18 +70,40 @@
 		}
 	}
 
-	const sorted = $derived(
-		[...torrents].sort((a, b) => {
+	function doSort(list: TorrentInfo[]): TorrentInfo[] {
+		return [...list].sort((a, b) => {
 			const va = getSortValue(a, sortKey);
 			const vb = getSortValue(b, sortKey);
 			const cmp = typeof va === "string" ? va.localeCompare(vb as string) : (va as number) - (vb as number);
 			return sortDesc ? -cmp : cmp;
-		})
+		});
+	}
+
+	// Re-sort only when sort key/direction changes or torrents are added/removed
+	$effect(() => {
+		// Dependencies: sortVersion, torrents length, torrent IDs
+		const ids = new Set(torrents.map((t) => t.id));
+		const _ = sortVersion; // explicit dependency
+		if (ids.size !== sortedIds.length || sortedIds.some((id) => !ids.has(id))) {
+			// Torrents added or removed — full re-sort
+			sortedIds = doSort(torrents).map((t) => t.id);
+		}
+	});
+
+	// Map for fast lookup
+	const torrentMap = $derived(new Map(torrents.map((t) => [t.id, t])));
+
+	// Build display list: stable order from sortedIds, with live data from torrentMap
+	const sorted = $derived(
+		sortedIds.map((id) => torrentMap.get(id)).filter((t): t is TorrentInfo => t !== undefined)
 	);
 
 	function toggleSort(key: string) {
 		if (sortKey === key) sortDesc = !sortDesc;
 		else { sortKey = key; sortDesc = false; }
+		// Force re-sort
+		sortedIds = doSort(torrents).map((t) => t.id);
+		sortVersion++;
 	}
 
 	// --- Selection ---

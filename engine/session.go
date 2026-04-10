@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -99,11 +100,12 @@ func (s *Session) Start(ctx context.Context, onDone func(id string)) {
 		defer cancel()
 		err := s.run(ctx)
 		s.mu.Lock()
-		if err != nil {
+		if err != nil && !errors.Is(err, context.Canceled) {
 			s.err = err
 			s.record.State = StateError
 			s.record.Error = err.Error()
 		}
+		// If context was canceled (pause), state is already set by Pause()
 		s.mu.Unlock()
 		if onDone != nil {
 			onDone(s.record.ID)
