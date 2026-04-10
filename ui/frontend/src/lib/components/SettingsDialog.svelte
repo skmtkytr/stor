@@ -7,9 +7,15 @@
 
 	let maxActive = $state(5);
 	let saveMsg = $state("");
+	let initialized = $state(false);
 
+	// Only sync from server when dialog opens, not on every poll
 	$effect(() => {
-		if (torrents.stats) maxActive = torrents.stats.max_active;
+		if (open && !initialized && torrents.stats) {
+			maxActive = torrents.stats.max_active;
+			initialized = true;
+		}
+		if (!open) initialized = false;
 	});
 
 	async function saveMaxActive() {

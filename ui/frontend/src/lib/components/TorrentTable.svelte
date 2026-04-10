@@ -45,12 +45,17 @@
 		switch (key) {
 			case "name": return t.name ?? t.id;
 			case "size": return t.total_bytes ?? 0;
-			case "progress": return t.progress.percent ?? 0;
-			case "speed": return t.state === "downloading" ? (t.progress.down_speed ?? 0) : 0;
+			case "progress": return Math.round(t.progress.percent ?? 0);
+			case "speed": {
+				// Bucket by 100KB/s to avoid jitter from small speed fluctuations
+				const raw = t.state === "downloading" ? (t.progress.down_speed ?? 0) : 0;
+				return Math.round(raw / 102400);
+			}
 			case "eta": {
 				const p = t.progress;
 				if (t.state !== "downloading" || !p.down_speed) return Infinity;
-				return (p.total - p.downloaded) / p.down_speed;
+				// Bucket by 10s to avoid jitter
+				return Math.round((p.total - p.downloaded) / p.down_speed / 10);
 			}
 			case "peers": return t.progress.active_peers ?? 0;
 			case "state": return stateOrder[t.state] ?? 9;
@@ -74,7 +79,9 @@
 			const cmp = typeof va === "string"
 				? va.localeCompare(vb as string)
 				: (va as number) - (vb as number);
-			return desc ? -cmp : cmp;
+			const result = desc ? -cmp : cmp;
+			// Stable sort: tie-break by ID to prevent row jumping
+			return result !== 0 ? result : a.id.localeCompare(b.id);
 		});
 	});
 

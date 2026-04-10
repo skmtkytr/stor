@@ -262,14 +262,9 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 	e.store.Put(record)
 	_ = e.store.Save()
 
-	// Start if under MaxActive limit
-	active := e.activeCount()
-	if active < e.cfg.MaxActive {
-		slog.Info("starting torrent", "id", id, "active", active, "max_active", e.cfg.MaxActive)
-		s.Start(e.ctx, e.onSessionDone)
-	} else {
-		slog.Info("torrent queued", "id", id, "active", active, "max_active", e.cfg.MaxActive, "queue_pos", record.QueuePosition)
-	}
+	// Always start immediately — MaxActive only limits auto-resume from queue
+	slog.Info("starting torrent", "id", id)
+	s.Start(e.ctx, e.onSessionDone)
 
 	return id, nil
 }
