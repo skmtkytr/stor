@@ -4,7 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/skmtkytr/stor/engine"
 )
@@ -49,21 +51,36 @@ func (h *RPCHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var req rpcRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		slog.Warn("rpc parse error", "error", err)
 		writeRPCError(w, nil, -32700, "parse error")
 		return
 	}
 
 	if req.JSONRPC != "2.0" {
+		slog.Warn("rpc invalid request", "jsonrpc", req.JSONRPC)
 		writeRPCError(w, req.ID, -32600, "invalid request: jsonrpc must be 2.0")
 		return
 	}
 
+	start := time.Now()
 	result, rpcError := h.dispatch(req.Method, req.Params)
+	duration := time.Since(start)
+
 	if rpcError != nil {
+		slog.Warn("rpc error",
+			"method", req.Method,
+			"code", rpcError.Code,
+			"error", rpcError.Message,
+			"duration_ms", duration.Milliseconds(),
+		)
 		writeJSON(w, rpcResponse{JSONRPC: "2.0", Error: rpcError, ID: req.ID})
 		return
 	}
 
+	slog.Info("rpc call",
+		"method", req.Method,
+		"duration_ms", duration.Milliseconds(),
+	)
 	writeJSON(w, rpcResponse{JSONRPC: "2.0", Result: result, ID: req.ID})
 }
 

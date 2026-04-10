@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"syscall"
@@ -109,6 +110,13 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("engine: load store: %w", err)
 	}
 
+	slog.Info("engine created",
+		"download_dir", cfg.DownloadDir,
+		"max_active", cfg.MaxActive,
+		"max_peers", cfg.MaxPeers,
+		"listen_port", cfg.ListenPort,
+	)
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	e := &Engine{
@@ -134,16 +142,22 @@ func (e *Engine) Start() error {
 	if err == nil {
 		_ = d.Bootstrap(dhtBootstrapNodes)
 		e.dht = d
+		slog.Info("dht started", "bootstrap_nodes", len(dhtBootstrapNodes))
+	} else {
+		slog.Warn("dht failed to start", "error", err)
 	}
 
 	// Restore sessions from store
-	for _, r := range e.store.All() {
+	records := e.store.All()
+	slog.Info("restoring sessions", "count", len(records))
+	for _, r := range records {
 		s := NewSession(r, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht)
 
 		e.sessions[r.ID] = s
 
 		// Auto-resume downloading torrents
 		if r.State == StateDownloading || r.State == StateMetadata {
+			slog.Info("resuming torrent", "id", r.ID, "name", r.Name, "state", r.State)
 			s.Start(e.ctx, e.onSessionDone)
 		}
 	}
@@ -167,6 +181,7 @@ func (e *Engine) Start() error {
 
 // Stop gracefully shuts down all sessions and persists state.
 func (e *Engine) Stop() error {
+	slog.Info("engine stopping", "sessions", len(e.sessions))
 	e.cancel()
 
 	if e.saveTicker != nil {
@@ -179,6 +194,7 @@ func (e *Engine) Stop() error {
 	}
 
 	e.saveState()
+	slog.Info("engine stopped, state saved")
 	return nil
 }
 
@@ -193,8 +209,11 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 	defer e.mu.Unlock()
 
 	if _, exists := e.sessions[id]; exists {
+		slog.Debug("torrent already exists", "id", id)
 		return id, nil // already exists
 	}
+
+	slog.Info("adding torrent", "id", id, "source", source)
 
 	record := &TorrentRecord{
 		ID:            id,
@@ -219,8 +238,12 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 	_ = e.store.Save()
 
 	// Start if under MaxActive limit
-	if e.activeCount() < e.cfg.MaxActive {
+	active := e.activeCount()
+	if active < e.cfg.MaxActive {
+		slog.Info("starting torrent", "id", id, "active", active, "max_active", e.cfg.MaxActive)
 		s.Start(e.ctx, e.onSessionDone)
+	} else {
+		slog.Info("torrent queued", "id", id, "active", active, "max_active", e.cfg.MaxActive, "queue_pos", record.QueuePosition)
 	}
 
 	return id, nil
@@ -251,6 +274,7 @@ func (e *Engine) RemoveTorrent(id string, deleteFiles bool) error {
 		return fmt.Errorf("engine: torrent %s not found", id)
 	}
 
+	slog.Info("removing torrent", "id", id, "delete_files", deleteFiles)
 	s.Pause()
 	delete(e.sessions, id)
 	e.store.Delete(id)
@@ -261,6 +285,7 @@ func (e *Engine) RemoveTorrent(id string, deleteFiles bool) error {
 	if deleteFiles {
 		r := s.Record()
 		if r.SavePath != "" {
+			slog.Info("deleting torrent files", "id", id, "path", r.SavePath)
 			_ = os.RemoveAll(r.SavePath)
 		}
 	}
@@ -279,6 +304,7 @@ func (e *Engine) PauseTorrent(id string) error {
 		return fmt.Errorf("engine: torrent %s not found", id)
 	}
 
+	slog.Info("pausing torrent", "id", id)
 	s.Pause()
 	e.saveState()
 	e.startQueued()
@@ -300,6 +326,7 @@ func (e *Engine) ResumeTorrent(id string) error {
 		return fmt.Errorf("engine: torrent %s is %s, cannot resume", id, r.State)
 	}
 
+	slog.Info("resuming torrent", "id", id, "previous_state", r.State)
 	s.mu.Lock()
 	s.record.State = StateAdding
 	s.record.Error = ""
@@ -570,6 +597,13 @@ func (e *Engine) activeCount() int {
 }
 
 func (e *Engine) onSessionDone(id string) {
+	e.mu.RLock()
+	s, ok := e.sessions[id]
+	e.mu.RUnlock()
+	if ok {
+		r := s.Record()
+		slog.Info("session done", "id", id, "name", r.Name, "state", r.State, "error", r.Error)
+	}
 	e.saveState()
 	e.startQueued()
 }
@@ -603,6 +637,8 @@ func (e *Engine) startQueuedLocked() {
 		if active >= e.cfg.MaxActive {
 			break
 		}
+		r := s.Record()
+		slog.Info("starting queued torrent", "id", r.ID, "name", r.Name, "queue_pos", r.QueuePosition)
 		s.Start(e.ctx, e.onSessionDone)
 		active++
 	}
@@ -633,5 +669,9 @@ func (e *Engine) saveStateLocked() {
 		r := s.Record()
 		e.store.Put(r)
 	}
-	_ = e.store.Save()
+	if err := e.store.Save(); err != nil {
+		slog.Error("failed to save state", "error", err)
+	} else {
+		slog.Debug("state saved", "sessions", len(e.sessions))
+	}
 }

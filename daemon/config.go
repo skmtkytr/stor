@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,6 +19,9 @@ type Config struct {
 	APIKey      string `toml:"api_key"`
 	StatePath   string `toml:"state_path"`
 	MaxActive   int    `toml:"max_active"`
+
+	// Logging
+	LogLevel string `toml:"log_level"` // debug, info, warn, error (default: info)
 
 	// Performance tuning (0 = use defaults)
 	MaxPeers    int `toml:"max_peers"`
@@ -38,6 +42,7 @@ func DefaultConfig() Config {
 		DownloadDir: filepath.Join(home, "Downloads"),
 		StatePath:   filepath.Join(configDir, "state.json"),
 		MaxActive:   5,
+		LogLevel:    "info",
 	}
 }
 
@@ -90,7 +95,8 @@ download_dir = %q
 api_key = %q
 state_path = %q
 max_active = %d
-`, c.Port, c.DownloadDir, c.APIKey, c.StatePath, c.MaxActive)
+log_level = %q
+`, c.Port, c.DownloadDir, c.APIKey, c.StatePath, c.MaxActive, c.LogLevel)
 
 	return os.WriteFile(c.path, []byte(content), 0o600)
 }
@@ -130,6 +136,8 @@ func parseTOML(data string, cfg *Config) {
 			if n, err := strconv.Atoi(val); err == nil {
 				cfg.MaxActive = n
 			}
+		case "log_level":
+			cfg.LogLevel = val
 		case "max_peers":
 			if n, err := strconv.Atoi(val); err == nil {
 				cfg.MaxPeers = n
@@ -151,6 +159,20 @@ func parseTOML(data string, cfg *Config) {
 				cfg.DHTAlpha = n
 			}
 		}
+	}
+}
+
+// ParseLogLevel converts a log level string to slog.Level.
+func ParseLogLevel(s string) slog.Level {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
 }
 

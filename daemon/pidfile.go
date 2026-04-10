@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,6 +28,7 @@ func AcquirePIDFile(path string) error {
 				// Signal 0 checks existence without killing
 				if err := proc.Signal(syscall.Signal(0)); err == nil {
 					// Process is alive — kill it
+					slog.Info("stopping previous daemon", "pid", pid)
 					fmt.Printf("Stopping previous daemon (PID %d)...\n", pid)
 					_ = proc.Signal(syscall.SIGTERM)
 
@@ -40,6 +42,7 @@ func AcquirePIDFile(path string) error {
 
 					// Force kill if still alive
 					if err := proc.Signal(syscall.Signal(0)); err == nil {
+						slog.Warn("force killing previous daemon", "pid", pid)
 						_ = proc.Signal(syscall.SIGKILL)
 					}
 				}

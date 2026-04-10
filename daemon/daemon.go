@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -43,7 +44,7 @@ func New(eng *engine.Engine, cfg Config) *Daemon {
 
 	d.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
-		Handler:           d.corsMiddleware(mux),
+		Handler:           d.logMiddleware(d.corsMiddleware(mux)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -60,6 +61,42 @@ func (d *Daemon) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return d.server.Shutdown(ctx)
+}
+
+// statusWriter wraps http.ResponseWriter to capture the status code.
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.code = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// logMiddleware logs every HTTP request with method, path, status, and duration.
+func (d *Daemon) logMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		duration := time.Since(start)
+
+		level := slog.LevelInfo
+		if sw.code >= 400 {
+			level = slog.LevelWarn
+		}
+		if sw.code >= 500 {
+			level = slog.LevelError
+		}
+
+		slog.Log(r.Context(), level, "http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.code,
+			"duration_ms", duration.Milliseconds(),
+		)
+	})
 }
 
 // handleAdd is a simplified endpoint for adding torrents (for Chrome extension).
@@ -88,9 +125,11 @@ func (d *Daemon) handleAdd(w http.ResponseWriter, r *http.Request) {
 
 		id, err := d.engine.AddTorrentFile(data)
 		if err != nil {
+			slog.Error("add torrent file failed", "error", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		slog.Info("torrent added via file upload", "id", id)
 		writeJSON(w, map[string]string{"id": id})
 		return
 	}
@@ -109,9 +148,11 @@ func (d *Daemon) handleAdd(w http.ResponseWriter, r *http.Request) {
 
 	id, err := d.engine.AddTorrent(url)
 	if err != nil {
+		slog.Error("add torrent failed", "source", url, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	slog.Info("torrent added via url", "id", id, "source", url)
 	writeJSON(w, map[string]string{"id": id})
 }
 
@@ -125,11 +166,13 @@ func (d *Daemon) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
+			slog.Warn("auth failed: missing bearer token", "path", r.URL.Path, "remote", r.RemoteAddr)
 			http.Error(w, "unauthorized: missing Bearer token", http.StatusUnauthorized)
 			return
 		}
 		token := strings.TrimSpace(auth[7:])
 		if subtle.ConstantTimeCompare([]byte(token), []byte(d.cfg.APIKey)) != 1 {
+			slog.Warn("auth failed: invalid key", "path", r.URL.Path, "remote", r.RemoteAddr)
 			http.Error(w, fmt.Sprintf("unauthorized: invalid key (got %d chars, want %d)", len(token), len(d.cfg.APIKey)), http.StatusUnauthorized)
 			return
 		}

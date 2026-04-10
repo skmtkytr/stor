@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -101,6 +102,19 @@ func runDaemon() {
 		cfg.DownloadDir = dir
 	}
 
+	// Initialize structured logging
+	logLevel := daemon.ParseLogLevel(cfg.LogLevel)
+	logHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+	slog.SetDefault(slog.New(logHandler))
+
+	slog.Info("config loaded",
+		"path", configPath,
+		"port", cfg.Port,
+		"download_dir", cfg.DownloadDir,
+		"log_level", cfg.LogLevel,
+		"max_active", cfg.MaxActive,
+	)
+
 	engCfg := engine.Config{
 		DownloadDir: cfg.DownloadDir,
 		StatePath:   cfg.StatePath,
@@ -133,6 +147,13 @@ func runDaemon() {
 
 	d := daemon.New(eng, cfg)
 
+	slog.Info("daemon starting",
+		"pid", os.Getpid(),
+		"listen", fmt.Sprintf("0.0.0.0:%d", cfg.Port),
+		"download_dir", cfg.DownloadDir,
+		"web_ui", fmt.Sprintf("http://localhost:%d/", cfg.Port),
+	)
+
 	fmt.Printf("stor daemon (PID %d)\n", os.Getpid())
 	fmt.Printf("  API Key:      %s\n", cfg.APIKey)
 	fmt.Printf("  Listen:       0.0.0.0:%d\n", cfg.Port)
@@ -146,17 +167,17 @@ func runDaemon() {
 
 	go func() {
 		if err := d.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
+			slog.Error("daemon listen failed", "error", err)
 			os.Exit(1)
 		}
 	}()
 
-	<-sigCh
-	fmt.Println("\nShutting down...")
+	sig := <-sigCh
+	slog.Info("shutdown signal received", "signal", sig.String())
 	_ = d.Stop()
 	_ = eng.Stop()
 	daemon.ReleasePIDFile(pidPath)
-	fmt.Println("Bye.")
+	slog.Info("daemon stopped")
 }
 
 // --- One-shot download mode (legacy) ---

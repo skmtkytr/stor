@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -105,12 +106,14 @@ func (s *Session) Start(ctx context.Context, onDone func(id string)) {
 
 	go func() {
 		defer cancel()
+		slog.Info("session started", "id", s.record.ID, "source", s.record.Source)
 		err := s.run(ctx)
 		s.mu.Lock()
 		if err != nil && !errors.Is(err, context.Canceled) {
 			s.err = err
 			s.record.State = StateError
 			s.record.Error = err.Error()
+			slog.Error("session failed", "id", s.record.ID, "name", s.record.Name, "error", err)
 		}
 		// If context was canceled (pause), state is already set by Pause()
 		s.mu.Unlock()
@@ -139,9 +142,11 @@ func (s *Session) Pause() {
 func (s *Session) run(ctx context.Context) error {
 	// Step 1: Resolve TorrentFile if we don't have one
 	if s.tf == nil {
+		slog.Info("resolving metadata", "id", s.record.ID)
 		if err := s.resolveMetadata(ctx); err != nil {
 			return err
 		}
+		slog.Info("metadata resolved", "id", s.record.ID, "name", s.tf.Info.Name, "pieces", len(s.tf.Info.PieceHashes))
 	}
 
 	// Step 2: Find peers (skipped for magnets — already collected during resolveMetadata)
@@ -153,12 +158,14 @@ func (s *Session) run(ctx context.Context) error {
 	if len(s.cachedPeers) > 0 {
 		peers = s.cachedPeers
 		s.cachedPeers = nil
+		slog.Info("using cached peers", "id", s.record.ID, "count", len(peers))
 	} else {
 		var err error
 		peers, err = s.findPeers(ctx)
 		if err != nil {
 			return err
 		}
+		slog.Info("peers discovered", "id", s.record.ID, "count", len(peers))
 	}
 
 	// Step 3: Download
@@ -172,6 +179,14 @@ func (s *Session) run(ctx context.Context) error {
 	s.mu.Unlock()
 
 	savePath := filepath.Join(s.downloadDir, s.tf.Info.Name)
+	slog.Info("download starting",
+		"id", s.record.ID,
+		"name", s.tf.Info.Name,
+		"total_bytes", tl,
+		"pieces", numPieces,
+		"peers", len(peers),
+		"save_path", savePath,
+	)
 	if err := download.DownloadToFileCtxWithConfig(ctx, s.tf, s.peerID, peers, savePath, progress, s.dlCfg); err != nil {
 		return err
 	}
@@ -182,6 +197,7 @@ func (s *Session) run(ctx context.Context) error {
 	s.record.SavePath = savePath
 	s.mu.Unlock()
 
+	slog.Info("download complete", "id", s.record.ID, "name", s.tf.Info.Name, "save_path", savePath)
 	return nil
 }
 
@@ -221,6 +237,13 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 		return fmt.Errorf("session: parse magnet: %w", err)
 	}
 
+	slog.Info("resolving magnet",
+		"id", s.record.ID,
+		"info_hash", hex.EncodeToString(m.InfoHash[:]),
+		"trackers", len(m.Trackers),
+		"x_pe_peers", len(m.Peers),
+	)
+
 	// Collect peers from all sources in parallel.
 	// Feed them into metadata fetch as they arrive.
 	var peerMu sync.Mutex
@@ -244,9 +267,15 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 				NumWant:     s.numWant,
 			}
 			resp, err := tracker.Announce(req)
-			if err != nil || len(resp.Peers) == 0 {
+			if err != nil {
+				slog.Debug("tracker announce failed", "id", s.record.ID, "tracker", tr, "error", err)
 				return
 			}
+			if len(resp.Peers) == 0 {
+				slog.Debug("tracker returned no peers", "id", s.record.ID, "tracker", tr)
+				return
+			}
+			slog.Debug("tracker peers", "id", s.record.ID, "tracker", tr, "peers", len(resp.Peers))
 			peerMu.Lock()
 			allPeers = append(allPeers, resp.Peers...)
 			peerMu.Unlock()
@@ -260,10 +289,13 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 		defer wg.Done()
 		dhtPeers := s.dhtLookup(m.InfoHash)
 		if len(dhtPeers) > 0 {
+			slog.Debug("dht peers", "id", s.record.ID, "peers", len(dhtPeers))
 			peerMu.Lock()
 			allPeers = append(allPeers, dhtPeers...)
 			peerMu.Unlock()
 			peerCh <- dhtPeers
+		} else {
+			slog.Debug("dht returned no peers", "id", s.record.ID)
 		}
 	}()
 
@@ -337,9 +369,14 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 
 	res, ok := <-resultCh
 	if !ok {
+		peerMu.Lock()
+		totalPeers := len(allPeers)
+		peerMu.Unlock()
+		slog.Error("metadata fetch failed from all peers", "id", s.record.ID, "peers_tried", totalPeers)
 		return fmt.Errorf("session: failed to fetch metadata from any peer")
 	}
 	tf := res.tf
+	slog.Info("metadata fetched", "id", s.record.ID, "name", tf.Info.Name)
 
 	// Restore announce URLs
 	if len(m.Trackers) > 0 {
@@ -384,6 +421,7 @@ func (s *Session) dhtLookup(infoHash [20]byte) []tracker.Peer {
 		var err error
 		d, err = dhtpkg.New(":0")
 		if err != nil {
+			slog.Debug("dht lookup: failed to create node", "error", err)
 			return nil
 		}
 		_ = d.Bootstrap(dhtBootstrapNodes)
@@ -393,6 +431,7 @@ func (s *Session) dhtLookup(infoHash [20]byte) []tracker.Peer {
 
 	peerAddrs, err := d.GetPeers(infoHash)
 	if err != nil {
+		slog.Debug("dht GetPeers failed", "info_hash", hex.EncodeToString(infoHash[:]), "error", err)
 		return nil
 	}
 
@@ -462,6 +501,8 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 	// Collect tracker URLs
 	trackers := s.tf.TrackerURLs()
 
+	slog.Info("finding peers", "id", s.record.ID, "trackers", len(trackers))
+
 	// Tracker announces
 	for _, tr := range trackers {
 		wg.Add(1)
@@ -479,8 +520,10 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 			}
 			resp, err := tracker.Announce(req)
 			if err != nil {
+				slog.Debug("tracker announce failed", "id", s.record.ID, "tracker", tr, "error", err)
 				return
 			}
+			slog.Debug("tracker peers", "id", s.record.ID, "tracker", tr, "peers", len(resp.Peers))
 			mu.Lock()
 			allPeers = append(allPeers, resp.Peers...)
 			mu.Unlock()
@@ -493,6 +536,7 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 		defer wg.Done()
 		dhtPeers := s.dhtLookup(s.tf.InfoHash)
 		if len(dhtPeers) > 0 {
+			slog.Debug("dht peers", "id", s.record.ID, "peers", len(dhtPeers))
 			mu.Lock()
 			allPeers = append(allPeers, dhtPeers...)
 			mu.Unlock()
@@ -502,6 +546,7 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 	wg.Wait()
 
 	if len(allPeers) == 0 {
+		slog.Warn("no peers found", "id", s.record.ID)
 		return nil, fmt.Errorf("session: no peers found")
 	}
 	return allPeers, nil
