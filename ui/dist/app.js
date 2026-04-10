@@ -367,32 +367,40 @@ function toast(msg, isError) {
 
 (function initColumnResize() {
   const table = $("#torrent-table");
-  const cols = table.querySelectorAll("colgroup col");
-  const ths = table.querySelectorAll("thead th");
+  const cols = [...table.querySelectorAll("colgroup col")];
+  const ths = [...table.querySelectorAll("thead th")];
+
+  // Snapshot initial rendered widths into col elements as px values
+  // so table-layout:fixed uses them as the baseline
+  requestAnimationFrame(() => {
+    ths.forEach((th, i) => {
+      if (cols[i]) cols[i].style.width = th.offsetWidth + "px";
+    });
+  });
 
   ths.forEach((th, i) => {
     const handle = document.createElement("div");
     handle.className = "col-resize";
     th.appendChild(handle);
 
-    let startX, startW;
-
     handle.addEventListener("mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      startX = e.pageX;
-      startW = th.offsetWidth;
-      document.body.style.cursor = "col-resize";
+      const startX = e.pageX;
+      const startW = th.offsetWidth;
+      handle.classList.add("active");
 
-      const onMove = (e) => {
-        const w = Math.max(40, startW + e.pageX - startX);
+      const onMove = (ev) => {
+        const w = Math.max(40, startW + ev.pageX - startX);
         cols[i].style.width = w + "px";
       };
       const onUp = () => {
+        handle.classList.remove("active");
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
         document.body.style.cursor = "";
       };
+      document.body.style.cursor = "col-resize";
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
     });
