@@ -44,10 +44,12 @@ type Session struct {
 	port        uint16
 	dlCfg       download.DownloadConfig
 	numWant     int
+	dht         *dhtpkg.DHT    // shared DHT instance from engine (may be nil)
+	cachedPeers []tracker.Peer // peers collected during metadata phase (avoids double query)
 }
 
 // NewSession creates a session from a persisted record.
-func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir string, port uint16, dlCfg download.DownloadConfig, numWant int) *Session {
+func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir string, port uint16, dlCfg download.DownloadConfig, numWant int, dht *dhtpkg.DHT) *Session {
 	return &Session{
 		record:      record,
 		peerID:      peerID,
@@ -55,6 +57,7 @@ func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir string, port
 		port:        port,
 		dlCfg:       dlCfg,
 		numWant:     numWant,
+		dht:         dht,
 	}
 }
 
@@ -130,7 +133,9 @@ func (s *Session) Pause() {
 	}
 }
 
-// run executes the torrent lifecycle: resolve metadata → find peers → download.
+// run executes the torrent lifecycle.
+// For .torrent files: resolve → find peers → download.
+// For magnets: tracker/DHT/metadata fetch run in parallel for speed.
 func (s *Session) run(ctx context.Context) error {
 	// Step 1: Resolve TorrentFile if we don't have one
 	if s.tf == nil {
@@ -139,14 +144,21 @@ func (s *Session) run(ctx context.Context) error {
 		}
 	}
 
-	// Step 2: Find peers
+	// Step 2: Find peers (skipped for magnets — already collected during resolveMetadata)
 	s.mu.Lock()
 	s.record.State = StateDownloading
 	s.mu.Unlock()
 
-	peers, err := s.findPeers(ctx)
-	if err != nil {
-		return err
+	var peers []tracker.Peer
+	if len(s.cachedPeers) > 0 {
+		peers = s.cachedPeers
+		s.cachedPeers = nil
+	} else {
+		var err error
+		peers, err = s.findPeers(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Step 3: Download
@@ -160,8 +172,7 @@ func (s *Session) run(ctx context.Context) error {
 	s.mu.Unlock()
 
 	savePath := filepath.Join(s.downloadDir, s.tf.Info.Name)
-	err = download.DownloadToFileCtxWithConfig(ctx, s.tf, s.peerID, peers, savePath, progress, s.dlCfg)
-	if err != nil {
+	if err := download.DownloadToFileCtxWithConfig(ctx, s.tf, s.peerID, peers, savePath, progress, s.dlCfg); err != nil {
 		return err
 	}
 
@@ -175,6 +186,8 @@ func (s *Session) run(ctx context.Context) error {
 }
 
 // resolveMetadata gets the TorrentFile either from stored data or via magnet.
+// For magnets, tracker queries, DHT lookup, and metadata fetch run in parallel.
+// Discovered peers are cached in s.cachedPeers to avoid re-querying trackers.
 func (s *Session) resolveMetadata(ctx context.Context) error {
 	// If we have stored torrent data, parse it
 	if len(s.record.TorrentData) > 0 {
@@ -208,10 +221,54 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 		return fmt.Errorf("session: parse magnet: %w", err)
 	}
 
-	// Get peers from trackers for metadata fetch
-	peers := s.getPeersFromTrackers(ctx, m.Trackers, m.InfoHash)
+	// Collect peers from all sources in parallel.
+	// Feed them into metadata fetch as they arrive.
+	var peerMu sync.Mutex
+	var allPeers []tracker.Peer
+	peerCh := make(chan []tracker.Peer, 10)
 
-	// Add x.pe peers
+	var wg sync.WaitGroup
+
+	// Tracker announces (parallel)
+	for _, tr := range m.Trackers {
+		wg.Add(1)
+		go func(tr string) {
+			defer wg.Done()
+			req := tracker.AnnounceRequest{
+				AnnounceURL: tr,
+				InfoHash:    m.InfoHash,
+				PeerID:      s.peerID,
+				Port:        s.port,
+				Left:        1,
+				Event:       tracker.EventStarted,
+				NumWant:     s.numWant,
+			}
+			resp, err := tracker.Announce(req)
+			if err != nil || len(resp.Peers) == 0 {
+				return
+			}
+			peerMu.Lock()
+			allPeers = append(allPeers, resp.Peers...)
+			peerMu.Unlock()
+			peerCh <- resp.Peers
+		}(tr)
+	}
+
+	// DHT lookup (reuse shared instance if available)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		dhtPeers := s.dhtLookup(m.InfoHash)
+		if len(dhtPeers) > 0 {
+			peerMu.Lock()
+			allPeers = append(allPeers, dhtPeers...)
+			peerMu.Unlock()
+			peerCh <- dhtPeers
+		}
+	}()
+
+	// Add x.pe peers immediately
+	var xpePeers []tracker.Peer
 	for _, pe := range m.Peers {
 		host, portStr, splitErr := net.SplitHostPort(pe)
 		if splitErr != nil {
@@ -223,18 +280,66 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 		}
 		var port uint16
 		if _, scanErr := fmt.Sscanf(portStr, "%d", &port); scanErr == nil {
-			peers = append(peers, tracker.Peer{IP: ip, Port: port})
+			xpePeers = append(xpePeers, tracker.Peer{IP: ip, Port: port})
 		}
 	}
-
-	if len(peers) == 0 {
-		return fmt.Errorf("session: no peers found for magnet")
+	if len(xpePeers) > 0 {
+		peerMu.Lock()
+		allPeers = append(allPeers, xpePeers...)
+		peerMu.Unlock()
+		peerCh <- xpePeers
 	}
 
-	tf, err := fetchMetadataConcurrent(ctx, peers, m.InfoHash, s.peerID)
-	if err != nil {
-		return err
+	// Close peerCh when all sources are done
+	go func() {
+		wg.Wait()
+		close(peerCh)
+	}()
+
+	// Metadata fetch: start trying peers as they arrive
+	metaCtx, metaCancel := context.WithTimeout(ctx, 60*time.Second)
+	defer metaCancel()
+
+	type metaResult struct {
+		tf *torrent.TorrentFile
 	}
+	resultCh := make(chan metaResult, 1)
+	metaSem := make(chan struct{}, 20)
+
+	var metaWg sync.WaitGroup
+	go func() {
+		for batch := range peerCh {
+			for _, p := range batch {
+				metaWg.Add(1)
+				go func(p tracker.Peer) {
+					defer metaWg.Done()
+					select {
+					case <-metaCtx.Done():
+						return
+					case metaSem <- struct{}{}:
+						defer func() { <-metaSem }()
+					}
+					tf, err := fetchMetadataFromPeer(metaCtx, p, m.InfoHash, s.peerID)
+					if err != nil {
+						return
+					}
+					select {
+					case resultCh <- metaResult{tf: tf}:
+						metaCancel()
+					default:
+					}
+				}(p)
+			}
+		}
+		metaWg.Wait()
+		close(resultCh)
+	}()
+
+	res, ok := <-resultCh
+	if !ok {
+		return fmt.Errorf("session: failed to fetch metadata from any peer")
+	}
+	tf := res.tf
 
 	// Restore announce URLs
 	if len(m.Trackers) > 0 {
@@ -259,7 +364,54 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 	s.record.Name = tf.Info.Name
 	s.mu.Unlock()
 
+	// Cache all collected peers for download phase (avoids re-querying)
+	peerMu.Lock()
+	s.cachedPeers = allPeers
+	peerMu.Unlock()
+
 	return nil
+}
+
+// dhtLookup performs a DHT GetPeers using the shared DHT or a temporary one.
+func (s *Session) dhtLookup(infoHash [20]byte) []tracker.Peer {
+	var d *dhtpkg.DHT
+	var cleanup func()
+
+	if s.dht != nil {
+		d = s.dht
+		cleanup = func() {}
+	} else {
+		var err error
+		d, err = dhtpkg.New(":0")
+		if err != nil {
+			return nil
+		}
+		_ = d.Bootstrap(dhtBootstrapNodes)
+		cleanup = func() { _ = d.Close() }
+	}
+	defer cleanup()
+
+	peerAddrs, err := d.GetPeers(infoHash)
+	if err != nil {
+		return nil
+	}
+
+	var peers []tracker.Peer
+	for _, addr := range peerAddrs {
+		host, portStr, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			continue
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			continue
+		}
+		var port uint16
+		if _, scanErr := fmt.Sscanf(portStr, "%d", &port); scanErr == nil {
+			peers = append(peers, tracker.Peer{IP: ip, Port: port})
+		}
+	}
+	return peers
 }
 
 func mustReencode(tf *torrent.TorrentFile) map[string]any {
@@ -335,44 +487,16 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 		}(tr)
 	}
 
-	// DHT lookup
+	// DHT lookup (reuse shared instance)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		d, err := dhtpkg.New(":0")
-		if err != nil {
-			return
+		dhtPeers := s.dhtLookup(s.tf.InfoHash)
+		if len(dhtPeers) > 0 {
+			mu.Lock()
+			allPeers = append(allPeers, dhtPeers...)
+			mu.Unlock()
 		}
-		defer func() { _ = d.Close() }()
-
-		if err := d.Bootstrap(dhtBootstrapNodes); err != nil {
-			return
-		}
-
-		peerAddrs, err := d.GetPeers(s.tf.InfoHash)
-		if err != nil {
-			return
-		}
-
-		var dhtPeers []tracker.Peer
-		for _, addr := range peerAddrs {
-			host, portStr, splitErr := net.SplitHostPort(addr)
-			if splitErr != nil {
-				continue
-			}
-			ip := net.ParseIP(host)
-			if ip == nil {
-				continue
-			}
-			var port uint16
-			if _, scanErr := fmt.Sscanf(portStr, "%d", &port); scanErr == nil {
-				dhtPeers = append(dhtPeers, tracker.Peer{IP: ip, Port: port})
-			}
-		}
-
-		mu.Lock()
-		allPeers = append(allPeers, dhtPeers...)
-		mu.Unlock()
 	}()
 
 	wg.Wait()
@@ -381,88 +505,6 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 		return nil, fmt.Errorf("session: no peers found")
 	}
 	return allPeers, nil
-}
-
-func (s *Session) getPeersFromTrackers(ctx context.Context, trackers []string, infoHash [20]byte) []tracker.Peer {
-	var allPeers []tracker.Peer
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
-	for _, tr := range trackers {
-		wg.Add(1)
-		go func(tr string) {
-			defer wg.Done()
-			req := tracker.AnnounceRequest{
-				AnnounceURL: tr,
-				InfoHash:    infoHash,
-				PeerID:      s.peerID,
-				Port:        s.port,
-				Left:        1,
-				Event:       tracker.EventStarted,
-				NumWant:     s.numWant,
-			}
-			resp, err := tracker.Announce(req)
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			allPeers = append(allPeers, resp.Peers...)
-			mu.Unlock()
-		}(tr)
-	}
-	wg.Wait()
-	return allPeers
-}
-
-// fetchMetadataConcurrent tries multiple peers concurrently to get metadata.
-func fetchMetadataConcurrent(ctx context.Context, peers []tracker.Peer, infoHash, peerID [20]byte) (*torrent.TorrentFile, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	type result struct {
-		tf  *torrent.TorrentFile
-		err error
-	}
-
-	resultCh := make(chan result, 1)
-	sem := make(chan struct{}, 20)
-
-	var wg sync.WaitGroup
-	for _, p := range peers {
-		wg.Add(1)
-		go func(p tracker.Peer) {
-			defer wg.Done()
-
-			select {
-			case <-ctx.Done():
-				return
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			}
-
-			tf, err := fetchMetadataFromPeer(ctx, p, infoHash, peerID)
-			if err != nil {
-				return
-			}
-
-			select {
-			case resultCh <- result{tf: tf}:
-				cancel()
-			default:
-			}
-		}(p)
-	}
-
-	go func() {
-		wg.Wait()
-		close(resultCh)
-	}()
-
-	res, ok := <-resultCh
-	if !ok {
-		return nil, fmt.Errorf("session: failed to fetch metadata from any peer")
-	}
-	return res.tf, res.err
 }
 
 func fetchMetadataFromPeer(ctx context.Context, p tracker.Peer, infoHash, peerID [20]byte) (*torrent.TorrentFile, error) {

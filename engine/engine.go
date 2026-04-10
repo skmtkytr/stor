@@ -138,7 +138,7 @@ func (e *Engine) Start() error {
 
 	// Restore sessions from store
 	for _, r := range e.store.All() {
-		s := NewSession(r, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant)
+		s := NewSession(r, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht)
 
 		e.sessions[r.ID] = s
 
@@ -213,7 +213,7 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 		}
 	}
 
-	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant)
+	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht)
 	e.sessions[id] = s
 	e.store.Put(record)
 	_ = e.store.Save()
