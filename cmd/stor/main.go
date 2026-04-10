@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/skmtkytr/stor/bencode"
@@ -99,24 +101,35 @@ func handleMagnet(uri string, peerID [20]byte) (*torrent.TorrentFile, error) {
 	}
 	fmt.Printf("Trackers:  %d\n", len(m.Trackers))
 
-	// Try to get peers from trackers in the magnet link
-	var peers []tracker.Peer
+	// Get peers from trackers concurrently
+	var allPeers []tracker.Peer
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
 	for _, tr := range m.Trackers {
-		req := tracker.AnnounceRequest{
-			AnnounceURL: tr,
-			InfoHash:    m.InfoHash,
-			PeerID:      peerID,
-			Port:        6881,
-			Left:        1, // We don't know the size yet
-			Event:       tracker.EventStarted,
-		}
-		resp, err := tracker.Announce(req)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "tracker %s: %v\n", tr, err)
-			continue
-		}
-		peers = append(peers, resp.Peers...)
+		wg.Add(1)
+		go func(tr string) {
+			defer wg.Done()
+			req := tracker.AnnounceRequest{
+				AnnounceURL: tr,
+				InfoHash:    m.InfoHash,
+				PeerID:      peerID,
+				Port:        6881,
+				Left:        1,
+				Event:       tracker.EventStarted,
+			}
+			resp, err := tracker.Announce(req)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  tracker %s: %v\n", tr, err)
+				return
+			}
+			mu.Lock()
+			allPeers = append(allPeers, resp.Peers...)
+			mu.Unlock()
+			fmt.Printf("  %s: %d peers\n", tr, len(resp.Peers))
+		}(tr)
 	}
+	wg.Wait()
 
 	// Also add peers from x.pe in the magnet URI
 	for _, pe := range m.Peers {
@@ -130,44 +143,110 @@ func handleMagnet(uri string, peerID [20]byte) (*torrent.TorrentFile, error) {
 		}
 		var port uint16
 		if _, err := fmt.Sscanf(portStr, "%d", &port); err == nil {
-			peers = append(peers, tracker.Peer{IP: ip, Port: port})
+			allPeers = append(allPeers, tracker.Peer{IP: ip, Port: port})
 		}
 	}
 
-	if len(peers) == 0 {
+	if len(allPeers) == 0 {
 		return nil, fmt.Errorf("no peers found for magnet link")
 	}
 
-	fmt.Printf("Found %d peers, fetching metadata...\n", len(peers))
+	fmt.Printf("Found %d peers, fetching metadata...\n", len(allPeers))
 
-	// Try to fetch metadata from each peer
-	for _, p := range peers {
-		tf, err := fetchMetadataFromPeer(p, m.InfoHash, peerID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  peer %s: %v\n", p, err)
-			continue
-		}
-		// Restore announce URLs from magnet
-		if len(m.Trackers) > 0 {
-			tf.Announce = m.Trackers[0]
-			tiers := make([][]string, len(m.Trackers))
-			for i, tr := range m.Trackers {
-				tiers[i] = []string{tr}
-			}
-			tf.AnnounceList = tiers
-		}
-		return tf, nil
+	// Try to fetch metadata from peers concurrently
+	tf, err := fetchMetadataConcurrent(allPeers, m.InfoHash, peerID)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, fmt.Errorf("failed to fetch metadata from any peer")
+	// Restore announce URLs from magnet
+	if len(m.Trackers) > 0 {
+		tf.Announce = m.Trackers[0]
+		tiers := make([][]string, len(m.Trackers))
+		for i, tr := range m.Trackers {
+			tiers[i] = []string{tr}
+		}
+		tf.AnnounceList = tiers
+	}
+	return tf, nil
 }
 
-func fetchMetadataFromPeer(p tracker.Peer, infoHash, peerID [20]byte) (*torrent.TorrentFile, error) {
-	conn, err := net.DialTimeout("tcp", p.String(), 10*time.Second)
+// fetchMetadataConcurrent tries multiple peers concurrently and returns
+// as soon as one succeeds.
+func fetchMetadataConcurrent(peers []tracker.Peer, infoHash, peerID [20]byte) (*torrent.TorrentFile, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	type result struct {
+		tf  *torrent.TorrentFile
+		err error
+	}
+
+	resultCh := make(chan result, 1)
+
+	// Limit concurrency to avoid opening too many connections
+	sem := make(chan struct{}, 20)
+
+	var wg sync.WaitGroup
+	for _, p := range peers {
+		wg.Add(1)
+		go func(p tracker.Peer) {
+			defer wg.Done()
+
+			// Check if already cancelled
+			select {
+			case <-ctx.Done():
+				return
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			}
+
+			tf, err := fetchMetadataFromPeer(ctx, p, infoHash, peerID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  peer %s: %v\n", p, err)
+				return
+			}
+
+			// First success wins
+			select {
+			case resultCh <- result{tf: tf}:
+				cancel() // cancel all other goroutines
+			default:
+			}
+		}(p)
+	}
+
+	// Close result channel when all goroutines done
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	res, ok := <-resultCh
+	if !ok {
+		return nil, fmt.Errorf("failed to fetch metadata from any peer")
+	}
+	return res.tf, res.err
+}
+
+func fetchMetadataFromPeer(ctx context.Context, p tracker.Peer, infoHash, peerID [20]byte) (*torrent.TorrentFile, error) {
+	// Check cancellation
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	// Connect with short timeout
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", p.String())
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = conn.Close() }()
+
+	// Set overall deadline for the entire metadata fetch
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	// Handshake with extension support
 	hs := &peer.Handshake{InfoHash: infoHash, PeerID: peerID, Extensions: true}
@@ -207,6 +286,8 @@ func fetchMetadataFromPeer(p tracker.Peer, infoHash, peerID [20]byte) (*torrent.
 	if err != nil {
 		return nil, err
 	}
+
+	fmt.Printf("  peer %s: metadata fetched (%d bytes)\n", p, len(metadata))
 
 	// Parse the metadata as a torrent info dict
 	decoded, err := bencode.Decode(metadata)
@@ -252,6 +333,8 @@ func printTorrentInfo(tf *torrent.TorrentFile) {
 
 func announceToTrackers(tf *torrent.TorrentFile, peerID [20]byte) ([]tracker.Peer, error) {
 	var allPeers []tracker.Peer
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
 	trackers := []string{}
 	if tf.Announce != "" {
@@ -275,30 +358,37 @@ func announceToTrackers(tf *torrent.TorrentFile, peerID [20]byte) ([]tracker.Pee
 	fmt.Printf("\nContacting %d tracker(s)...\n", len(trackers))
 
 	for _, tr := range trackers {
-		totalLength := tf.Info.Length
-		if totalLength == 0 {
-			for _, f := range tf.Info.Files {
-				totalLength += f.Length
+		wg.Add(1)
+		go func(tr string) {
+			defer wg.Done()
+			totalLength := tf.Info.Length
+			if totalLength == 0 {
+				for _, f := range tf.Info.Files {
+					totalLength += f.Length
+				}
 			}
-		}
 
-		req := tracker.AnnounceRequest{
-			AnnounceURL: tr,
-			InfoHash:    tf.InfoHash,
-			PeerID:      peerID,
-			Port:        6881,
-			Left:        totalLength,
-			Event:       tracker.EventStarted,
-		}
+			req := tracker.AnnounceRequest{
+				AnnounceURL: tr,
+				InfoHash:    tf.InfoHash,
+				PeerID:      peerID,
+				Port:        6881,
+				Left:        totalLength,
+				Event:       tracker.EventStarted,
+			}
 
-		resp, err := tracker.Announce(req)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  tracker %s: %v\n", tr, err)
-			continue
-		}
-		fmt.Printf("  %s: %d peers\n", tr, len(resp.Peers))
-		allPeers = append(allPeers, resp.Peers...)
+			resp, err := tracker.Announce(req)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  tracker %s: %v\n", tr, err)
+				return
+			}
+			fmt.Printf("  %s: %d peers\n", tr, len(resp.Peers))
+			mu.Lock()
+			allPeers = append(allPeers, resp.Peers...)
+			mu.Unlock()
+		}(tr)
 	}
+	wg.Wait()
 
 	if len(allPeers) == 0 {
 		return nil, fmt.Errorf("no peers found from any tracker")
