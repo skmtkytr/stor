@@ -7,14 +7,18 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/skmtkytr/stor/bencode"
+	"github.com/skmtkytr/stor/daemon"
 	dhtpkg "github.com/skmtkytr/stor/dht"
 	"github.com/skmtkytr/stor/download"
+	"github.com/skmtkytr/stor/engine"
 	"github.com/skmtkytr/stor/magnet"
 	"github.com/skmtkytr/stor/peer"
 	"github.com/skmtkytr/stor/torrent"
@@ -23,10 +27,126 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: stor <torrent-file|magnet-uri> [output-dir]\n")
+		printUsage()
 		os.Exit(1)
 	}
 
+	switch os.Args[1] {
+	case "daemon":
+		runDaemon()
+	case "help", "--help", "-h":
+		printUsage()
+	default:
+		runOneShot()
+	}
+}
+
+func printUsage() {
+	fmt.Fprintf(os.Stderr, `stor - BitTorrent client
+
+Usage:
+  stor daemon [options]       Start the daemon
+  stor <torrent|magnet> [dir] One-shot download
+
+Daemon options:
+  --port PORT       Listen port (default: 9090)
+  --dir DIR         Download directory (default: ~/Downloads)
+  --config PATH     Config file path (default: ~/.config/stor/config.json)
+`)
+}
+
+// --- Daemon mode ---
+
+func runDaemon() {
+	// Parse daemon flags
+	home, _ := os.UserHomeDir()
+	configPath := filepath.Join(home, ".config", "stor", "config.json")
+	port := 0
+	dir := ""
+
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--port":
+			if i+1 < len(args) {
+				i++
+				_, _ = fmt.Sscanf(args[i], "%d", &port)
+			}
+		case "--dir":
+			if i+1 < len(args) {
+				i++
+				dir = args[i]
+			}
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configPath = args[i]
+			}
+		}
+	}
+
+	cfg, err := daemon.LoadConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// CLI flags override config
+	if port > 0 {
+		cfg.Port = port
+	}
+	if dir != "" {
+		cfg.DownloadDir = dir
+	}
+
+	engCfg := engine.Config{
+		DownloadDir: cfg.DownloadDir,
+		StatePath:   cfg.StatePath,
+		ListenPort:  6881,
+		MaxActive:   5,
+	}
+
+	eng, err := engine.New(engCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "engine error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := eng.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "engine start error: %v\n", err)
+		os.Exit(1)
+	}
+
+	d := daemon.New(eng, cfg)
+
+	fmt.Printf("stor daemon\n")
+	fmt.Printf("  API Key:      %s\n", cfg.APIKey)
+	fmt.Printf("  Listen:       0.0.0.0:%d\n", cfg.Port)
+	fmt.Printf("  Download dir: %s\n", cfg.DownloadDir)
+	fmt.Printf("  Config:       %s\n", configPath)
+	fmt.Printf("  Web UI:       http://localhost:%d/\n", cfg.Port)
+
+	// Graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		if err := d.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-sigCh
+	fmt.Println("\nShutting down...")
+	_ = d.Stop()
+	_ = eng.Stop()
+	fmt.Println("Bye.")
+}
+
+// --- One-shot download mode (legacy) ---
+
+func runOneShot() {
 	input := os.Args[1]
 	outputDir := "."
 	if len(os.Args) >= 3 {
@@ -50,14 +170,12 @@ func main() {
 
 	printTorrentInfo(tf)
 
-	// Announce to tracker
 	peers, err := announceToTrackers(tf, peerID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tracker error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Download directly to file
 	outPath := filepath.Join(outputDir, tf.Info.Name)
 	fmt.Printf("\nDownloading to %s...\n", outPath)
 	if err := download.DownloadToFile(tf, peerID, peers, outPath); err != nil {
@@ -95,7 +213,6 @@ func handleMagnet(uri string, peerID [20]byte) (*torrent.TorrentFile, error) {
 	}
 	fmt.Printf("Trackers:  %d\n", len(m.Trackers))
 
-	// Get peers from trackers concurrently
 	var allPeers []tracker.Peer
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -125,7 +242,6 @@ func handleMagnet(uri string, peerID [20]byte) (*torrent.TorrentFile, error) {
 	}
 	wg.Wait()
 
-	// Also add peers from x.pe in the magnet URI
 	for _, pe := range m.Peers {
 		host, portStr, err := net.SplitHostPort(pe)
 		if err != nil {
@@ -147,13 +263,11 @@ func handleMagnet(uri string, peerID [20]byte) (*torrent.TorrentFile, error) {
 
 	fmt.Printf("Found %d peers, fetching metadata...\n", len(allPeers))
 
-	// Try to fetch metadata from peers concurrently
 	tf, err := fetchMetadataConcurrent(allPeers, m.InfoHash, peerID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Restore announce URLs from magnet
 	if len(m.Trackers) > 0 {
 		tf.Announce = m.Trackers[0]
 		tiers := make([][]string, len(m.Trackers))
@@ -165,8 +279,6 @@ func handleMagnet(uri string, peerID [20]byte) (*torrent.TorrentFile, error) {
 	return tf, nil
 }
 
-// fetchMetadataConcurrent tries multiple peers concurrently and returns
-// as soon as one succeeds.
 func fetchMetadataConcurrent(peers []tracker.Peer, infoHash, peerID [20]byte) (*torrent.TorrentFile, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -177,8 +289,6 @@ func fetchMetadataConcurrent(peers []tracker.Peer, infoHash, peerID [20]byte) (*
 	}
 
 	resultCh := make(chan result, 1)
-
-	// Limit concurrency to avoid opening too many connections
 	sem := make(chan struct{}, 20)
 
 	var wg sync.WaitGroup
@@ -187,7 +297,6 @@ func fetchMetadataConcurrent(peers []tracker.Peer, infoHash, peerID [20]byte) (*
 		go func(p tracker.Peer) {
 			defer wg.Done()
 
-			// Check if already cancelled
 			select {
 			case <-ctx.Done():
 				return
@@ -201,16 +310,14 @@ func fetchMetadataConcurrent(peers []tracker.Peer, infoHash, peerID [20]byte) (*
 				return
 			}
 
-			// First success wins
 			select {
 			case resultCh <- result{tf: tf}:
-				cancel() // cancel all other goroutines
+				cancel()
 			default:
 			}
 		}(p)
 	}
 
-	// Close result channel when all goroutines done
 	go func() {
 		wg.Wait()
 		close(resultCh)
@@ -224,14 +331,12 @@ func fetchMetadataConcurrent(peers []tracker.Peer, infoHash, peerID [20]byte) (*
 }
 
 func fetchMetadataFromPeer(ctx context.Context, p tracker.Peer, infoHash, peerID [20]byte) (*torrent.TorrentFile, error) {
-	// Check cancellation
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
 	}
 
-	// Connect with short timeout
 	dialer := net.Dialer{Timeout: 5 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", p.String())
 	if err != nil {
@@ -239,10 +344,8 @@ func fetchMetadataFromPeer(ctx context.Context, p tracker.Peer, infoHash, peerID
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Set overall deadline for the entire metadata fetch
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
-	// Handshake with extension support
 	hs := &peer.Handshake{InfoHash: infoHash, PeerID: peerID, Extensions: true}
 	if err := peer.WriteHandshake(conn, hs); err != nil {
 		return nil, err
@@ -259,7 +362,6 @@ func fetchMetadataFromPeer(ctx context.Context, p tracker.Peer, infoHash, peerID
 		return nil, fmt.Errorf("peer does not support extensions")
 	}
 
-	// Negotiate ut_metadata extension
 	ourHS := &peer.ExtHandshake{
 		M: map[string]int64{"ut_metadata": 1},
 		V: "stor/0.1.0",
@@ -275,7 +377,6 @@ func fetchMetadataFromPeer(ctx context.Context, p tracker.Peer, infoHash, peerID
 		return nil, fmt.Errorf("peer reported no metadata")
 	}
 
-	// Fetch raw metadata
 	metadata, err := magnet.FetchMetadata(extConn, int(peerHS.MetadataSize), infoHash)
 	if err != nil {
 		return nil, err
@@ -283,7 +384,6 @@ func fetchMetadataFromPeer(ctx context.Context, p tracker.Peer, infoHash, peerID
 
 	fmt.Printf("  peer %s: metadata fetched (%d bytes)\n", p, len(metadata))
 
-	// Parse the metadata as a torrent info dict
 	decoded, err := bencode.Decode(metadata)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode metadata: %w", err)
@@ -293,10 +393,7 @@ func fetchMetadataFromPeer(ctx context.Context, p tracker.Peer, infoHash, peerID
 		return nil, fmt.Errorf("metadata is not a dict")
 	}
 
-	// Reconstruct a minimal .torrent structure
-	fullDict := map[string]any{
-		"info": infoDict,
-	}
+	fullDict := map[string]any{"info": infoDict}
 	fullData, err := bencode.Encode(fullDict)
 	if err != nil {
 		return nil, err
@@ -325,7 +422,6 @@ func printTorrentInfo(tf *torrent.TorrentFile) {
 	}
 }
 
-// Well-known DHT bootstrap nodes.
 var dhtBootstrapNodes = []string{
 	"router.bittorrent.com:6881",
 	"dht.transmissionbt.com:6881",
@@ -338,48 +434,23 @@ func announceToTrackers(tf *torrent.TorrentFile, peerID [20]byte) ([]tracker.Pee
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	trackers := []string{}
-	if tf.Announce != "" {
-		trackers = append(trackers, tf.Announce)
-	}
-	for _, tier := range tf.AnnounceList {
-		trackers = append(trackers, tier...)
-	}
-
-	// Deduplicate
-	seen := map[string]bool{}
-	unique := trackers[:0]
-	for _, tr := range trackers {
-		if !seen[tr] {
-			seen[tr] = true
-			unique = append(unique, tr)
-		}
-	}
-	trackers = unique
+	trackers := tf.TrackerURLs()
 
 	fmt.Printf("\nContacting %d tracker(s) + DHT...\n", len(trackers))
 
-	// Tracker announces (parallel)
 	for _, tr := range trackers {
 		wg.Add(1)
 		go func(tr string) {
 			defer wg.Done()
-			totalLength := tf.Info.Length
-			if totalLength == 0 {
-				for _, f := range tf.Info.Files {
-					totalLength += f.Length
-				}
-			}
-
+			tl := download.TotalSize(tf)
 			req := tracker.AnnounceRequest{
 				AnnounceURL: tr,
 				InfoHash:    tf.InfoHash,
 				PeerID:      peerID,
 				Port:        6881,
-				Left:        totalLength,
+				Left:        tl,
 				Event:       tracker.EventStarted,
 			}
-
 			resp, err := tracker.Announce(req)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  tracker %s: %v\n", tr, err)
@@ -392,35 +463,29 @@ func announceToTrackers(tf *torrent.TorrentFile, peerID [20]byte) ([]tracker.Pee
 		}(tr)
 	}
 
-	// DHT lookup (parallel with trackers)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-
 		d, err := dhtpkg.New(":0")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  DHT: start failed: %v\n", err)
 			return
 		}
 		defer func() { _ = d.Close() }()
 
 		if err := d.Bootstrap(dhtBootstrapNodes); err != nil {
-			fmt.Fprintf(os.Stderr, "  DHT: bootstrap failed: %v\n", err)
 			return
 		}
-
 		fmt.Printf("  DHT: bootstrapped (%d nodes)\n", d.TableSize())
 
 		peerAddrs, err := d.GetPeers(tf.InfoHash)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  DHT: get_peers failed: %v\n", err)
 			return
 		}
 
 		var dhtPeers []tracker.Peer
 		for _, addr := range peerAddrs {
-			host, portStr, err := net.SplitHostPort(addr)
-			if err != nil {
+			host, portStr, splitErr := net.SplitHostPort(addr)
+			if splitErr != nil {
 				continue
 			}
 			ip := net.ParseIP(host)
@@ -428,7 +493,7 @@ func announceToTrackers(tf *torrent.TorrentFile, peerID [20]byte) ([]tracker.Pee
 				continue
 			}
 			var port uint16
-			if _, err := fmt.Sscanf(portStr, "%d", &port); err == nil {
+			if _, scanErr := fmt.Sscanf(portStr, "%d", &port); scanErr == nil {
 				dhtPeers = append(dhtPeers, tracker.Peer{IP: ip, Port: port})
 			}
 		}
