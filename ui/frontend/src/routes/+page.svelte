@@ -6,12 +6,14 @@
 	import AuthScreen from "$lib/components/AuthScreen.svelte";
 	import TorrentTable from "$lib/components/TorrentTable.svelte";
 	import AddBar from "$lib/components/AddBar.svelte";
-	import { Input } from "$lib/components/ui/input";
-	import { Toaster, toast } from "svelte-sonner";
+	import SettingsDialog from "$lib/components/SettingsDialog.svelte";
+	import { Button } from "$lib/components/ui/button";
+	import { Toaster } from "svelte-sonner";
 
 	let authenticated = $state(false);
 	let torrents = $state<TorrentInfo[]>([]);
 	let stats = $state<EngineStats | null>(null);
+	let settingsOpen = $state(false);
 	let interval: ReturnType<typeof setInterval>;
 
 	async function refresh() {
@@ -45,17 +47,6 @@
 		startPolling();
 	}
 
-	async function setMaxActive(e: Event) {
-		const val = parseInt((e.target as HTMLInputElement).value);
-		if (!val || val < 1) return;
-		try {
-			await api.setMaxActive(val);
-			toast.success(`Max active set to ${val}`);
-		} catch (err: unknown) {
-			toast.error(err instanceof Error ? err.message : "Failed");
-		}
-	}
-
 	onMount(() => tryAutoAuth());
 	onDestroy(() => clearInterval(interval));
 </script>
@@ -67,34 +58,26 @@
 {:else}
 	<div class="dark flex min-h-screen flex-col bg-background text-foreground">
 		<!-- Header -->
-		<header class="flex items-center justify-between border-b px-4 py-3">
+		<header class="flex items-center justify-between border-b px-4 py-2.5">
 			<div class="flex items-center gap-4">
-				<h1 class="text-lg font-bold">stor</h1>
+				<h1 class="text-lg font-bold tracking-tight">stor</h1>
 				{#if stats}
-					<span class="text-sm text-muted-foreground">
-						{stats.active_torrents}/{stats.max_active} active
-						· {stats.total_torrents} total
-						· {formatSpeed(stats.total_down_speed)}
-					</span>
+					<div class="flex items-center gap-3 text-sm text-muted-foreground">
+						<span>{stats.active_torrents}/{stats.max_active} active</span>
+						<span class="text-border">·</span>
+						<span>{stats.total_torrents} total</span>
+						<span class="text-border">·</span>
+						<span class="tabular-nums">{formatSpeed(stats.total_down_speed)}</span>
+					</div>
 				{/if}
 			</div>
-			<div class="flex items-center gap-2">
-				<label class="flex items-center gap-1.5 text-xs text-muted-foreground">
-					Max active:
-					<Input
-						type="number"
-						min={1}
-						max={50}
-						value={stats?.max_active ?? 5}
-						onchange={setMaxActive}
-						class="h-7 w-14 text-center text-xs"
-					/>
-				</label>
-			</div>
+			<Button variant="ghost" size="sm" onclick={() => (settingsOpen = true)}>
+				Settings
+			</Button>
 		</header>
 
 		<!-- Add bar -->
-		<div class="border-b px-4 py-3">
+		<div class="border-b px-4 py-2.5">
 			<AddBar />
 		</div>
 
@@ -103,4 +86,6 @@
 			<TorrentTable {torrents} />
 		</div>
 	</div>
+
+	<SettingsDialog {stats} bind:open={settingsOpen} />
 {/if}
