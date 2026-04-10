@@ -104,24 +104,42 @@ header h1 { font-size: 1.25rem; color: #58a6ff; }
 #torrent-table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
+}
+#torrent-table th, #torrent-table td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #21262d;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 #torrent-table th {
   text-align: left;
-  padding: 0.4rem 0.75rem;
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: #8b949e;
-  border-bottom: 1px solid #21262d;
-  white-space: nowrap;
 }
 #torrent-table td {
-  padding: 0.6rem 0.75rem;
-  border-bottom: 1px solid #21262d;
   font-size: 0.8rem;
-  white-space: nowrap;
 }
-#torrent-table td:first-child { white-space: normal; max-width: 300px; }
+/* Column widths: Name stretches, others fixed */
+#torrent-table th:nth-child(1),
+#torrent-table td:nth-child(1) { width: auto; white-space: normal; } /* Name - takes remaining space */
+#torrent-table th:nth-child(2),
+#torrent-table td:nth-child(2) { width: 80px; }  /* Size */
+#torrent-table th:nth-child(3),
+#torrent-table td:nth-child(3) { width: 140px; }  /* Progress */
+#torrent-table th:nth-child(4),
+#torrent-table td:nth-child(4) { width: 80px; }  /* Speed */
+#torrent-table th:nth-child(5),
+#torrent-table td:nth-child(5) { width: 70px; }  /* ETA */
+#torrent-table th:nth-child(6),
+#torrent-table td:nth-child(6) { width: 50px; }  /* Peers */
+#torrent-table th:nth-child(7),
+#torrent-table td:nth-child(7) { width: 90px; }  /* State */
+#torrent-table th:nth-child(8),
+#torrent-table td:nth-child(8) { width: 110px; }  /* Queue */
 #torrent-table tr:hover { background: #161b22; }
 
 .name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
