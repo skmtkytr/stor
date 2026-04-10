@@ -36,4 +36,7 @@ export interface EngineStats {
 	active_torrents: number;
 	total_torrents: number;
 	max_active: number;
+	total_peers: number;
+	dht_nodes: number;
+	free_space: number;
 }

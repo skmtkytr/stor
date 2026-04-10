@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/skmtkytr/stor/dht"
 	"github.com/skmtkytr/stor/download"
 	"github.com/skmtkytr/stor/torrent"
 )
@@ -19,6 +21,17 @@ type Config struct {
 	StatePath   string // path to state.json
 	ListenPort  uint16
 	MaxActive   int // max concurrent downloading torrents
+
+	// Peer connection tuning
+	MaxPeers    int // max concurrent peers per torrent (default: 100)
+	MaxPipeline int // outstanding requests per peer (default: 16)
+	DialTimeout int // peer dial timeout in seconds (default: 3)
+
+	// Tracker tuning
+	NumWant int // peers requested from tracker (default: 200)
+
+	// DHT tuning
+	DHTAlpha int // DHT lookup concurrency (default: 8)
 }
 
 // TorrentInfo is the full info returned to API clients.
@@ -42,6 +55,9 @@ type EngineStats struct {
 	ActiveTorrents int   `json:"active_torrents"`
 	TotalTorrents  int   `json:"total_torrents"`
 	MaxActive      int   `json:"max_active"`
+	TotalPeers     int   `json:"total_peers"`
+	DHTNodes       int   `json:"dht_nodes"`
+	FreeSpace      int64 `json:"free_space"`
 }
 
 // Engine manages all torrent sessions.
@@ -51,6 +67,7 @@ type Engine struct {
 	peerID   [20]byte
 	store    *Store
 	sessions map[string]*Session
+	dht      *dht.DHT
 	ctx      context.Context
 	cancel   context.CancelFunc
 
@@ -66,6 +83,21 @@ func New(cfg Config) (*Engine, error) {
 	}
 	if cfg.ListenPort == 0 {
 		cfg.ListenPort = 6881
+	}
+	if cfg.MaxPeers <= 0 {
+		cfg.MaxPeers = 100
+	}
+	if cfg.MaxPipeline <= 0 {
+		cfg.MaxPipeline = 16
+	}
+	if cfg.DialTimeout <= 0 {
+		cfg.DialTimeout = 3
+	}
+	if cfg.NumWant <= 0 {
+		cfg.NumWant = 200
+	}
+	if cfg.DHTAlpha <= 0 {
+		cfg.DHTAlpha = 8
 	}
 
 	var peerID [20]byte
@@ -97,9 +129,16 @@ func (e *Engine) Start() error {
 		return fmt.Errorf("engine: create download dir: %w", err)
 	}
 
+	// Start shared DHT node
+	d, err := dht.New(":0", dht.WithAlpha(e.cfg.DHTAlpha))
+	if err == nil {
+		_ = d.Bootstrap(dhtBootstrapNodes)
+		e.dht = d
+	}
+
 	// Restore sessions from store
 	for _, r := range e.store.All() {
-		s := NewSession(r, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort)
+		s := NewSession(r, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant)
 
 		e.sessions[r.ID] = s
 
@@ -133,6 +172,10 @@ func (e *Engine) Stop() error {
 	if e.saveTicker != nil {
 		e.saveTicker.Stop()
 		close(e.saveStop)
+	}
+
+	if e.dht != nil {
+		_ = e.dht.Close()
 	}
 
 	e.saveState()
@@ -170,7 +213,7 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 		}
 	}
 
-	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort)
+	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant)
 	e.sessions[id] = s
 	e.store.Put(record)
 	_ = e.store.Save()
@@ -306,12 +349,30 @@ func (e *Engine) GetStats() *EngineStats {
 	}
 	for _, s := range e.sessions {
 		snap := s.Snap()
+		stats.TotalPeers += int(snap.ActivePeers)
 		if snap.State == string(StateDownloading) {
 			stats.ActiveTorrents++
 			stats.TotalDownSpeed += snap.DownSpeed
 		}
 	}
+
+	if e.dht != nil {
+		stats.DHTNodes = e.dht.TableSize()
+	}
+
+	stats.FreeSpace = diskFreeSpace(e.cfg.DownloadDir)
+
 	return stats
+}
+
+// diskFreeSpace returns the available bytes on the filesystem containing path.
+func diskFreeSpace(path string) int64 {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return -1
+	}
+	//nolint:unconvert // Bavail type varies by platform
+	return int64(stat.Bavail) * int64(stat.Bsize)
 }
 
 // PeerID returns the engine's peer ID as hex string.
@@ -486,6 +547,14 @@ func (e *Engine) sessionToInfo(s *Session) *TorrentInfo {
 		AddedAt:       r.AddedAt,
 		CompletedAt:   r.CompletedAt,
 		Error:         r.Error,
+	}
+}
+
+func (e *Engine) downloadConfig() download.DownloadConfig {
+	return download.DownloadConfig{
+		MaxPeers:    e.cfg.MaxPeers,
+		MaxPipeline: e.cfg.MaxPipeline,
+		DialTimeout: e.cfg.DialTimeout,
 	}
 }
 
