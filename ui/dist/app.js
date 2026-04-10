@@ -44,19 +44,21 @@ $("#key-input").addEventListener("keydown", (e) => {
 // --- RPC ---
 
 async function rpc(method, params) {
+  const key = apiKey.trim();
   const res = await fetch("/api/rpc", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: "Bearer " + apiKey,
+      Authorization: "Bearer " + key,
     },
     body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
   });
   if (res.status === 401) {
+    const body = await res.text();
     localStorage.removeItem(KEY);
     apiKey = "";
     showAuth();
-    throw new Error("unauthorized");
+    throw new Error(body || "unauthorized");
   }
   const data = await res.json();
   if (data.error) throw new Error(data.error.message);

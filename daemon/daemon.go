@@ -125,12 +125,12 @@ func (d *Daemon) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			http.Error(w, "unauthorized: missing Bearer token", http.StatusUnauthorized)
 			return
 		}
-		token := auth[7:]
+		token := strings.TrimSpace(auth[7:])
 		if subtle.ConstantTimeCompare([]byte(token), []byte(d.cfg.APIKey)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			http.Error(w, fmt.Sprintf("unauthorized: invalid key (got %d chars, want %d)", len(token), len(d.cfg.APIKey)), http.StatusUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r)
