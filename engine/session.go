@@ -187,8 +187,34 @@ func (s *Session) run(ctx context.Context) error {
 	s.peerCh = peerCh
 	s.mu.Unlock()
 
-	// Close peerCh when download finishes (no more peers will be injected)
+	// Start announcer for periodic re-announce + peer injection
+	announceCtx, announceCancel := context.WithCancel(ctx)
+	announcer := NewAnnouncer(AnnounceConfig{
+		TF:       s.tf,
+		PeerID:   s.peerID,
+		Port:     s.port,
+		NumWant:  s.numWant,
+		DHT:      s.dht,
+		PeerSink: peerCh,
+		Downloaded: func() int64 {
+			if s.progress != nil {
+				return s.progress.Snap().Downloaded
+			}
+			return 0
+		},
+		Left: func() int64 {
+			if s.progress != nil {
+				snap := s.progress.Snap()
+				return snap.Total - snap.Downloaded
+			}
+			return tl
+		},
+	})
+	go announcer.Run(announceCtx)
+
+	// Close peerCh and stop announcer when download finishes
 	defer func() {
+		announceCancel()
 		s.mu.Lock()
 		if s.peerCh != nil {
 			close(s.peerCh)
@@ -461,22 +487,7 @@ func (s *Session) dhtLookup(infoHash [20]byte) []tracker.Peer {
 		return nil
 	}
 
-	var peers []tracker.Peer
-	for _, addr := range peerAddrs {
-		host, portStr, splitErr := net.SplitHostPort(addr)
-		if splitErr != nil {
-			continue
-		}
-		ip := net.ParseIP(host)
-		if ip == nil {
-			continue
-		}
-		var port uint16
-		if _, scanErr := fmt.Sscanf(portStr, "%d", &port); scanErr == nil {
-			peers = append(peers, tracker.Peer{IP: ip, Port: port})
-		}
-	}
-	return peers
+	return parsePeerAddrs(peerAddrs)
 }
 
 func mustReencode(tf *torrent.TorrentFile) map[string]any {
