@@ -1,70 +1,159 @@
 "use strict";
 
-// Context menu: right-click any link → "Download with stor"
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: "stor-add-link",
-    title: "Download with stor",
-    contexts: ["link"],
+// --- Config helpers ---
+
+async function getConfig() {
+  const cfg = await chrome.storage.sync.get([
+    "daemonUrl",
+    "apiKey",
+    "handle_torrents",
+    "handle_magnets",
+    "context_menu",
+    "badge_timeout",
+  ]);
+  return {
+    daemonUrl: cfg.daemonUrl || "",
+    apiKey: cfg.apiKey || "",
+    handleTorrents: cfg.handle_torrents ?? true,
+    handleMagnets: cfg.handle_magnets ?? true,
+    contextMenu: cfg.context_menu ?? true,
+    badgeTimeout: parseInt(cfg.badge_timeout) || 3000,
+  };
+}
+
+// --- JSON-RPC client ---
+
+async function rpc(method, params) {
+  const { daemonUrl, apiKey } = await getConfig();
+  if (!daemonUrl || !apiKey) {
+    throw new Error("Not configured");
+  }
+  const res = await fetch(daemonUrl.replace(/\/$/, "") + "/api/rpc", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + apiKey,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
   });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.result;
+}
+
+// --- Badge notification ---
+
+async function badge(text, color) {
+  const cfg = await getConfig();
+  chrome.action.setBadgeText({ text });
+  chrome.action.setBadgeBackgroundColor({ color });
+  setTimeout(() => chrome.action.setBadgeText({ text: "" }), cfg.badgeTimeout);
+}
+
+// --- Add torrent ---
+
+async function addTorrentUrl(url) {
+  try {
+    await rpc("torrent.add", { source: url });
+    badge("Add", "#238636");
+  } catch (e) {
+    console.error("stor: add failed:", e);
+    badge("Fail", "#f85149");
+  }
+}
+
+async function addTorrentFile(dataUrl) {
+  try {
+    // dataUrl is "data:application/x-bittorrent;base64,XXXX"
+    const base64 = dataUrl.split(",")[1];
+    if (!base64) throw new Error("Invalid data URL");
+    await rpc("torrent.addFile", { data: base64 });
+    badge("Add", "#238636");
+  } catch (e) {
+    console.error("stor: addFile failed:", e);
+    badge("Fail", "#f85149");
+  }
+}
+
+// --- Context menu ---
+
+async function setupContextMenu() {
+  await chrome.contextMenus.removeAll();
+  const cfg = await getConfig();
+  if (cfg.contextMenu) {
+    chrome.contextMenus.create({
+      id: "stor-add-link",
+      title: "Download with stor",
+      contexts: ["link"],
+    });
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  setupContextMenu();
+});
+
+// Re-setup when settings change
+chrome.storage.onChanged.addListener((changes) => {
+  if (changes.context_menu) {
+    setupContextMenu();
+  }
 });
 
 chrome.contextMenus.onClicked.addListener((info) => {
   if (info.menuItemId === "stor-add-link" && info.linkUrl) {
-    addTorrent(info.linkUrl);
+    addTorrentUrl(info.linkUrl);
   }
 });
 
-// Intercept magnet: link clicks via navigation
-chrome.webNavigation?.onBeforeNavigate?.addListener(
-  (details) => {
+// --- Magnet link interception via webNavigation ---
+
+chrome.webNavigation.onBeforeNavigate.addListener(
+  async (details) => {
     if (details.url.startsWith("magnet:")) {
-      addTorrent(details.url);
+      const cfg = await getConfig();
+      if (cfg.handleMagnets) {
+        addTorrentUrl(details.url);
+      }
     }
   },
   { url: [{ urlPrefix: "magnet:" }] }
 );
 
-async function addTorrent(url) {
-  const { daemonUrl, apiKey } = await chrome.storage.sync.get([
-    "daemonUrl",
-    "apiKey",
-  ]);
+// --- Messages from content script ---
 
-  if (!daemonUrl || !apiKey) {
-    console.error("stor: daemon URL or API key not configured");
-    notify("stor", "Please configure daemon URL and API key in extension options.");
-    return;
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === "add_torrent_url") {
+    addTorrentUrl(msg.url).then(() => sendResponse({ ok: true }));
+    return true; // async
   }
-
-  try {
-    const res = await fetch(daemonUrl.replace(/\/$/, "") + "/api/add", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Authorization: "Bearer " + apiKey,
-      },
-      body: "url=" + encodeURIComponent(url),
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(text);
-    }
-
-    const data = await res.json();
-    notify("stor", "Torrent added: " + (data.id || "").slice(0, 12) + "...");
-  } catch (e) {
-    console.error("stor: add failed:", e);
-    notify("stor", "Failed to add torrent: " + e.message);
+  if (msg.type === "add_torrent_file") {
+    // Content script sends a fetch'd .torrent as data URL
+    addTorrentFile(msg.dataUrl).then(() => sendResponse({ ok: true }));
+    return true;
   }
-}
-
-function notify(title, message) {
-  // Use the badge as a simple notification since chrome.notifications
-  // requires additional permission
-  chrome.action.setBadgeText({ text: "!" });
-  chrome.action.setBadgeBackgroundColor({ color: "#238636" });
-  setTimeout(() => chrome.action.setBadgeText({ text: "" }), 3000);
-  console.log(`[${title}] ${message}`);
-}
+  if (msg.type === "download_and_add") {
+    // Background fetches .torrent URL, converts to base64, sends to daemon
+    (async () => {
+      try {
+        const res = await fetch(msg.url);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const buf = await res.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let raw = "";
+        for (let i = 0; i < bytes.length; i += 8192) {
+          raw += String.fromCharCode(...bytes.subarray(i, i + 8192));
+        }
+        const base64 = btoa(raw);
+        await rpc("torrent.addFile", { data: base64 });
+        badge("Add", "#238636");
+      } catch (e) {
+        console.error("stor: download_and_add failed:", e);
+        badge("Fail", "#f85149");
+      }
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+});
