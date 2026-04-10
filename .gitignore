@@ -22,3 +22,11 @@ Thumbs.db
 
 # Downloads
 downloads/
+tmp/
+
+# Frontend
+ui/frontend/node_modules/
+ui/frontend/.svelte-kit/
+ui/dist/*
+!ui/dist/.gitkeep
+!ui/dist/index.html
