@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -117,9 +119,16 @@ func runDaemon() {
 		os.Exit(1)
 	}
 
+	// PID file: kill old daemon if running, write our PID
+	pidPath := filepath.Join(filepath.Dir(configPath), "stor.pid")
+	if err := daemon.AcquirePIDFile(pidPath); err != nil {
+		fmt.Fprintf(os.Stderr, "pid file error: %v\n", err)
+		os.Exit(1)
+	}
+
 	d := daemon.New(eng, cfg)
 
-	fmt.Printf("stor daemon\n")
+	fmt.Printf("stor daemon (PID %d)\n", os.Getpid())
 	fmt.Printf("  API Key:      %s\n", cfg.APIKey)
 	fmt.Printf("  Listen:       0.0.0.0:%d\n", cfg.Port)
 	fmt.Printf("  Download dir: %s\n", cfg.DownloadDir)
@@ -131,7 +140,7 @@ func runDaemon() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		if err := d.Start(); err != nil {
+		if err := d.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
 			os.Exit(1)
 		}
@@ -141,6 +150,7 @@ func runDaemon() {
 	fmt.Println("\nShutting down...")
 	_ = d.Stop()
 	_ = eng.Stop()
+	daemon.ReleasePIDFile(pidPath)
 	fmt.Println("Bye.")
 }
 
