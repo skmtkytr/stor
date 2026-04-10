@@ -52,6 +52,9 @@ func LoadConfig(path string) (Config, error) {
 	cfg := DefaultConfig()
 	cfg.path = path
 
+	// Default state_path to same directory as config file
+	cfg.StatePath = filepath.Join(filepath.Dir(path), "state.json")
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -74,6 +77,10 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if cfg.MaxActive < 1 {
 		cfg.MaxActive = 5
+	}
+	// If state_path is empty or uses a non-existent home dir, default to config dir
+	if cfg.StatePath == "" {
+		cfg.StatePath = filepath.Join(filepath.Dir(path), "state.json")
 	}
 
 	return cfg, nil

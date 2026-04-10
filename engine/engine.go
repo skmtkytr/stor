@@ -155,10 +155,12 @@ func (e *Engine) Start() error {
 
 		e.sessions[r.ID] = s
 
-		// Auto-resume downloading torrents
-		if r.State == StateDownloading || r.State == StateMetadata {
+		// Auto-resume active torrents (downloading, metadata, or queued)
+		if r.State == StateDownloading || r.State == StateMetadata || r.State == StateAdding {
 			slog.Info("resuming torrent", "id", r.ID, "name", r.Name, "state", r.State)
-			s.Start(e.ctx, e.onSessionDone)
+			if e.activeCount() < e.cfg.MaxActive {
+				s.Start(e.ctx, e.onSessionDone)
+			}
 		}
 	}
 
