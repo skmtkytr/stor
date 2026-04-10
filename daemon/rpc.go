@@ -90,6 +90,8 @@ func (h *RPCHandler) dispatch(method string, params json.RawMessage) (any, *rpcE
 		return h.torrentAdd(params)
 	case "torrent.addFile":
 		return h.torrentAddFile(params)
+	case "torrent.addURL":
+		return h.torrentAddURL(params)
 	case "torrent.remove":
 		return h.torrentRemove(params)
 	case "torrent.pause":
@@ -145,6 +147,49 @@ func (h *RPCHandler) torrentAddFile(params json.RawMessage) (any, *rpcErr) {
 	data, err := base64.StdEncoding.DecodeString(p.Data)
 	if err != nil {
 		return nil, &rpcErr{Code: -32602, Message: "invalid base64 data"}
+	}
+
+	id, err := h.engine.AddTorrentFile(data)
+	if err != nil {
+		return nil, &rpcErr{Code: -32000, Message: err.Error()}
+	}
+	return map[string]string{"id": id}, nil
+}
+
+func (h *RPCHandler) torrentAddURL(params json.RawMessage) (any, *rpcErr) {
+	var p struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.URL == "" {
+		return nil, &rpcErr{Code: -32602, Message: "invalid params: url required"}
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(p.URL)
+	if err != nil {
+		return nil, &rpcErr{Code: -32000, Message: fmt.Sprintf("download failed: %v", err)}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, &rpcErr{Code: -32000, Message: fmt.Sprintf("download failed: HTTP %d", resp.StatusCode)}
+	}
+
+	// Limit to 10MB
+	const maxSize = 10 * 1024 * 1024
+	data := make([]byte, 0, 64*1024)
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			data = append(data, buf[:n]...)
+			if len(data) > maxSize {
+				return nil, &rpcErr{Code: -32000, Message: "torrent file too large (>10MB)"}
+			}
+		}
+		if readErr != nil {
+			break
+		}
 	}
 
 	id, err := h.engine.AddTorrentFile(data)

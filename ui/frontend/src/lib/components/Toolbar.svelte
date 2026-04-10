@@ -18,10 +18,18 @@
 		setTimeout(() => (message = null), 3000);
 	}
 
-	async function addMagnet() {
-		if (!source.trim()) return;
+	async function addSource() {
+		const s = source.trim();
+		if (!s) return;
 		try {
-			await api.add(source.trim());
+			if (s.startsWith("magnet:")) {
+				await api.add(s);
+			} else if (s.startsWith("http://") || s.startsWith("https://")) {
+				// Send URL to daemon — it downloads the .torrent server-side (no CORS issues)
+				await api.addURL(s);
+			} else {
+				await api.add(s);
+			}
 			flash("Torrent added", true);
 			source = "";
 		} catch (e: unknown) {
@@ -81,7 +89,7 @@
 		class="flex items-center gap-1.5 flex-1 min-w-0"
 		onsubmit={(e) => {
 			e.preventDefault();
-			addMagnet();
+			addSource();
 		}}
 	>
 		<input

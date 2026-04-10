@@ -58,6 +58,7 @@ export const api = {
 	get: (id: string) => rpc<TorrentInfo>("torrent.get", { id }),
 	add: (source: string) => rpc<{ id: string }>("torrent.add", { source }),
 	addFile: (data: string) => rpc<{ id: string }>("torrent.addFile", { data }),
+	addURL: (url: string) => rpc<{ id: string }>("torrent.addURL", { url }),
 	remove: (id: string, delete_files: boolean) =>
 		rpc<object>("torrent.remove", { id, delete_files }),
 	pause: (id: string) => rpc<object>("torrent.pause", { id }),
