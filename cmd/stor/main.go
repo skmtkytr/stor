@@ -56,18 +56,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Download
-	fmt.Println("\nDownloading...")
-	content, err := download.Download(tf, peerID, peers)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "download error: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Write output
+	// Download directly to file
 	outPath := filepath.Join(outputDir, tf.Info.Name)
-	if err := os.WriteFile(outPath, content, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "write error: %v\n", err)
+	fmt.Printf("\nDownloading to %s...\n", outPath)
+	if err := download.DownloadToFile(tf, peerID, peers, outPath); err != nil {
+		fmt.Fprintf(os.Stderr, "download error: %v\n", err)
 		os.Exit(1)
 	}
 

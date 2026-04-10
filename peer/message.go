@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // Message IDs as defined in BEP 3.
@@ -25,17 +26,35 @@ type Message struct {
 	Payload []byte
 }
 
+// msgBufPool reuses 4-byte buffers for length prefix reads.
+var msgBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 4)
+		return &b
+	},
+}
+
 // ReadMessage reads a single message from the reader.
 // A keep-alive (length=0) returns nil, nil.
 func ReadMessage(r io.Reader) (*Message, error) {
-	var length uint32
-	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
+	lenBufPtr := msgBufPool.Get().(*[]byte)
+	lenBuf := *lenBufPtr
+	defer msgBufPool.Put(lenBufPtr)
+
+	if _, err := io.ReadFull(r, lenBuf); err != nil {
 		return nil, err
 	}
+	length := binary.BigEndian.Uint32(lenBuf)
 
 	// Keep-alive
 	if length == 0 {
 		return nil, nil
+	}
+
+	// Sanity check: messages shouldn't exceed ~16KiB block + 13 byte header,
+	// but metadata messages can be larger. Cap at 4MB.
+	if length > 4*1024*1024 {
+		return nil, fmt.Errorf("peer: message too large: %d bytes", length)
 	}
 
 	buf := make([]byte, length)
@@ -49,26 +68,21 @@ func ReadMessage(r io.Reader) (*Message, error) {
 	}, nil
 }
 
-// Write serializes the message and writes it to the writer.
+// Write serializes the message into a single write.
 func (m *Message) Write(w io.Writer) error {
-	length := uint32(1 + len(m.Payload))
-	if err := binary.Write(w, binary.BigEndian, length); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.BigEndian, m.ID); err != nil {
-		return err
-	}
-	if len(m.Payload) > 0 {
-		if _, err := w.Write(m.Payload); err != nil {
-			return err
-		}
-	}
-	return nil
+	length := 1 + len(m.Payload)
+	buf := make([]byte, 4+length)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(length))
+	buf[4] = m.ID
+	copy(buf[5:], m.Payload)
+	_, err := w.Write(buf)
+	return err
 }
 
 // WriteKeepAlive writes a keep-alive message (4 zero bytes).
 func WriteKeepAlive(w io.Writer) error {
-	return binary.Write(w, binary.BigEndian, uint32(0))
+	_, err := w.Write([]byte{0, 0, 0, 0})
+	return err
 }
 
 // NewRequestMessage creates a request message (index, begin, length).

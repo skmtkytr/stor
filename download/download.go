@@ -1,9 +1,11 @@
 package download
 
 import (
+	"bufio"
 	"crypto/sha1"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -16,7 +18,7 @@ const (
 	// BlockSize is the standard request block size (16 KiB).
 	BlockSize = 16384
 	// MaxPipeline is the number of outstanding requests per peer.
-	MaxPipeline = 5
+	MaxPipeline = 10
 	// MaxPeers is the maximum number of concurrent peer connections.
 	MaxPeers = 30
 )
@@ -34,13 +36,16 @@ type PieceWork struct {
 	Length int
 }
 
-// Client represents a connection to a single peer.
+// Client represents a connection to a single peer with buffered I/O.
 type Client struct {
-	conn     net.Conn
-	peerID   [20]byte
-	infoHash [20]byte
-	bitfield peer.Bitfield
-	choked   bool
+	conn           net.Conn
+	r              *bufio.Reader
+	w              *bufio.Writer
+	peerID         [20]byte
+	infoHash       [20]byte
+	bitfield       peer.Bitfield
+	choked         bool
+	sentInterested bool
 }
 
 // NewClient connects to a peer, performs the handshake, and receives the bitfield.
@@ -52,10 +57,9 @@ func NewClient(p tracker.Peer, infoHash, peerID [20]byte) (*Client, error) {
 
 	closeOnErr := func() { _ = conn.Close() }
 
-	// Set deadline for entire handshake phase
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
-	// Send handshake
+	// Send handshake (unbuffered, small and one-shot)
 	hs := &peer.Handshake{InfoHash: infoHash, PeerID: peerID}
 	if err := peer.WriteHandshake(conn, hs); err != nil {
 		closeOnErr()
@@ -73,16 +77,18 @@ func NewClient(p tracker.Peer, infoHash, peerID [20]byte) (*Client, error) {
 		return nil, fmt.Errorf("download: info hash mismatch")
 	}
 
-	// Read bitfield (first message should be bitfield)
 	c := &Client{
 		conn:     conn,
+		r:        bufio.NewReaderSize(conn, 64*1024), // 64KB read buffer
+		w:        bufio.NewWriterSize(conn, 32*1024), // 32KB write buffer
 		peerID:   peerID,
 		infoHash: infoHash,
 		choked:   true,
 	}
 
-	msg, err := peer.ReadMessage(conn)
-	_ = conn.SetDeadline(time.Time{}) // clear deadline
+	// Read bitfield
+	msg, err := peer.ReadMessage(c.r)
+	_ = conn.SetDeadline(time.Time{})
 	if err != nil {
 		closeOnErr()
 		return nil, fmt.Errorf("download: read bitfield failed: %w", err)
@@ -104,25 +110,31 @@ func (c *Client) HasPiece(index int) bool {
 	return c.bitfield.HasPiece(index)
 }
 
-// DownloadPiece downloads a single piece from the peer.
-func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
-	_ = c.conn.SetDeadline(time.Now().Add(30 * time.Second))
-	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
-
-	// Send interested
-	msg := &peer.Message{ID: peer.MsgInterested}
-	if err := msg.Write(c.conn); err != nil {
-		return nil, err
+// sendInterested sends an interested message if not already sent.
+func (c *Client) sendInterested() error {
+	if c.sentInterested {
+		return nil
 	}
+	msg := &peer.Message{ID: peer.MsgInterested}
+	if err := msg.Write(c.w); err != nil {
+		return err
+	}
+	if err := c.w.Flush(); err != nil {
+		return err
+	}
+	c.sentInterested = true
+	return nil
+}
 
-	// Wait for unchoke
+// waitForUnchoke reads messages until unchoked or error.
+func (c *Client) waitForUnchoke() error {
 	for c.choked {
-		msg, err := peer.ReadMessage(c.conn)
+		msg, err := peer.ReadMessage(c.r)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if msg == nil {
-			continue // keep-alive
+			continue
 		}
 		switch msg.ID {
 		case peer.MsgUnchoke:
@@ -136,35 +148,56 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 			}
 		}
 	}
+	return nil
+}
 
-	// Download blocks
+// DownloadPiece downloads a single piece from the peer.
+func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
+	_ = c.conn.SetDeadline(time.Now().Add(30 * time.Second))
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+
+	if err := c.sendInterested(); err != nil {
+		return nil, err
+	}
+	if err := c.waitForUnchoke(); err != nil {
+		return nil, err
+	}
+
+	// Download blocks with pipelining
 	buf := make([]byte, pw.Length)
 	downloaded := 0
 	requested := 0
 	backlog := 0
 
 	for downloaded < pw.Length {
-		// Pipeline requests
+		// Fill pipeline — batch writes then flush once
+		flushed := false
 		for backlog < MaxPipeline && requested < pw.Length {
 			blockSize := BlockSize
 			if requested+blockSize > pw.Length {
 				blockSize = pw.Length - requested
 			}
 			req := peer.NewRequestMessage(uint32(pw.Index), uint32(requested), uint32(blockSize))
-			if err := req.Write(c.conn); err != nil {
+			if err := req.Write(c.w); err != nil {
 				return nil, err
 			}
 			requested += blockSize
 			backlog++
+			flushed = false
+		}
+		if !flushed {
+			if err := c.w.Flush(); err != nil {
+				return nil, err
+			}
 		}
 
 		// Read response
-		msg, err := peer.ReadMessage(c.conn)
+		msg, err := peer.ReadMessage(c.r)
 		if err != nil {
 			return nil, err
 		}
 		if msg == nil {
-			continue // keep-alive
+			continue
 		}
 
 		switch msg.ID {
@@ -174,7 +207,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 				return nil, err
 			}
 			if int(idx) != pw.Index {
-				continue // wrong piece
+				continue
 			}
 			copy(buf[begin:], block)
 			downloaded += len(block)
@@ -199,7 +232,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 	return buf, nil
 }
 
-// Download downloads all pieces of a torrent concurrently and returns the assembled data.
+// Download downloads all pieces of a torrent concurrently and writes to the output file.
 func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([]byte, error) {
 	totalLength := tf.Info.Length
 	if totalLength == 0 {
@@ -210,7 +243,10 @@ func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([
 
 	numPieces := len(tf.Info.PieceHashes)
 
-	// Work queue: pieces to download
+	// Deduplicate peers
+	peers = deduplicatePeers(peers)
+
+	// Work queue
 	workCh := make(chan PieceWork, numPieces)
 	for i, hash := range tf.Info.PieceHashes {
 		length := int(tf.Info.PieceLength)
@@ -221,10 +257,8 @@ func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([
 		workCh <- PieceWork{Index: i, Hash: hash, Length: length}
 	}
 
-	// Result channel
 	resultCh := make(chan PieceResult, numPieces)
 
-	// Launch worker per peer (up to MaxPeers)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, MaxPeers)
 
@@ -243,14 +277,12 @@ func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([
 
 			for pw := range workCh {
 				if !client.HasPiece(pw.Index) {
-					// Put it back for another peer
 					workCh <- pw
 					continue
 				}
 
 				data, err := client.DownloadPiece(pw)
 				if err != nil {
-					// Put it back and stop this peer
 					workCh <- pw
 					return
 				}
@@ -260,7 +292,6 @@ func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([
 		}(p)
 	}
 
-	// Close work channel when all workers are done
 	go func() {
 		wg.Wait()
 		close(workCh)
@@ -286,4 +317,118 @@ func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([
 		buf = append(buf, data...)
 	}
 	return buf, nil
+}
+
+// DownloadToFile downloads all pieces concurrently and writes directly to a file.
+// Avoids holding all data in memory.
+func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer, path string) error {
+	totalLength := tf.Info.Length
+	if totalLength == 0 {
+		for _, f := range tf.Info.Files {
+			totalLength += f.Length
+		}
+	}
+
+	numPieces := len(tf.Info.PieceHashes)
+
+	// Create output file, preallocate
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := f.Truncate(totalLength); err != nil {
+		return fmt.Errorf("download: truncate failed: %w", err)
+	}
+
+	// Deduplicate peers
+	peers = deduplicatePeers(peers)
+
+	// Work queue
+	workCh := make(chan PieceWork, numPieces)
+	for i, hash := range tf.Info.PieceHashes {
+		length := int(tf.Info.PieceLength)
+		remaining := int(totalLength) - i*int(tf.Info.PieceLength)
+		if remaining < length {
+			length = remaining
+		}
+		workCh <- PieceWork{Index: i, Hash: hash, Length: length}
+	}
+
+	// Result: just index + data, we write to file from the collector goroutine
+	type writeResult struct {
+		index int
+		data  []byte
+	}
+	resultCh := make(chan writeResult, numPieces)
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, MaxPeers)
+
+	for _, p := range peers {
+		wg.Add(1)
+		go func(p tracker.Peer) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			client, err := NewClient(p, tf.InfoHash, peerID)
+			if err != nil {
+				return
+			}
+			defer func() { _ = client.Close() }()
+
+			for pw := range workCh {
+				if !client.HasPiece(pw.Index) {
+					workCh <- pw
+					continue
+				}
+
+				data, err := client.DownloadPiece(pw)
+				if err != nil {
+					workCh <- pw
+					return
+				}
+
+				resultCh <- writeResult{index: pw.Index, data: data}
+			}
+		}(p)
+	}
+
+	go func() {
+		wg.Wait()
+		close(workCh)
+	}()
+
+	pieceLength := int(tf.Info.PieceLength)
+	for completed := 0; completed < numPieces; {
+		select {
+		case res := <-resultCh:
+			offset := int64(res.index) * int64(pieceLength)
+			if _, err := f.WriteAt(res.data, offset); err != nil {
+				return fmt.Errorf("download: write piece %d failed: %w", res.index, err)
+			}
+			completed++
+			fmt.Printf("\rpiece %d/%d downloaded", completed, numPieces)
+		case <-time.After(2 * time.Minute):
+			return fmt.Errorf("download: timed out at %d/%d pieces", completed, numPieces)
+		}
+	}
+	fmt.Println()
+
+	return nil
+}
+
+func deduplicatePeers(peers []tracker.Peer) []tracker.Peer {
+	seen := make(map[string]bool, len(peers))
+	result := make([]tracker.Peer, 0, len(peers))
+	for _, p := range peers {
+		key := p.String()
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, p)
+		}
+	}
+	return result
 }
