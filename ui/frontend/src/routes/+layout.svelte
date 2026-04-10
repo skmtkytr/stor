@@ -7,6 +7,4 @@
 	<title>stor</title>
 </svelte:head>
 
-<div class="dark">
-	{@render children()}
-</div>
+{@render children()}

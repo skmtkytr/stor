@@ -1,53 +1,41 @@
 <script lang="ts">
 	import type { TorrentInfo } from "$lib/types";
-	import { formatBytes, formatSpeed, formatETA } from "$lib/format";
+	import { torrents } from "$lib/stores/torrents.svelte";
 	import { api } from "$lib/rpc";
-	import { type ColDef, ALL_COLUMNS, loadColConfig, saveColConfig } from "$lib/columns";
-	import { Badge } from "$lib/components/ui/badge";
-	import { Progress } from "$lib/components/ui/progress";
-	import * as ContextMenu from "$lib/components/ui/context-menu";
-	import { toast } from "svelte-sonner";
+	import TorrentRow from "./TorrentRow.svelte";
+	import ContextActions from "./ContextActions.svelte";
 
 	let {
-		torrents,
-		columns = $bindable<ColDef[]>([]),
+		filter = "all",
+		onSelectionChange,
 	}: {
-		torrents: TorrentInfo[];
-		columns: ColDef[];
+		filter: string;
+		onSelectionChange: (ids: string[]) => void;
 	} = $props();
 
 	let selected = $state(new Set<string>());
 	let lastIdx = $state<number | null>(null);
 	let sortKey = $state<string>("queue");
 	let sortDesc = $state(false);
-	let sortVersion = $state(0); // bumped on sort change to trigger re-sort
-	let container: HTMLDivElement;
-	let initialized = $state(false);
+	let ctxPos = $state<{ x: number; y: number } | null>(null);
 
-	// Stable order: sort once per sort-change, then just update data in place
-	let sortedIds = $state<string[]>([]);
-
-	const visibleCols = $derived(columns.filter((c) => c.visible));
-
-	// --- Init: fit Name to container ---
+	// Notify parent of selection changes
 	$effect(() => {
-		if (container && !initialized && columns.length > 0) {
-			const saved = loadColConfig();
-			if (!saved) {
-				const containerW = container.clientWidth;
-				const others = columns.filter((c) => c.id !== "name" && c.visible);
-				const fixedSum = others.reduce((s, c) => s + c.width, 0);
-				const nameIdx = columns.findIndex((c) => c.id === "name");
-				if (nameIdx >= 0) {
-					const nameW = Math.max(columns[nameIdx].minWidth, containerW - fixedSum);
-					columns[nameIdx] = { ...columns[nameIdx], width: nameW };
-				}
-			}
-			initialized = true;
-		}
+		onSelectionChange([...selected]);
 	});
 
-	// --- Sorting ---
+	// --- Filtering ---
+	const filterFn: Record<string, (t: TorrentInfo) => boolean> = {
+		all: () => true,
+		downloading: (t) => t.state === "downloading" || t.state === "metadata" || t.state === "adding",
+		complete: (t) => t.state === "complete",
+		paused: (t) => t.state === "paused",
+		error: (t) => t.state === "error",
+	};
+
+	const filtered = $derived(torrents.list.filter(filterFn[filter] ?? filterFn.all));
+
+	// --- Sorting (dynamic: re-sort every poll) ---
 	const stateOrder: Record<string, number> = {
 		downloading: 0, metadata: 1, adding: 2, paused: 3, error: 4, complete: 5,
 	};
@@ -70,40 +58,28 @@
 		}
 	}
 
-	function doSort(list: TorrentInfo[]): TorrentInfo[] {
-		return [...list].sort((a, b) => {
-			const va = getSortValue(a, sortKey);
-			const vb = getSortValue(b, sortKey);
-			const cmp = typeof va === "string" ? va.localeCompare(vb as string) : (va as number) - (vb as number);
-			return sortDesc ? -cmp : cmp;
+	// Always re-sort on every data update — read torrents.list directly to
+	// create a reactive dependency on the raw polling data, not just the
+	// filtered reference. This ensures progress/speed changes trigger re-sort.
+	const sorted = $derived.by(() => {
+		// Explicit dependency: read the raw list length + first item to ensure
+		// Svelte tracks the array identity change from polling.
+		const _raw = torrents.list;
+		const key = sortKey;
+		const desc = sortDesc;
+		return [...filtered].sort((a, b) => {
+			const va = getSortValue(a, key);
+			const vb = getSortValue(b, key);
+			const cmp = typeof va === "string"
+				? va.localeCompare(vb as string)
+				: (va as number) - (vb as number);
+			return desc ? -cmp : cmp;
 		});
-	}
-
-	// Re-sort only when sort key/direction changes or torrents are added/removed
-	$effect(() => {
-		// Dependencies: sortVersion, torrents length, torrent IDs
-		const ids = new Set(torrents.map((t) => t.id));
-		const _ = sortVersion; // explicit dependency
-		if (ids.size !== sortedIds.length || sortedIds.some((id) => !ids.has(id))) {
-			// Torrents added or removed — full re-sort
-			sortedIds = doSort(torrents).map((t) => t.id);
-		}
 	});
-
-	// Map for fast lookup
-	const torrentMap = $derived(new Map(torrents.map((t) => [t.id, t])));
-
-	// Build display list: stable order from sortedIds, with live data from torrentMap
-	const sorted = $derived(
-		sortedIds.map((id) => torrentMap.get(id)).filter((t): t is TorrentInfo => t !== undefined)
-	);
 
 	function toggleSort(key: string) {
 		if (sortKey === key) sortDesc = !sortDesc;
 		else { sortKey = key; sortDesc = false; }
-		// Force re-sort
-		sortedIds = doSort(torrents).map((t) => t.id);
-		sortVersion++;
 	}
 
 	// --- Selection ---
@@ -126,81 +102,53 @@
 		lastIdx = idx;
 	}
 
-	function handleCtxTarget(id: string) {
-		if (!selected.has(id)) selected = new Set([id]);
-	}
-
-	// --- Resize ---
-	let resizing = $state<number | null>(null);
-
-	function startResize(e: MouseEvent, colIdx: number) {
+	function handleContextMenu(e: MouseEvent, id: string) {
 		e.preventDefault();
-		e.stopPropagation();
-		// Find the actual column in the full array
-		const col = visibleCols[colIdx];
-		const realIdx = columns.findIndex((c) => c.id === col.id);
-		resizing = colIdx;
-		const startX = e.pageX;
-		const startW = col.width;
-
-		const onMove = (ev: MouseEvent) => {
-			columns[realIdx] = { ...columns[realIdx], width: Math.max(col.minWidth, startW + ev.pageX - startX) };
-		};
-		const onUp = () => {
-			resizing = null;
-			document.removeEventListener("mousemove", onMove);
-			document.removeEventListener("mouseup", onUp);
-			saveColConfig(columns);
-		};
-		document.addEventListener("mousemove", onMove);
-		document.addEventListener("mouseup", onUp);
+		if (!selected.has(id)) selected = new Set([id]);
+		ctxPos = { x: e.clientX, y: e.clientY };
 	}
 
-	const tableWidth = $derived(visibleCols.reduce((s, c) => s + c.width, 0));
-
-	// --- Cell renderer ---
-	function cellValue(col: ColDef, t: TorrentInfo): string {
-		switch (col.id) {
-			case "name": return t.name || t.id.slice(0, 16) + "...";
-			case "size": return t.total_bytes ? formatBytes(t.total_bytes) : "-";
-			case "speed": return t.state === "downloading" && t.progress.down_speed ? formatSpeed(t.progress.down_speed) : "-";
-			case "eta": return t.state === "downloading" ? formatETA(t.progress.downloaded, t.progress.total, t.progress.down_speed) : "-";
-			case "peers": return t.state === "downloading" && t.progress.active_peers ? String(t.progress.active_peers) : "-";
-			case "queue": return String(t.queue_position ?? "-");
-			default: return "";
-		}
-	}
-
-	const stateVariant: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
-		downloading: "default", complete: "secondary", paused: "outline",
-		error: "destructive", metadata: "outline", adding: "outline",
-	};
-
-	// --- Batch actions ---
-	function selIds(): string[] { return [...selected]; }
-
-	async function batchAction(action: string) {
-		const ids = selIds();
+	// --- Batch actions (called from parent via exported function) ---
+	export async function batchAction(type: string) {
+		const ids = [...selected];
 		if (!ids.length) return;
-		if (action === "remove") {
+
+		if (type === "remove") {
+			if (!confirm(`Remove ${ids.length} torrent(s)?`)) return;
 			const del = confirm("Also delete downloaded files?");
 			await Promise.all(ids.map((id) => api.remove(id, del).catch(() => {})));
 			selected = new Set();
-			toast.success(`${ids.length} removed`);
-		} else if (action === "pause") {
+		} else if (type === "pause") {
 			await Promise.all(ids.map((id) => api.pause(id).catch(() => {})));
-			toast.success(`${ids.length} paused`);
-		} else if (action === "resume") {
+		} else if (type === "resume") {
 			await Promise.all(ids.map((id) => api.resume(id).catch(() => {})));
-			toast.success(`${ids.length} resumed`);
-		} else if (action === "queueTop") {
-			for (const id of ids.reverse()) await api.queueTop(id).catch(() => {});
-			toast.success(`Moved to top`);
-		} else if (action === "queueBottom") {
+		} else if (type === "queueTop") {
+			for (const id of [...ids].reverse()) await api.queueTop(id).catch(() => {});
+		} else if (type === "queueBottom") {
 			for (const id of ids) await api.queueBottom(id).catch(() => {});
-			toast.success(`Moved to bottom`);
 		}
 	}
+
+	const columns = [
+		{ id: "queue", label: "#", align: "center" },
+		{ id: "name", label: "Name", align: "left" },
+		{ id: "size", label: "Size", align: "right" },
+		{ id: "progress", label: "Progress", align: "left" },
+		{ id: "speed", label: "Speed", align: "right" },
+		{ id: "eta", label: "ETA", align: "right" },
+		{ id: "peers", label: "Peers", align: "right" },
+	] as const;
+
+	// Column widths
+	const colWidths: Record<string, string> = {
+		queue: "w-10",
+		name: "",
+		size: "w-20",
+		progress: "w-48",
+		speed: "w-24",
+		eta: "w-20",
+		peers: "w-14",
+	};
 </script>
 
 <svelte:window
@@ -209,111 +157,64 @@
 			e.preventDefault();
 			selected = new Set(sorted.map((t) => t.id));
 		}
-		if (e.key === "Escape") { selected = new Set(); lastIdx = null; }
+		if (e.key === "Escape") {
+			selected = new Set();
+			lastIdx = null;
+			ctxPos = null;
+		}
 		if (e.key === "Delete" && selected.size > 0) batchAction("remove");
 	}}
 />
 
-<ContextMenu.Root>
-	<ContextMenu.Trigger class="w-full">
-		<div class="rounded-lg border bg-card overflow-hidden">
-			<div class="overflow-x-auto" bind:this={container}>
-				<table style="table-layout: fixed; width: max({tableWidth}px, 100%);">
-					{#each visibleCols as col}
-						<col style="width: {col.width}px;" />
-					{/each}
-
-					<thead>
-						<tr class="border-b bg-muted/40">
-							{#each visibleCols as col, ci}
-								<th
-									class="relative h-9 select-none px-3 text-xs font-medium uppercase tracking-wider text-muted-foreground"
-									class:text-right={col.align === "right"}
-									class:text-center={col.align === "center"}
-								>
-									<button
-										class="inline-flex items-center gap-1 hover:text-foreground transition-colors"
-										onclick={() => toggleSort(col.id)}
-									>
-										{col.label}
-										{#if sortKey === col.id}
-											<span class="text-foreground">{sortDesc ? "↓" : "↑"}</span>
-										{/if}
-									</button>
-									{#if ci < visibleCols.length - 1}
-										<!-- svelte-ignore a11y_no_static_element_interactions -->
-										<div
-											class="absolute right-0 top-0 h-full w-1.5 cursor-col-resize select-none {resizing === ci ? 'bg-primary' : 'hover:bg-primary/40'}"
-											onmousedown={(e) => startResize(e, ci)}
-										></div>
-									{/if}
-								</th>
-							{/each}
-						</tr>
-					</thead>
-
-					<tbody>
-						{#each sorted as t, idx (t.id)}
-							{@const p = t.progress}
-							<tr
-								class="h-11 border-b transition-colors hover:bg-muted/40 cursor-default select-none {selected.has(t.id) ? 'bg-accent' : ''}"
-								onclick={(e) => handleRowClick(e, t.id, idx)}
-								oncontextmenu={() => handleCtxTarget(t.id)}
-							>
-								{#each visibleCols as col}
-									<td
-										class="truncate px-3 text-sm"
-										class:text-right={col.align === "right"}
-										class:text-center={col.align === "center"}
-										class:tabular-nums={col.align === "right" || col.id === "queue"}
-										class:text-muted-foreground={col.id !== "name"}
-									>
-										{#if col.id === "name"}
-											<span class="font-medium" title={t.name || t.id}>{cellValue(col, t)}</span>
-											{#if t.error}
-												<span class="block truncate text-xs text-destructive">{t.error}</span>
-											{/if}
-										{:else if col.id === "progress"}
-											<div class="flex items-center gap-2">
-												<Progress value={p.percent} class="h-1.5 flex-1" />
-												<span class="w-10 text-right text-xs tabular-nums">{(p.percent ?? 0).toFixed(0)}%</span>
-											</div>
-										{:else if col.id === "state"}
-											<Badge variant={stateVariant[t.state] ?? "outline"} class="text-[10px]">{t.state}</Badge>
-										{:else}
-											{cellValue(col, t)}
-										{/if}
-									</td>
-								{/each}
-							</tr>
-						{:else}
-							<tr>
-								<td colspan={visibleCols.length} class="h-32 text-center text-muted-foreground">
-									No torrents yet. Add a magnet link or upload a .torrent file.
-								</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-		</div>
-	</ContextMenu.Trigger>
-
-	<ContextMenu.Content class="w-52">
-		<ContextMenu.Item onclick={() => batchAction("resume")}>Resume</ContextMenu.Item>
-		<ContextMenu.Item onclick={() => batchAction("pause")}>Pause</ContextMenu.Item>
-		<ContextMenu.Separator />
-		<ContextMenu.Item onclick={() => batchAction("queueTop")}>Move to Top</ContextMenu.Item>
-		<ContextMenu.Item onclick={() => batchAction("queueBottom")}>Move to Bottom</ContextMenu.Item>
-		<ContextMenu.Separator />
-		<ContextMenu.Item class="text-destructive focus:text-destructive" onclick={() => batchAction("remove")}>
-			Remove ({selected.size})
-		</ContextMenu.Item>
-	</ContextMenu.Content>
-</ContextMenu.Root>
+<div class="flex-1 overflow-auto">
+	<table class="w-full border-collapse">
+		<thead class="sticky top-0 z-10">
+			<tr class="bg-zinc-900 border-b border-zinc-800">
+				{#each columns as col}
+					<th
+						class="h-8 select-none px-3 text-[11px] font-medium uppercase tracking-wider text-zinc-500 {colWidths[col.id] ?? ''}
+							{col.align === 'right' ? 'text-right' : col.align === 'center' ? 'text-center' : 'text-left'}"
+					>
+						<button
+							class="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors"
+							onclick={() => toggleSort(col.id)}
+						>
+							{col.label}
+							{#if sortKey === col.id}
+								<span class="text-zinc-200">{sortDesc ? "\u2193" : "\u2191"}</span>
+							{/if}
+						</button>
+					</th>
+				{/each}
+			</tr>
+		</thead>
+		<tbody>
+			{#each sorted as t, idx (t.id)}
+				<TorrentRow
+					torrent={t}
+					selected={selected.has(t.id)}
+					onclick={(e) => handleRowClick(e, t.id, idx)}
+					oncontextmenu={(e) => handleContextMenu(e, t.id)}
+				/>
+			{:else}
+				<tr>
+					<td colspan={columns.length} class="h-32 text-center text-zinc-600 text-sm">
+						No torrents. Add a magnet link or drop a .torrent file.
+					</td>
+				</tr>
+			{/each}
+		</tbody>
+	</table>
+</div>
 
 {#if selected.size > 0}
-	<p class="mt-2 text-xs text-muted-foreground">
-		{selected.size} selected — Right-click for actions · Ctrl+A all · Esc deselect · Delete remove
-	</p>
+	<div class="border-t border-zinc-800 px-3 py-1 text-xs text-zinc-500">
+		{selected.size} selected — Ctrl+A all &middot; Esc deselect &middot; Del remove
+	</div>
 {/if}
+
+<ContextActions
+	selectedIds={[...selected]}
+	position={ctxPos}
+	onClose={() => (ctxPos = null)}
+/>
