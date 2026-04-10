@@ -84,6 +84,25 @@ func Parse(data []byte) (*TorrentFile, error) {
 	return tf, nil
 }
 
+// TrackerURLs returns a deduplicated list of all tracker URLs.
+func (tf *TorrentFile) TrackerURLs() []string {
+	seen := map[string]bool{}
+	var urls []string
+	if tf.Announce != "" && !seen[tf.Announce] {
+		seen[tf.Announce] = true
+		urls = append(urls, tf.Announce)
+	}
+	for _, tier := range tf.AnnounceList {
+		for _, u := range tier {
+			if !seen[u] {
+				seen[u] = true
+				urls = append(urls, u)
+			}
+		}
+	}
+	return urls
+}
+
 func parseInfo(d map[string]any) (Info, error) {
 	var info Info
 

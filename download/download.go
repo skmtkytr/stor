@@ -287,7 +287,8 @@ func buildWorkQueue(tf *torrent.TorrentFile, totalLength int64) chan PieceWork {
 	return workCh
 }
 
-func totalSize(tf *torrent.TorrentFile) int64 {
+// TotalSize returns the total size of the torrent in bytes.
+func TotalSize(tf *torrent.TorrentFile) int64 {
 	if tf.Info.Length > 0 {
 		return tf.Info.Length
 	}
@@ -300,7 +301,7 @@ func totalSize(tf *torrent.TorrentFile) int64 {
 
 // Download downloads all pieces of a torrent concurrently and returns the assembled data.
 func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([]byte, error) {
-	tl := totalSize(tf)
+	tl := TotalSize(tf)
 	numPieces := len(tf.Info.PieceHashes)
 	peers = deduplicatePeers(peers)
 
@@ -331,7 +332,7 @@ func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([
 
 // DownloadToFile downloads all pieces concurrently and writes directly to a file.
 func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer, path string) error {
-	tl := totalSize(tf)
+	tl := TotalSize(tf)
 	numPieces := len(tf.Info.PieceHashes)
 	peers = deduplicatePeers(peers)
 
@@ -372,7 +373,7 @@ func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Pe
 // DownloadToFileCtx is like DownloadToFile but accepts a context for cancellation.
 // Progress is provided externally so the caller can read snapshots.
 func DownloadToFileCtx(ctx context.Context, tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer, path string, progress *Progress) error {
-	tl := totalSize(tf)
+	tl := TotalSize(tf)
 	numPieces := len(tf.Info.PieceHashes)
 	peers = deduplicatePeers(peers)
 
