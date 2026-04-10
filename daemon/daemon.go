@@ -30,7 +30,7 @@ func New(eng *engine.Engine, cfg Config) *Daemon {
 
 	mux := http.NewServeMux()
 
-	rpc := NewRPCHandler(eng)
+	rpc := NewRPCHandler(eng, &d.cfg)
 
 	// API routes (require auth)
 	mux.Handle("POST /api/rpc", d.authMiddleware(rpc))

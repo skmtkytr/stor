@@ -32,11 +32,12 @@ type rpcErr struct {
 // RPCHandler handles JSON-RPC 2.0 requests.
 type RPCHandler struct {
 	engine *engine.Engine
+	cfg    *Config
 }
 
 // NewRPCHandler creates a new RPC handler.
-func NewRPCHandler(eng *engine.Engine) *RPCHandler {
-	return &RPCHandler{engine: eng}
+func NewRPCHandler(eng *engine.Engine, cfg *Config) *RPCHandler {
+	return &RPCHandler{engine: eng, cfg: cfg}
 }
 
 // ServeHTTP handles POST /api/rpc.
@@ -235,6 +236,8 @@ func (h *RPCHandler) daemonSetMaxActive(params json.RawMessage) (any, *rpcErr) {
 		return nil, &rpcErr{Code: -32602, Message: "invalid params: max_active must be >= 1"}
 	}
 	h.engine.SetMaxActive(p.MaxActive)
+	h.cfg.MaxActive = p.MaxActive
+	_ = h.cfg.Save()
 	return map[string]int{"max_active": p.MaxActive}, nil
 }
 

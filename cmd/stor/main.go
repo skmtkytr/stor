@@ -53,7 +53,7 @@ Usage:
 Daemon options:
   --port PORT       Listen port (default: 9090)
   --dir DIR         Download directory (default: ~/Downloads)
-  --config PATH     Config file path (default: ~/.config/stor/config.json)
+  --config PATH     Config file path (default: ~/.config/stor/config.toml)
 `)
 }
 
@@ -62,7 +62,7 @@ Daemon options:
 func runDaemon() {
 	// Parse daemon flags
 	home, _ := os.UserHomeDir()
-	configPath := filepath.Join(home, ".config", "stor", "config.json")
+	configPath := filepath.Join(home, ".config", "stor", "config.toml")
 	port := 0
 	dir := ""
 
@@ -105,7 +105,7 @@ func runDaemon() {
 		DownloadDir: cfg.DownloadDir,
 		StatePath:   cfg.StatePath,
 		ListenPort:  6881,
-		MaxActive:   5,
+		MaxActive:   cfg.MaxActive,
 	}
 
 	eng, err := engine.New(engCfg)

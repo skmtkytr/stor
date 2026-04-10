@@ -1,20 +1,25 @@
 package daemon
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // Config holds daemon configuration.
 type Config struct {
-	Port        int    `json:"port"`
-	DownloadDir string `json:"download_dir"`
-	APIKey      string `json:"api_key"`
-	StatePath   string `json:"state_path"`
+	Port        int    `toml:"port"`
+	DownloadDir string `toml:"download_dir"`
+	APIKey      string `toml:"api_key"`
+	StatePath   string `toml:"state_path"`
+	MaxActive   int    `toml:"max_active"`
+
+	path string // file path for saving back
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -25,19 +30,21 @@ func DefaultConfig() Config {
 		Port:        9090,
 		DownloadDir: filepath.Join(home, "Downloads"),
 		StatePath:   filepath.Join(configDir, "state.json"),
+		MaxActive:   5,
 	}
 }
 
-// LoadConfig reads config from a file. If the file doesn't exist,
+// LoadConfig reads config from a TOML file. If the file doesn't exist,
 // creates it with defaults and a generated API key.
 func LoadConfig(path string) (Config, error) {
 	cfg := DefaultConfig()
+	cfg.path = path
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			cfg.APIKey = generateAPIKey()
-			if err := saveConfig(path, cfg); err != nil {
+			if err := cfg.Save(); err != nil {
 				return cfg, fmt.Errorf("daemon: save default config: %w", err)
 			}
 			return cfg, nil
@@ -45,30 +52,79 @@ func LoadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("daemon: read config: %w", err)
 	}
 
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("daemon: parse config: %w", err)
-	}
+	parseTOML(string(data), &cfg)
 
-	// Generate API key if missing
 	if cfg.APIKey == "" {
 		cfg.APIKey = generateAPIKey()
-		if err := saveConfig(path, cfg); err != nil {
+		if err := cfg.Save(); err != nil {
 			return cfg, fmt.Errorf("daemon: save config with key: %w", err)
 		}
+	}
+	if cfg.MaxActive < 1 {
+		cfg.MaxActive = 5
 	}
 
 	return cfg, nil
 }
 
-func saveConfig(path string, cfg Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+// Save writes the config to disk as TOML.
+func (c *Config) Save() error {
+	if c.path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
+
+	content := fmt.Sprintf(`# stor daemon configuration
+
+port = %d
+download_dir = %q
+api_key = %q
+state_path = %q
+max_active = %d
+`, c.Port, c.DownloadDir, c.APIKey, c.StatePath, c.MaxActive)
+
+	return os.WriteFile(c.path, []byte(content), 0o600)
+}
+
+// parseTOML is a minimal TOML parser for flat key = value pairs.
+func parseTOML(data string, cfg *Config) {
+	scanner := bufio.NewScanner(strings.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || line[0] == '#' || line[0] == '[' {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
+
+		// Unquote string values
+		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+			val, _ = strconv.Unquote(val)
+		}
+
+		switch key {
+		case "port":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.Port = n
+			}
+		case "download_dir":
+			cfg.DownloadDir = val
+		case "api_key":
+			cfg.APIKey = val
+		case "state_path":
+			cfg.StatePath = val
+		case "max_active":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.MaxActive = n
+			}
+		}
 	}
-	return os.WriteFile(path, data, 0o600)
 }
 
 func generateAPIKey() string {
