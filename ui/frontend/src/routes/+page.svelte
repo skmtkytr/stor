@@ -3,6 +3,7 @@
 	import type { TorrentInfo, EngineStats } from "$lib/types";
 	import { api, getApiKey, setApiKey } from "$lib/rpc";
 	import { formatSpeed } from "$lib/format";
+	import { ALL_COLUMNS, loadColConfig, saveColConfig, type ColDef } from "$lib/columns";
 	import AuthScreen from "$lib/components/AuthScreen.svelte";
 	import TorrentTable from "$lib/components/TorrentTable.svelte";
 	import AddBar from "$lib/components/AddBar.svelte";
@@ -16,14 +17,19 @@
 	let settingsOpen = $state(false);
 	let interval: ReturnType<typeof setInterval>;
 
+	// Column config: shared between table and settings
+	let columns = $state<ColDef[]>(loadColConfig() ?? ALL_COLUMNS.map((c) => ({ ...c })));
+
+	function onColumnsChange() {
+		saveColConfig(columns);
+	}
+
 	async function refresh() {
 		try {
 			const [t, s] = await Promise.all([api.list(), api.stats()]);
 			torrents = t ?? [];
 			stats = s;
-		} catch {
-			// ignore polling errors
-		}
+		} catch { /* ignore */ }
 	}
 
 	function startPolling() {
@@ -57,7 +63,6 @@
 	<AuthScreen {onAuth} />
 {:else}
 	<div class="dark flex min-h-screen flex-col bg-background text-foreground">
-		<!-- Header -->
 		<header class="flex items-center justify-between border-b px-4 py-2.5">
 			<div class="flex items-center gap-4">
 				<h1 class="text-lg font-bold tracking-tight">stor</h1>
@@ -76,16 +81,14 @@
 			</Button>
 		</header>
 
-		<!-- Add bar -->
 		<div class="border-b px-4 py-2.5">
 			<AddBar />
 		</div>
 
-		<!-- Torrent list -->
 		<div class="flex-1 overflow-auto p-4">
-			<TorrentTable {torrents} />
+			<TorrentTable {torrents} bind:columns />
 		</div>
 	</div>
 
-	<SettingsDialog {stats} bind:open={settingsOpen} />
+	<SettingsDialog {stats} bind:open={settingsOpen} bind:columns {onColumnsChange} />
 {/if}

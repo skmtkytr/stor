@@ -2,34 +2,20 @@
 	import type { TorrentInfo } from "$lib/types";
 	import { formatBytes, formatSpeed, formatETA } from "$lib/format";
 	import { api } from "$lib/rpc";
+	import { type ColDef, ALL_COLUMNS, loadColConfig, saveColConfig } from "$lib/columns";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Progress } from "$lib/components/ui/progress";
 	import * as ContextMenu from "$lib/components/ui/context-menu";
 	import { toast } from "svelte-sonner";
 
-	let { torrents }: { torrents: TorrentInfo[] } = $props();
+	let {
+		torrents,
+		columns = $bindable<ColDef[]>([]),
+	}: {
+		torrents: TorrentInfo[];
+		columns: ColDef[];
+	} = $props();
 
-	// --- Column definitions ---
-	interface ColDef {
-		id: string;
-		label: string;
-		width: number;
-		minWidth: number;
-		align?: "left" | "right" | "center";
-	}
-
-	const defaultCols: ColDef[] = [
-		{ id: "name", label: "Name", width: 400, minWidth: 150 },
-		{ id: "size", label: "Size", width: 85, minWidth: 60, align: "right" },
-		{ id: "progress", label: "Progress", width: 170, minWidth: 100 },
-		{ id: "speed", label: "Speed", width: 90, minWidth: 60, align: "right" },
-		{ id: "eta", label: "ETA", width: 75, minWidth: 50, align: "right" },
-		{ id: "peers", label: "Peers", width: 55, minWidth: 40, align: "right" },
-		{ id: "state", label: "State", width: 95, minWidth: 65 },
-		{ id: "queue", label: "#", width: 45, minWidth: 35, align: "center" },
-	];
-
-	let cols = $state<ColDef[]>(defaultCols.map((c) => ({ ...c })));
 	let selected = $state(new Set<string>());
 	let lastIdx = $state<number | null>(null);
 	let sortKey = $state<string>("queue_position");
@@ -37,39 +23,26 @@
 	let container: HTMLDivElement;
 	let initialized = $state(false);
 
-	// --- Persistence ---
-	function loadCols(): ColDef[] | null {
-		try {
-			const saved = JSON.parse(localStorage.getItem("stor_cols") ?? "null");
-			if (Array.isArray(saved) && saved.length === defaultCols.length &&
-				saved.every((w: number) => w >= 30 && w <= 5000)) {
-				return defaultCols.map((d, i) => ({ ...d, width: saved[i] }));
-			}
-		} catch { /* ignore */ }
-		return null;
-	}
+	const visibleCols = $derived(columns.filter((c) => c.visible));
 
-	function initCols() {
-		const saved = loadCols();
-		if (saved) {
-			cols = saved;
-		} else if (container) {
-			// Fit to container: Name gets remaining space
-			const containerW = container.clientWidth;
-			const fixedSum = defaultCols.slice(1).reduce((s, c) => s + c.width, 0);
-			const nameW = Math.max(defaultCols[0].minWidth, containerW - fixedSum);
-			cols = defaultCols.map((c, i) => ({ ...c, width: i === 0 ? nameW : c.width }));
-		}
-		initialized = true;
-	}
-
+	// --- Init: fit Name to container ---
 	$effect(() => {
-		if (container && !initialized) initCols();
+		if (container && !initialized && columns.length > 0) {
+			const saved = loadColConfig();
+			if (!saved) {
+				// First load: stretch Name to fill
+				const containerW = container.clientWidth;
+				const others = columns.filter((c) => c.id !== "name" && c.visible);
+				const fixedSum = others.reduce((s, c) => s + c.width, 0);
+				const nameIdx = columns.findIndex((c) => c.id === "name");
+				if (nameIdx >= 0) {
+					const nameW = Math.max(columns[nameIdx].minWidth, containerW - fixedSum);
+					columns[nameIdx] = { ...columns[nameIdx], width: nameW };
+				}
+			}
+			initialized = true;
+		}
 	});
-
-	function saveCols() {
-		localStorage.setItem("stor_cols", JSON.stringify(cols.map((c) => c.width)));
-	}
 
 	// --- Sorting ---
 	const stateOrder: Record<string, number> = {
@@ -89,7 +62,7 @@
 			}
 			case "peers": return t.progress.active_peers ?? 0;
 			case "state": return stateOrder[t.state] ?? 9;
-			case "queue_position": return t.queue_position ?? 9999;
+			case "queue": return t.queue_position ?? 9999;
 			default: return 0;
 		}
 	}
@@ -135,29 +108,44 @@
 	// --- Resize ---
 	let resizing = $state<number | null>(null);
 
-	function startResize(e: MouseEvent, idx: number) {
+	function startResize(e: MouseEvent, colIdx: number) {
 		e.preventDefault();
 		e.stopPropagation();
-		resizing = idx;
+		// Find the actual column in the full array
+		const col = visibleCols[colIdx];
+		const realIdx = columns.findIndex((c) => c.id === col.id);
+		resizing = colIdx;
 		const startX = e.pageX;
-		const startW = cols[idx].width;
+		const startW = col.width;
 
 		const onMove = (ev: MouseEvent) => {
-			cols[idx] = { ...cols[idx], width: Math.max(cols[idx].minWidth, startW + ev.pageX - startX) };
+			columns[realIdx] = { ...columns[realIdx], width: Math.max(col.minWidth, startW + ev.pageX - startX) };
 		};
 		const onUp = () => {
 			resizing = null;
 			document.removeEventListener("mousemove", onMove);
 			document.removeEventListener("mouseup", onUp);
-			saveCols();
+			saveColConfig(columns);
 		};
 		document.addEventListener("mousemove", onMove);
 		document.addEventListener("mouseup", onUp);
 	}
 
-	const tableWidth = $derived(cols.reduce((s, c) => s + c.width, 0));
+	const tableWidth = $derived(visibleCols.reduce((s, c) => s + c.width, 0));
 
-	// --- State badge variant ---
+	// --- Cell renderer ---
+	function cellValue(col: ColDef, t: TorrentInfo): string {
+		switch (col.id) {
+			case "name": return t.name || t.id.slice(0, 16) + "...";
+			case "size": return t.total_bytes ? formatBytes(t.total_bytes) : "-";
+			case "speed": return t.state === "downloading" && t.progress.down_speed ? formatSpeed(t.progress.down_speed) : "-";
+			case "eta": return t.state === "downloading" ? formatETA(t.progress.downloaded, t.progress.total, t.progress.down_speed) : "-";
+			case "peers": return t.state === "downloading" && t.progress.active_peers ? String(t.progress.active_peers) : "-";
+			case "queue": return String(t.queue_position ?? "-");
+			default: return "";
+		}
+	}
+
 	const stateVariant: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
 		downloading: "default", complete: "secondary", paused: "outline",
 		error: "destructive", metadata: "outline", adding: "outline",
@@ -206,13 +194,13 @@
 		<div class="rounded-lg border bg-card overflow-hidden">
 			<div class="overflow-x-auto" bind:this={container}>
 				<table style="table-layout: fixed; width: max({tableWidth}px, 100%);">
-					{#each cols as col}
+					{#each visibleCols as col}
 						<col style="width: {col.width}px;" />
 					{/each}
 
 					<thead>
 						<tr class="border-b bg-muted/40">
-							{#each cols as col, ci}
+							{#each visibleCols as col, ci}
 								<th
 									class="relative h-9 select-none px-3 text-xs font-medium uppercase tracking-wider text-muted-foreground"
 									class:text-right={col.align === "right"}
@@ -220,15 +208,14 @@
 								>
 									<button
 										class="inline-flex items-center gap-1 hover:text-foreground transition-colors"
-										onclick={() => toggleSort(col.id === "queue" ? "queue_position" : col.id)}
+										onclick={() => toggleSort(col.id)}
 									>
 										{col.label}
-										{#if sortKey === col.id || (col.id === "queue" && sortKey === "queue_position")}
+										{#if sortKey === col.id}
 											<span class="text-foreground">{sortDesc ? "↓" : "↑"}</span>
 										{/if}
 									</button>
-									<!-- Resize handle -->
-									{#if ci < cols.length - 1}
+									{#if ci < visibleCols.length - 1}
 										<!-- svelte-ignore a11y_no_static_element_interactions -->
 										<div
 											class="absolute right-0 top-0 h-full w-1.5 cursor-col-resize select-none {resizing === ci ? 'bg-primary' : 'hover:bg-primary/40'}"
@@ -248,52 +235,35 @@
 								onclick={(e) => handleRowClick(e, t.id, idx)}
 								oncontextmenu={() => handleCtxTarget(t.id)}
 							>
-								<!-- Name -->
-								<td class="truncate px-3 text-sm font-medium" title={t.name || t.id}>
-									{t.name || t.id.slice(0, 16) + "..."}
-									{#if t.error}
-										<span class="block truncate text-xs text-destructive">{t.error}</span>
-									{/if}
-								</td>
-								<!-- Size -->
-								<td class="px-3 text-right text-sm tabular-nums text-muted-foreground">
-									{t.total_bytes ? formatBytes(t.total_bytes) : "-"}
-								</td>
-								<!-- Progress -->
-								<td class="px-3">
-									<div class="flex items-center gap-2">
-										<Progress value={p.percent} class="h-1.5 flex-1" />
-										<span class="w-10 text-right text-xs tabular-nums text-muted-foreground">
-											{(p.percent ?? 0).toFixed(0)}%
-										</span>
-									</div>
-								</td>
-								<!-- Speed -->
-								<td class="px-3 text-right text-sm tabular-nums text-muted-foreground">
-									{t.state === "downloading" && p.down_speed ? formatSpeed(p.down_speed) : "-"}
-								</td>
-								<!-- ETA -->
-								<td class="px-3 text-right text-sm tabular-nums text-muted-foreground">
-									{t.state === "downloading" ? formatETA(p.downloaded, p.total, p.down_speed) : "-"}
-								</td>
-								<!-- Peers -->
-								<td class="px-3 text-right text-sm tabular-nums text-muted-foreground">
-									{t.state === "downloading" && p.active_peers ? p.active_peers : "-"}
-								</td>
-								<!-- State -->
-								<td class="px-3">
-									<Badge variant={stateVariant[t.state] ?? "outline"} class="text-[10px]">
-										{t.state}
-									</Badge>
-								</td>
-								<!-- Queue -->
-								<td class="px-3 text-center text-xs tabular-nums text-muted-foreground">
-									{t.queue_position}
-								</td>
+								{#each visibleCols as col}
+									<td
+										class="truncate px-3 text-sm"
+										class:text-right={col.align === "right"}
+										class:text-center={col.align === "center"}
+										class:tabular-nums={col.align === "right" || col.id === "queue"}
+										class:text-muted-foreground={col.id !== "name"}
+									>
+										{#if col.id === "name"}
+											<span class="font-medium" title={t.name || t.id}>{cellValue(col, t)}</span>
+											{#if t.error}
+												<span class="block truncate text-xs text-destructive">{t.error}</span>
+											{/if}
+										{:else if col.id === "progress"}
+											<div class="flex items-center gap-2">
+												<Progress value={p.percent} class="h-1.5 flex-1" />
+												<span class="w-10 text-right text-xs tabular-nums">{(p.percent ?? 0).toFixed(0)}%</span>
+											</div>
+										{:else if col.id === "state"}
+											<Badge variant={stateVariant[t.state] ?? "outline"} class="text-[10px]">{t.state}</Badge>
+										{:else}
+											{cellValue(col, t)}
+										{/if}
+									</td>
+								{/each}
 							</tr>
 						{:else}
 							<tr>
-								<td colspan={cols.length} class="h-32 text-center text-muted-foreground">
+								<td colspan={visibleCols.length} class="h-32 text-center text-muted-foreground">
 									No torrents yet. Add a magnet link or upload a .torrent file.
 								</td>
 							</tr>
