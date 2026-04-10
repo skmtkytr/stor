@@ -23,10 +23,12 @@ func newTestDaemon(t *testing.T) (*Daemon, Config) {
 		MaxActive:   5,
 	}
 	engCfg := engine.Config{
-		DownloadDir: cfg.DownloadDir,
-		StatePath:   cfg.StatePath,
-		ListenPort:  6881,
-		MaxActive:   cfg.MaxActive,
+		DownloadDir:     cfg.DownloadDir,
+		StatePath:       cfg.StatePath,
+		ListenPort:      0, // random port to avoid conflicts
+		MaxActive:       cfg.MaxActive,
+		DisableDHT:      true, // skip DHT in tests to avoid UDP socket exhaustion
+		DisableListener: true, // skip peer listener in tests
 	}
 	eng, err := engine.New(engCfg)
 	if err != nil {
@@ -35,7 +37,11 @@ func newTestDaemon(t *testing.T) (*Daemon, Config) {
 	if err := eng.Start(); err != nil {
 		t.Fatalf("engine.Start: %v", err)
 	}
-	t.Cleanup(func() { _ = eng.Stop() })
+	t.Cleanup(func() {
+		_ = eng.Stop()
+		// Remove entire temp dir to avoid "directory not empty" from async goroutines
+		_ = os.RemoveAll(dir)
+	})
 
 	d := New(eng, cfg)
 	return d, cfg

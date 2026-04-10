@@ -587,7 +587,8 @@ type DownloadParams struct {
 	Path     string
 	Progress *Progress
 	Cfg      DownloadConfig
-	Have     peer.Bitfield // pieces already downloaded (for resume)
+	Have     peer.Bitfield   // pieces already downloaded (for resume)
+	OnPiece  func(index int) // called when a piece is downloaded (for upload during download)
 }
 
 // DownloadToFileCtx is like DownloadToFile but accepts a context for cancellation.
@@ -672,6 +673,9 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 				return fmt.Errorf("download: write piece %d failed: %w", res.Index, err)
 			}
 			p.Progress.Add(len(res.Data))
+			if p.OnPiece != nil {
+				p.OnPiece(res.Index)
+			}
 			completed++
 		}
 	}

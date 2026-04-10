@@ -40,6 +40,13 @@ func (u *Uploader) Run(ctx context.Context) {
 	u.pm.Run(ctx)
 }
 
+// SetPiece marks a piece as available for upload (called during download).
+func (u *Uploader) SetPiece(index int) {
+	u.mu.Lock()
+	u.bitfield.SetPiece(index)
+	u.mu.Unlock()
+}
+
 // HandleIncoming handles an incoming peer connection.
 // The remote peer has already sent their handshake; conn is the raw TCP connection.
 func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {

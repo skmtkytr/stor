@@ -34,6 +34,10 @@ type Config struct {
 
 	// DHT tuning
 	DHTAlpha int // DHT lookup concurrency (default: 8)
+
+	// Testing flags
+	DisableDHT      bool // skip DHT startup
+	DisableListener bool // skip peer TCP listener
 }
 
 // TorrentInfo is the full info returned to API clients.
@@ -147,23 +151,27 @@ func (e *Engine) Start() error {
 	}
 
 	// Start shared DHT node
-	d, err := dht.New(":0", dht.WithAlpha(e.cfg.DHTAlpha))
-	if err == nil {
-		_ = d.Bootstrap(dhtBootstrapNodes)
-		e.dht = d
-		slog.Info("dht started", "bootstrap_nodes", len(dhtBootstrapNodes))
-	} else {
-		slog.Warn("dht failed to start", "error", err)
+	if !e.cfg.DisableDHT {
+		d, err := dht.New(":0", dht.WithAlpha(e.cfg.DHTAlpha))
+		if err == nil {
+			_ = d.Bootstrap(dhtBootstrapNodes)
+			e.dht = d
+			slog.Info("dht started", "bootstrap_nodes", len(dhtBootstrapNodes))
+		} else {
+			slog.Warn("dht failed to start", "error", err)
+		}
 	}
 
 	// Start TCP listener for incoming peer connections
-	pl, err := NewPeerListener(fmt.Sprintf(":%d", e.cfg.ListenPort))
-	if err != nil {
-		slog.Warn("peer listener failed to start", "error", err)
-	} else {
-		e.listener = pl
-		go pl.Run()
-		slog.Info("peer listener started", "addr", pl.Addr())
+	if !e.cfg.DisableListener {
+		pl, err := NewPeerListener(fmt.Sprintf(":%d", e.cfg.ListenPort))
+		if err != nil {
+			slog.Warn("peer listener failed to start", "error", err)
+		} else {
+			e.listener = pl
+			go pl.Run()
+			slog.Info("peer listener started", "addr", pl.Addr())
+		}
 	}
 
 	// Restore sessions from store

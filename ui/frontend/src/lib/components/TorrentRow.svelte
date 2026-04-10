@@ -93,11 +93,12 @@
 		</div>
 	</td>
 
-	<!-- Speed -->
-	<td class="px-3 text-right text-xs tabular-nums text-zinc-400 whitespace-nowrap">
-		{#if torrent.state === "downloading" && torrent.progress.down_speed}
-			{formatSpeed(torrent.progress.down_speed)}
-		{:else if torrent.state === "seeding" && torrent.progress.up_speed}
+	<!-- Speed (DL + UL) -->
+	<td class="px-3 text-right text-xs tabular-nums whitespace-nowrap">
+		{#if torrent.progress.down_speed}
+			<span class="text-blue-400">&darr;{formatSpeed(torrent.progress.down_speed)}</span>
+		{/if}
+		{#if torrent.progress.up_speed}
 			<span class="text-emerald-400">&uarr;{formatSpeed(torrent.progress.up_speed)}</span>
 		{/if}
 	</td>

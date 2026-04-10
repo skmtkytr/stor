@@ -161,11 +161,19 @@ func (s *Session) Pause() {
 	}
 }
 
-// run executes the torrent lifecycle.
-// For .torrent files: resolve → find peers → download.
-// For magnets: tracker/DHT/metadata fetch run in parallel for speed.
+// run executes the torrent lifecycle: resolve → download (with upload) → seed.
 func (s *Session) run(ctx context.Context) error {
-	// Step 1: Resolve TorrentFile if we don't have one
+	if err := s.phaseResolve(ctx); err != nil {
+		return err
+	}
+	if err := s.phaseDownload(ctx); err != nil {
+		return err
+	}
+	return s.phaseSeed(ctx)
+}
+
+// phaseResolve obtains the TorrentFile and initial peers.
+func (s *Session) phaseResolve(ctx context.Context) error {
 	if s.tf == nil {
 		slog.Info("resolving metadata", "id", s.record.ID)
 		if err := s.resolveMetadata(ctx); err != nil {
@@ -174,97 +182,96 @@ func (s *Session) run(ctx context.Context) error {
 		slog.Info("metadata resolved", "id", s.record.ID, "name", s.tf.Info.Name, "pieces", len(s.tf.Info.PieceHashes))
 	}
 
-	// Step 2: Find peers (skipped for magnets — already collected during resolveMetadata)
 	s.mu.Lock()
 	s.record.State = StateDownloading
 	s.mu.Unlock()
 
-	var peers []tracker.Peer
 	if len(s.cachedPeers) > 0 {
-		peers = s.cachedPeers
-		s.cachedPeers = nil
-		slog.Info("using cached peers", "id", s.record.ID, "count", len(peers))
+		slog.Info("using cached peers", "id", s.record.ID, "count", len(s.cachedPeers))
 	} else {
-		var err error
-		peers, err = s.findPeers(ctx)
+		peers, err := s.findPeers(ctx)
 		if err != nil {
 			return err
 		}
+		s.cachedPeers = peers
 		slog.Info("peers discovered", "id", s.record.ID, "count", len(peers))
 	}
+	return nil
+}
 
-	// Step 3: Download
+// phaseDownload downloads pieces while serving already-downloaded pieces to other peers.
+func (s *Session) phaseDownload(ctx context.Context) error {
 	tl := download.TotalSize(s.tf)
 	numPieces := len(s.tf.Info.PieceHashes)
-	finalPath := filepath.Join(s.downloadDir, s.tf.Info.Name)
 
-	// Use tmpDir for in-progress downloads if configured
+	// Resolve paths
 	dlDir := s.downloadDir
 	if s.tmpDir != "" {
 		dlDir = s.tmpDir
 	}
 	savePath := filepath.Join(dlDir, s.tf.Info.Name)
 
-	// Resume: verify existing pieces on disk
+	// Resume: verify existing pieces
 	var haveBitfield peer.Bitfield
-	bf, verified, err := download.VerifyPieces(savePath, s.tf)
-	if err == nil && verified > 0 {
+	bf, verified, _ := download.VerifyPieces(savePath, s.tf)
+	if verified > 0 {
 		haveBitfield = bf
 		s.mu.Lock()
 		s.record.Bitfield = []byte(bf)
 		s.mu.Unlock()
-		slog.Info("resume: verified existing pieces", "id", s.record.ID, "verified", verified, "total", numPieces)
+		slog.Info("resume: verified pieces", "id", s.record.ID, "verified", verified, "total", numPieces)
 	}
 
+	// Progress
 	progress := download.NewProgress(numPieces, tl)
 	s.mu.Lock()
 	s.progress = progress
 	s.record.TotalBytes = tl
 	s.mu.Unlock()
 
-	// Create peer channel for dynamic injection (used by re-announce in the future)
+	// --- Start shared services: announcer + uploader ---
 	peerCh := make(chan []tracker.Peer, 16)
 	s.mu.Lock()
 	s.peerCh = peerCh
 	s.mu.Unlock()
 
-	// Start announcer for periodic re-announce + peer injection
+	announcer := s.newAnnouncer(peerCh)
 	announceCtx, announceCancel := context.WithCancel(ctx)
-	announcer := NewAnnouncer(AnnounceConfig{
-		TF:       s.tf,
-		PeerID:   s.peerID,
-		Port:     s.port,
-		NumWant:  s.numWant,
-		DHT:      s.dht,
-		PeerSink: peerCh,
-		Downloaded: func() int64 {
-			if s.progress != nil {
-				return s.progress.Snap().Downloaded
-			}
-			return 0
-		},
-		Left: func() int64 {
-			if s.progress != nil {
-				snap := s.progress.Snap()
-				return snap.Total - snap.Downloaded
-			}
-			return tl
-		},
-	})
 	go announcer.Run(announceCtx)
 
-	// Stop announcer when session ends (download or seeding)
-	defer announceCancel()
+	uploadBF := make(peer.Bitfield, (numPieces+7)/8)
+	if haveBitfield != nil {
+		copy(uploadBF, haveBitfield)
+	}
+	up := download.NewUploader(s.tf, savePath, s.peerID, uploadBF)
+	s.mu.Lock()
+	s.uploader = up
+	s.mu.Unlock()
+	go up.Run(ctx)
 
-	slog.Info("download starting",
-		"id", s.record.ID,
-		"name", s.tf.Info.Name,
-		"total_bytes", tl,
-		"pieces", numPieces,
-		"peers", len(peers),
-		"save_path", savePath,
-	)
-	if err := download.DownloadWithParams(ctx, download.DownloadParams{
+	if s.listener != nil {
+		s.listener.Register(s.tf.InfoHash, s)
+	}
+
+	// --- Cleanup on exit (error or success) ---
+	cleanup := func() {
+		announceCancel()
+		s.mu.Lock()
+		if s.peerCh != nil {
+			close(s.peerCh)
+			s.peerCh = nil
+		}
+		s.mu.Unlock()
+	}
+
+	// --- Download ---
+	peers := s.cachedPeers
+	s.cachedPeers = nil
+
+	slog.Info("download starting", "id", s.record.ID, "name", s.tf.Info.Name,
+		"total_bytes", tl, "pieces", numPieces, "peers", len(peers), "save_path", savePath)
+
+	dlErr := download.DownloadWithParams(ctx, download.DownloadParams{
 		TF:       s.tf,
 		PeerID:   s.peerID,
 		Peers:    peers,
@@ -274,79 +281,65 @@ func (s *Session) run(ctx context.Context) error {
 		Progress: progress,
 		Cfg:      s.dlCfg,
 		Have:     haveBitfield,
-	}); err != nil {
-		return err
+		OnPiece:  func(index int) { up.SetPiece(index) },
+	})
+	if dlErr != nil {
+		cleanup()
+		return dlErr
 	}
 
-	// Stop download-phase announcer before closing peerCh to avoid send-on-closed-channel panic
-	announceCancel()
+	// --- Download complete: transition to seeding ---
+	cleanup() // stop download-phase announcer, close peerCh
 
-	// Move from tmpDir to downloadDir if configured
+	// Move from tmpDir if configured
+	finalPath := filepath.Join(s.downloadDir, s.tf.Info.Name)
 	if s.tmpDir != "" && savePath != finalPath {
 		slog.Info("moving completed download", "id", s.record.ID, "from", savePath, "to", finalPath)
 		if err := os.Rename(savePath, finalPath); err != nil {
 			return fmt.Errorf("session: move to download dir: %w", err)
 		}
 		savePath = finalPath
+		// Recreate uploader with new path
+		up = download.NewUploader(s.tf, savePath, s.peerID, uploadBF)
+		s.mu.Lock()
+		s.uploader = up
+		s.mu.Unlock()
+		go up.Run(ctx)
 	}
 
-	// Close peer injection channel (download is done)
-	s.mu.Lock()
-	if s.peerCh != nil {
-		close(s.peerCh)
-		s.peerCh = nil
+	// Mark all pieces available
+	for i := range numPieces {
+		up.SetPiece(i)
 	}
+
+	s.mu.Lock()
 	s.record.State = StateSeeding
 	s.record.CompletedAt = time.Now().Unix()
 	s.record.SavePath = savePath
 	s.mu.Unlock()
 
-	slog.Info("download complete, seeding", "id", s.record.ID, "name", s.tf.Info.Name, "save_path", savePath)
+	slog.Info("download complete", "id", s.record.ID, "name", s.tf.Info.Name, "save_path", savePath)
+	return nil
+}
 
-	// Create a new announcer for seeding (no peerSink needed)
-	seedAnnouncer := NewAnnouncer(AnnounceConfig{
-		TF:      s.tf,
-		PeerID:  s.peerID,
-		Port:    s.port,
-		NumWant: 0,
-		DHT:     s.dht,
-		Downloaded: func() int64 {
-			return tl
-		},
-		Left: func() int64 {
-			return 0
-		},
-	})
-	seedAnnouncer.AnnounceCompleted(ctx)
-
-	// Build full bitfield
-	fullBF := make(peer.Bitfield, (numPieces+7)/8)
-	for i := range numPieces {
-		fullBF.SetPiece(i)
-	}
-
-	// Start uploader
-	uploader := download.NewUploader(s.tf, savePath, s.peerID, fullBF)
-	s.mu.Lock()
-	s.uploader = uploader
-	s.mu.Unlock()
-
-	// Register with engine's peer listener
-	if s.listener != nil {
-		s.listener.Register(s.tf.InfoHash, s)
-		defer s.listener.Unregister(s.tf.InfoHash)
-	}
-
-	// Run seed announcer in background for periodic re-announce during seeding
-	seedAnnounceCtx, seedAnnounceCancel := context.WithCancel(ctx)
-	go seedAnnouncer.Run(seedAnnounceCtx)
-	defer seedAnnounceCancel()
-
-	// Run uploader (choking algorithm) until context is cancelled
+// phaseSeed keeps the session alive, serving pieces until stopped.
+func (s *Session) phaseSeed(ctx context.Context) error {
 	slog.Info("seeding started", "id", s.record.ID, "name", s.tf.Info.Name)
-	uploader.Run(ctx)
 
-	// When stopped, mark as complete (not seeding)
+	// Announce completed + start seed-phase re-announce
+	announcer := s.newAnnouncer(nil) // no peerSink needed during seeding
+	announcer.AnnounceCompleted(ctx)
+	seedCtx, seedCancel := context.WithCancel(ctx)
+	go announcer.Run(seedCtx)
+	defer seedCancel()
+
+	// Block until context is cancelled (pause/stop/shutdown)
+	<-ctx.Done()
+
+	// Cleanup
+	if s.listener != nil {
+		s.listener.Unregister(s.tf.InfoHash)
+	}
 	s.mu.Lock()
 	if s.record.State == StateSeeding {
 		s.record.State = StateComplete
@@ -355,6 +348,38 @@ func (s *Session) run(ctx context.Context) error {
 	s.mu.Unlock()
 
 	return nil
+}
+
+// newAnnouncer creates an announcer with the session's current state.
+// peerSink may be nil (seeding mode doesn't need dynamic peer injection).
+func (s *Session) newAnnouncer(peerSink chan<- []tracker.Peer) *Announcer {
+	return NewAnnouncer(AnnounceConfig{
+		TF:       s.tf,
+		PeerID:   s.peerID,
+		Port:     s.port,
+		NumWant:  s.numWant,
+		DHT:      s.dht,
+		PeerSink: peerSink,
+		Downloaded: func() int64 {
+			s.mu.RLock()
+			p := s.progress
+			s.mu.RUnlock()
+			if p != nil {
+				return p.Snap().Downloaded
+			}
+			return s.record.TotalBytes // seeding: all downloaded
+		},
+		Left: func() int64 {
+			s.mu.RLock()
+			p := s.progress
+			s.mu.RUnlock()
+			if p != nil {
+				snap := p.Snap()
+				return snap.Total - snap.Downloaded
+			}
+			return 0 // seeding: nothing left
+		},
+	})
 }
 
 // HandleIncoming implements IncomingPeerHandler. Routes to the uploader if seeding.
