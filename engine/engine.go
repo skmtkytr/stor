@@ -69,6 +69,7 @@ type Engine struct {
 	store    *Store
 	sessions map[string]*Session
 	dht      *dht.DHT
+	listener *PeerListener
 	ctx      context.Context
 	cancel   context.CancelFunc
 
@@ -147,16 +148,26 @@ func (e *Engine) Start() error {
 		slog.Warn("dht failed to start", "error", err)
 	}
 
+	// Start TCP listener for incoming peer connections
+	pl, err := NewPeerListener(fmt.Sprintf(":%d", e.cfg.ListenPort))
+	if err != nil {
+		slog.Warn("peer listener failed to start", "error", err)
+	} else {
+		e.listener = pl
+		go pl.Run()
+		slog.Info("peer listener started", "addr", pl.Addr())
+	}
+
 	// Restore sessions from store
 	records := e.store.All()
 	slog.Info("restoring sessions", "count", len(records))
 	for _, r := range records {
-		s := NewSession(r, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht)
+		s := NewSession(r, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht, e.listener)
 
 		e.sessions[r.ID] = s
 
-		// Auto-resume active torrents (downloading, metadata, or queued)
-		if r.State == StateDownloading || r.State == StateMetadata || r.State == StateAdding {
+		// Auto-resume active torrents (downloading, metadata, queued, or seeding)
+		if r.State == StateDownloading || r.State == StateMetadata || r.State == StateAdding || r.State == StateSeeding {
 			slog.Info("resuming torrent", "id", r.ID, "name", r.Name, "state", r.State)
 			if e.activeCount() < e.cfg.MaxActive {
 				s.Start(e.ctx, e.onSessionDone)
@@ -189,6 +200,10 @@ func (e *Engine) Stop() error {
 	if e.saveTicker != nil {
 		e.saveTicker.Stop()
 		close(e.saveStop)
+	}
+
+	if e.listener != nil {
+		_ = e.listener.Close()
 	}
 
 	if e.dht != nil {
@@ -234,7 +249,7 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 		}
 	}
 
-	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht)
+	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht, e.listener)
 	e.sessions[id] = s
 	e.store.Put(record)
 	_ = e.store.Save()

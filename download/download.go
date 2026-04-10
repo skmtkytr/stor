@@ -70,6 +70,7 @@ type Client struct {
 
 	// Speed tracking
 	downloaded int64     // bytes downloaded from this peer
+	uploaded   int64     // bytes uploaded to this peer
 	speedStart time.Time // start of current measurement window
 	lastSpeed  float64   // bytes/sec from last measurement
 }
@@ -89,6 +90,15 @@ func (c *Client) ResetSpeed() {
 	c.lastSpeed = c.Speed()
 	c.downloaded = 0
 	c.speedStart = time.Now()
+}
+
+// UploadSpeed returns bytes/sec uploaded to this peer.
+func (c *Client) UploadSpeed() float64 {
+	elapsed := time.Since(c.speedStart).Seconds()
+	if elapsed < 1 {
+		return 0
+	}
+	return float64(c.uploaded) / elapsed
 }
 
 // SendChoke sends a choke message to the peer.

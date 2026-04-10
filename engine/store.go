@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -14,6 +15,7 @@ const (
 	StateAdding      State = "adding"
 	StateMetadata    State = "metadata"
 	StateDownloading State = "downloading"
+	StateSeeding     State = "seeding"
 	StateComplete    State = "complete"
 	StatePaused      State = "paused"
 	StateError       State = "error"
@@ -87,6 +89,13 @@ func (s *Store) Save() error {
 	data, err := json.MarshalIndent(records, "", "  ")
 	if err != nil {
 		return fmt.Errorf("store: marshal failed: %w", err)
+	}
+
+	// Ensure parent directory exists
+	if dir := filepath.Dir(s.path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("store: mkdir failed: %w", err)
+		}
 	}
 
 	// Atomic write: write to temp file then rename

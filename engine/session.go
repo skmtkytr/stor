@@ -48,10 +48,12 @@ type Session struct {
 	dht         *dhtpkg.DHT         // shared DHT instance from engine (may be nil)
 	cachedPeers []tracker.Peer      // peers collected during metadata phase (avoids double query)
 	peerCh      chan []tracker.Peer // dynamic peer injection channel (active during download)
+	uploader    *download.Uploader  // active during seeding
+	listener    *PeerListener       // reference to engine's listener for registration
 }
 
 // NewSession creates a session from a persisted record.
-func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir string, port uint16, dlCfg download.DownloadConfig, numWant int, dht *dhtpkg.DHT) *Session {
+func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir string, port uint16, dlCfg download.DownloadConfig, numWant int, d *dhtpkg.DHT, pl *PeerListener) *Session {
 	return &Session{
 		record:      record,
 		peerID:      peerID,
@@ -59,7 +61,8 @@ func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir string, port
 		port:        port,
 		dlCfg:       dlCfg,
 		numWant:     numWant,
-		dht:         dht,
+		dht:         d,
+		listener:    pl,
 	}
 }
 
@@ -132,7 +135,7 @@ func (s *Session) Pause() {
 		s.cancel()
 		s.cancel = nil
 	}
-	if s.record.State == StateDownloading || s.record.State == StateMetadata {
+	if s.record.State == StateDownloading || s.record.State == StateMetadata || s.record.State == StateSeeding {
 		s.record.State = StatePaused
 	}
 }
@@ -222,16 +225,8 @@ func (s *Session) run(ctx context.Context) error {
 	})
 	go announcer.Run(announceCtx)
 
-	// Close peerCh and stop announcer when download finishes
-	defer func() {
-		announceCancel()
-		s.mu.Lock()
-		if s.peerCh != nil {
-			close(s.peerCh)
-			s.peerCh = nil
-		}
-		s.mu.Unlock()
-	}()
+	// Stop announcer when session ends (download or seeding)
+	defer announceCancel()
 
 	slog.Info("download starting",
 		"id", s.record.ID,
@@ -254,14 +249,65 @@ func (s *Session) run(ctx context.Context) error {
 		return err
 	}
 
+	// Close peer injection channel (download is done, no more need for new download peers)
 	s.mu.Lock()
-	s.record.State = StateComplete
+	if s.peerCh != nil {
+		close(s.peerCh)
+		s.peerCh = nil
+	}
+	s.record.State = StateSeeding
 	s.record.CompletedAt = time.Now().Unix()
 	s.record.SavePath = savePath
 	s.mu.Unlock()
 
-	slog.Info("download complete", "id", s.record.ID, "name", s.tf.Info.Name, "save_path", savePath)
+	slog.Info("download complete, seeding", "id", s.record.ID, "name", s.tf.Info.Name, "save_path", savePath)
+
+	// Announce completed to trackers
+	announcer.AnnounceCompleted(ctx)
+
+	// Build full bitfield
+	fullBF := make(peer.Bitfield, (numPieces+7)/8)
+	for i := range numPieces {
+		fullBF.SetPiece(i)
+	}
+
+	// Start uploader
+	uploader := download.NewUploader(s.tf, savePath, s.peerID, fullBF)
+	s.mu.Lock()
+	s.uploader = uploader
+	s.mu.Unlock()
+
+	// Register with engine's peer listener
+	if s.listener != nil {
+		s.listener.Register(s.tf.InfoHash, s)
+		defer s.listener.Unregister(s.tf.InfoHash)
+	}
+
+	// Run uploader (choking algorithm) until context is cancelled
+	slog.Info("seeding started", "id", s.record.ID, "name", s.tf.Info.Name)
+	uploader.Run(ctx)
+
+	// When stopped, mark as complete (not seeding)
+	s.mu.Lock()
+	if s.record.State == StateSeeding {
+		s.record.State = StateComplete
+	}
+	s.uploader = nil
+	s.mu.Unlock()
+
 	return nil
+}
+
+// HandleIncoming implements IncomingPeerHandler. Routes to the uploader if seeding.
+func (s *Session) HandleIncoming(conn net.Conn, peerHS *peer.Handshake) {
+	s.mu.RLock()
+	u := s.uploader
+	s.mu.RUnlock()
+	if u == nil {
+		_ = conn.Close()
+		return
+	}
+	u.HandleIncoming(conn, peerHS)
 }
 
 // resolveMetadata gets the TorrentFile either from stored data or via magnet.

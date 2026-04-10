@@ -16,6 +16,7 @@ export type TorrentState =
 	| "adding"
 	| "metadata"
 	| "downloading"
+	| "seeding"
 	| "complete"
 	| "paused"
 	| "error";

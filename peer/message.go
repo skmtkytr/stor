@@ -101,6 +101,35 @@ func NewHaveMessage(index uint32) *Message {
 	return &Message{ID: MsgHave, Payload: payload}
 }
 
+// NewPieceMessage creates a piece message (index, begin, block data).
+func NewPieceMessage(index, begin uint32, block []byte) *Message {
+	payload := make([]byte, 8+len(block))
+	binary.BigEndian.PutUint32(payload[0:4], index)
+	binary.BigEndian.PutUint32(payload[4:8], begin)
+	copy(payload[8:], block)
+	return &Message{ID: MsgPiece, Payload: payload}
+}
+
+// NewCancelMessage creates a cancel message (index, begin, length).
+func NewCancelMessage(index, begin, length uint32) *Message {
+	payload := make([]byte, 12)
+	binary.BigEndian.PutUint32(payload[0:4], index)
+	binary.BigEndian.PutUint32(payload[4:8], begin)
+	binary.BigEndian.PutUint32(payload[8:12], length)
+	return &Message{ID: MsgCancel, Payload: payload}
+}
+
+// ParseRequest extracts index, begin, and length from a request message payload.
+func ParseRequest(payload []byte) (index, begin, length uint32, err error) {
+	if len(payload) < 12 {
+		return 0, 0, 0, fmt.Errorf("peer: request payload too short: %d bytes", len(payload))
+	}
+	index = binary.BigEndian.Uint32(payload[0:4])
+	begin = binary.BigEndian.Uint32(payload[4:8])
+	length = binary.BigEndian.Uint32(payload[8:12])
+	return
+}
+
 // ParsePiece extracts index, begin, and block from a piece message payload.
 func ParsePiece(payload []byte) (index, begin uint32, block []byte, err error) {
 	if len(payload) < 8 {

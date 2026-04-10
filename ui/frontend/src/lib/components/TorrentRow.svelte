@@ -16,6 +16,7 @@
 
 	const barColors: Record<string, string> = {
 		downloading: "bg-blue-500",
+		seeding: "bg-emerald-500",
 		complete: "bg-green-500",
 		paused: "bg-zinc-500",
 		error: "bg-red-500",
@@ -25,6 +26,7 @@
 
 	const barBgs: Record<string, string> = {
 		downloading: "bg-blue-500/15",
+		seeding: "bg-emerald-500/15",
 		complete: "bg-green-500/15",
 		paused: "bg-zinc-500/15",
 		error: "bg-red-500/15",
@@ -34,6 +36,7 @@
 
 	const stateLabels: Record<string, string> = {
 		downloading: "Downloading",
+		seeding: "Seeding",
 		complete: "Complete",
 		paused: "Paused",
 		error: "Error",
@@ -43,6 +46,7 @@
 
 	const stateTextColors: Record<string, string> = {
 		downloading: "text-blue-300",
+		seeding: "text-emerald-300",
 		complete: "text-green-300",
 		paused: "text-zinc-400",
 		error: "text-red-300",
