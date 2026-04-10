@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/skmtkytr/stor/peer"
@@ -16,6 +17,8 @@ const (
 	BlockSize = 16384
 	// MaxPipeline is the number of outstanding requests per peer.
 	MaxPipeline = 5
+	// MaxPeers is the maximum number of concurrent peer connections.
+	MaxPeers = 30
 )
 
 // PieceResult contains a downloaded and verified piece.
@@ -42,12 +45,15 @@ type Client struct {
 
 // NewClient connects to a peer, performs the handshake, and receives the bitfield.
 func NewClient(p tracker.Peer, infoHash, peerID [20]byte) (*Client, error) {
-	conn, err := net.DialTimeout("tcp", p.String(), 10*time.Second)
+	conn, err := net.DialTimeout("tcp", p.String(), 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("download: connect to %s failed: %w", p, err)
 	}
 
 	closeOnErr := func() { _ = conn.Close() }
+
+	// Set deadline for entire handshake phase
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	// Send handshake
 	hs := &peer.Handshake{InfoHash: infoHash, PeerID: peerID}
@@ -75,9 +81,8 @@ func NewClient(p tracker.Peer, infoHash, peerID [20]byte) (*Client, error) {
 		choked:   true,
 	}
 
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	msg, err := peer.ReadMessage(conn)
-	_ = conn.SetDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Time{}) // clear deadline
 	if err != nil {
 		closeOnErr()
 		return nil, fmt.Errorf("download: read bitfield failed: %w", err)
@@ -194,7 +199,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 	return buf, nil
 }
 
-// Download downloads all pieces of a torrent and returns the assembled data.
+// Download downloads all pieces of a torrent concurrently and returns the assembled data.
 func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([]byte, error) {
 	totalLength := tf.Info.Length
 	if totalLength == 0 {
@@ -203,56 +208,77 @@ func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([
 		}
 	}
 
-	// Build piece work queue
-	work := make([]PieceWork, len(tf.Info.PieceHashes))
+	numPieces := len(tf.Info.PieceHashes)
+
+	// Work queue: pieces to download
+	workCh := make(chan PieceWork, numPieces)
 	for i, hash := range tf.Info.PieceHashes {
 		length := int(tf.Info.PieceLength)
-		// Last piece may be shorter
 		remaining := int(totalLength) - i*int(tf.Info.PieceLength)
 		if remaining < length {
 			length = remaining
 		}
-		work[i] = PieceWork{Index: i, Hash: hash, Length: length}
+		workCh <- PieceWork{Index: i, Hash: hash, Length: length}
 	}
 
-	results := make([][]byte, len(work))
-	completed := 0
+	// Result channel
+	resultCh := make(chan PieceResult, numPieces)
 
-	// Try each peer for remaining pieces (simple sequential strategy)
+	// Launch worker per peer (up to MaxPeers)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, MaxPeers)
+
 	for _, p := range peers {
-		if completed >= len(work) {
-			break
-		}
+		wg.Add(1)
+		go func(p tracker.Peer) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
-		client, err := NewClient(p, tf.InfoHash, peerID)
-		if err != nil {
-			continue // try next peer
-		}
-
-		for i, pw := range work {
-			if results[i] != nil {
-				continue // already have this piece
-			}
-			if !client.HasPiece(pw.Index) {
-				continue
-			}
-
-			data, err := client.DownloadPiece(pw)
+			client, err := NewClient(p, tf.InfoHash, peerID)
 			if err != nil {
-				break // this peer is broken, try next
+				return
 			}
+			defer func() { _ = client.Close() }()
 
-			results[i] = data
+			for pw := range workCh {
+				if !client.HasPiece(pw.Index) {
+					// Put it back for another peer
+					workCh <- pw
+					continue
+				}
+
+				data, err := client.DownloadPiece(pw)
+				if err != nil {
+					// Put it back and stop this peer
+					workCh <- pw
+					return
+				}
+
+				resultCh <- PieceResult{Index: pw.Index, Data: data}
+			}
+		}(p)
+	}
+
+	// Close work channel when all workers are done
+	go func() {
+		wg.Wait()
+		close(workCh)
+	}()
+
+	// Collect results
+	results := make([][]byte, numPieces)
+	for completed := 0; completed < numPieces; {
+		select {
+		case res := <-resultCh:
+			results[res.Index] = res.Data
 			completed++
-			fmt.Printf("piece %d/%d downloaded\n", completed, len(work))
+			fmt.Printf("\rpiece %d/%d downloaded", completed, numPieces)
+		case <-time.After(2 * time.Minute):
+			return nil, fmt.Errorf("download: timed out at %d/%d pieces", completed, numPieces)
 		}
-
-		_ = client.Close()
 	}
-
-	if completed < len(work) {
-		return nil, fmt.Errorf("download: only got %d/%d pieces", completed, len(work))
-	}
+	fmt.Println()
 
 	// Assemble
 	buf := make([]byte, 0, totalLength)

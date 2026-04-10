@@ -227,3 +227,63 @@ func TestDownloadFull(t *testing.T) {
 		}
 	}
 }
+
+func TestDownloadFullMultiPeer(t *testing.T) {
+	infoHash := [20]byte{0xDD}
+	peerID := [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'}
+
+	// 4 pieces
+	pieceLen := 512
+	pieces := make([][]byte, 4)
+	hashes := make([][20]byte, 4)
+	for i := range pieces {
+		pieces[i] = make([]byte, pieceLen)
+		for j := range pieces[i] {
+			pieces[i][j] = byte(i*100 + j%256)
+		}
+		hashes[i] = sha1.Sum(pieces[i])
+	}
+
+	// Peer 1 has pieces 0, 1
+	peer1Pieces := map[int][]byte{0: pieces[0], 1: pieces[1]}
+	ln1 := fakePeer(t, infoHash, peer1Pieces)
+	defer func() { _ = ln1.Close() }()
+
+	// Peer 2 has pieces 2, 3
+	peer2Pieces := map[int][]byte{2: pieces[2], 3: pieces[3]}
+	ln2 := fakePeer(t, infoHash, peer2Pieces)
+	defer func() { _ = ln2.Close() }()
+
+	addr1 := ln1.Addr().(*net.TCPAddr)
+	addr2 := ln2.Addr().(*net.TCPAddr)
+	peerList := []tracker.Peer{
+		{IP: net.IPv4(127, 0, 0, 1), Port: uint16(addr1.Port)},
+		{IP: net.IPv4(127, 0, 0, 1), Port: uint16(addr2.Port)},
+	}
+
+	tf := &torrent.TorrentFile{
+		InfoHash: infoHash,
+		Info: torrent.Info{
+			Name:        "test-multi-peer",
+			PieceLength: int64(pieceLen),
+			PieceHashes: hashes,
+			Length:      int64(pieceLen * 4),
+		},
+	}
+
+	data, err := Download(tf, peerID, peerList)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+
+	expected := slices.Concat(pieces[0], pieces[1], pieces[2], pieces[3])
+	if len(data) != len(expected) {
+		t.Fatalf("data length: got %d, want %d", len(data), len(expected))
+	}
+	for i := range data {
+		if data[i] != expected[i] {
+			t.Errorf("data mismatch at byte %d", i)
+			break
+		}
+	}
+}
