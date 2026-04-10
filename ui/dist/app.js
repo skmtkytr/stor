@@ -23,13 +23,17 @@ $("#key-submit").addEventListener("click", async () => {
   const key = $("#key-input").value.trim();
   if (!key) return;
   apiKey = key;
+  $("#auth-error").hidden = true;
   try {
-    await rpc("daemon.version");
+    const result = await rpc("daemon.version");
+    console.log("Auth OK:", result);
     localStorage.setItem(KEY, apiKey);
     showApp();
-  } catch {
-    $("#auth-error").textContent = "Invalid API key or daemon unreachable.";
+  } catch (e) {
+    console.error("Auth failed:", e);
+    $("#auth-error").textContent = "Failed: " + e.message;
     $("#auth-error").hidden = false;
+    apiKey = "";
   }
 });
 
@@ -205,7 +209,12 @@ function startPolling() {
 // --- Init ---
 
 if (apiKey) {
-  rpc("daemon.version").then(() => showApp()).catch(() => showAuth());
+  rpc("daemon.version")
+    .then(() => showApp())
+    .catch((e) => {
+      console.error("Init auth failed:", e);
+      showAuth();
+    });
 } else {
   showAuth();
 }
