@@ -30,9 +30,9 @@ ref: https://www.bittorrent.org/beps/bep_0000.html
 
 | BEP | タイトル | 状態 | 対応パッケージ | 実装状況 |
 |-----|---------|------|--------------|---------|
-| [BEP 10](https://www.bittorrent.org/beps/bep_0010.html) | Extension Protocol | Accepted | `peer/` | ⬜ 未着手 |
-| [BEP 9](https://www.bittorrent.org/beps/bep_0009.html) | Extension for Peers to Send Metadata Files | Accepted | `peer/`, `torrent/` | ⬜ 未着手 |
-| [BEP 15](https://www.bittorrent.org/beps/bep_0015.html) | UDP Tracker Protocol | Accepted | `tracker/` | ⬜ 未着手 |
+| [BEP 10](https://www.bittorrent.org/beps/bep_0010.html) | Extension Protocol | Accepted | `peer/` | ✅ 完了 |
+| [BEP 9](https://www.bittorrent.org/beps/bep_0009.html) | Extension for Peers to Send Metadata Files | Accepted | `magnet/`, `peer/` | ✅ 完了 |
+| [BEP 15](https://www.bittorrent.org/beps/bep_0015.html) | UDP Tracker Protocol | Accepted | `tracker/` | ✅ 完了 |
 
 **BEP 10 (Extension Protocol):**
 - Peer wire protocol の msg ID 20 を使い、拡張メッセージを多重化
