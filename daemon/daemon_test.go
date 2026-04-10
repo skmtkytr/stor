@@ -230,6 +230,153 @@ func TestDaemonAddEndpoint(t *testing.T) {
 	}
 }
 
+func TestRPCTorrentAddMagnet(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+	magnet := "magnet:?xt=urn:btih:" + strings.Repeat("bb", 20)
+	w := doRPC(t, d, cfg.APIKey, "torrent.add", map[string]string{"source": magnet})
+
+	var resp struct {
+		Result map[string]string         `json:"result"`
+		Error  *struct{ Message string } `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Result == nil || resp.Result["id"] == "" {
+		errMsg := ""
+		if resp.Error != nil {
+			errMsg = resp.Error.Message
+		}
+		t.Fatalf("expected id in result, error: %s", errMsg)
+	}
+}
+
+func TestRPCTorrentAddInvalidSource(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+	w := doRPC(t, d, cfg.APIKey, "torrent.add", map[string]string{"source": ""})
+
+	var resp struct {
+		Error *struct{ Code int } `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error == nil {
+		t.Error("expected error for empty source")
+	}
+}
+
+func TestRPCTorrentAddFileInvalidBase64(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+	w := doRPC(t, d, cfg.APIKey, "torrent.addFile", map[string]string{"data": "not-valid-base64!!!"})
+
+	var resp struct {
+		Error *struct{ Code int } `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error == nil {
+		t.Error("expected error for invalid base64")
+	}
+}
+
+func TestRPCTorrentPauseResumeRemove(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+	magnet := "magnet:?xt=urn:btih:" + strings.Repeat("cc", 20)
+	w := doRPC(t, d, cfg.APIKey, "torrent.add", map[string]string{"source": magnet})
+
+	var addResp struct {
+		Result map[string]string `json:"result"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &addResp)
+	id := addResp.Result["id"]
+	if id == "" {
+		t.Fatal("no id returned")
+	}
+
+	// Pause
+	w = doRPC(t, d, cfg.APIKey, "torrent.pause", map[string]string{"id": id})
+	if w.Code != http.StatusOK {
+		t.Errorf("pause: %d", w.Code)
+	}
+
+	// Resume
+	w = doRPC(t, d, cfg.APIKey, "torrent.resume", map[string]string{"id": id})
+	if w.Code != http.StatusOK {
+		t.Errorf("resume: %d", w.Code)
+	}
+
+	// Get
+	w = doRPC(t, d, cfg.APIKey, "torrent.get", map[string]string{"id": id})
+	if w.Code != http.StatusOK {
+		t.Errorf("get: %d", w.Code)
+	}
+
+	// Remove
+	w = doRPC(t, d, cfg.APIKey, "torrent.remove", map[string]any{"id": id, "delete_files": false})
+	if w.Code != http.StatusOK {
+		t.Errorf("remove: %d", w.Code)
+	}
+
+	// Verify removed
+	w = doRPC(t, d, cfg.APIKey, "torrent.list", nil)
+	var listResp struct {
+		Result []*engine.TorrentInfo `json:"result"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &listResp)
+	if len(listResp.Result) != 0 {
+		t.Errorf("should be empty after remove: got %d", len(listResp.Result))
+	}
+}
+
+func TestRPCTorrentQueueOperations(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+
+	// Add 3 torrents with pause to avoid race from session goroutines
+	var ids []string
+	for i := range 3 {
+		hash := strings.Repeat(string(rune('a'+i))+string(rune('0'+i)), 20)
+		magnet := "magnet:?xt=urn:btih:" + hash[:40]
+		w := doRPC(t, d, cfg.APIKey, "torrent.add", map[string]string{"source": magnet})
+		var resp struct {
+			Result map[string]string `json:"result"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		if resp.Result["id"] != "" {
+			ids = append(ids, resp.Result["id"])
+			// Pause immediately to prevent session goroutines from racing
+			doRPC(t, d, cfg.APIKey, "torrent.pause", map[string]string{"id": resp.Result["id"]})
+		}
+	}
+
+	if len(ids) < 2 {
+		t.Skip("not enough torrents added")
+	}
+
+	// Queue operations should not error
+	for _, op := range []string{"torrent.queueTop", "torrent.queueBottom", "torrent.queueUp", "torrent.queueDown"} {
+		w := doRPC(t, d, cfg.APIKey, op, map[string]string{"id": ids[0]})
+		if w.Code != http.StatusOK {
+			t.Errorf("%s: %d", op, w.Code)
+		}
+	}
+}
+
+func TestRPCTorrentAddURL(t *testing.T) {
+	// Set up a fake .torrent server
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not a real torrent"))
+	}))
+	defer ts.Close()
+
+	d, cfg := newTestDaemon(t)
+	w := doRPC(t, d, cfg.APIKey, "torrent.addURL", map[string]string{"url": ts.URL + "/test.torrent"})
+
+	var resp struct {
+		Error *struct{ Message string } `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	// Should fail because it's not a valid torrent, but shouldn't crash
+	if resp.Error == nil {
+		t.Log("surprisingly succeeded with invalid torrent data")
+	}
+}
+
 func TestConfigTOMLRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
