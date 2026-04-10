@@ -1,0 +1,184 @@
+package torrent
+
+import (
+	"crypto/sha1"
+	"strings"
+	"testing"
+
+	"github.com/skmtkytr/stor/bencode"
+)
+
+func buildTestTorrent(t *testing.T, info map[string]any, extra map[string]any) []byte {
+	t.Helper()
+	d := map[string]any{
+		"announce": "http://tracker.example.com/announce",
+		"info":     info,
+	}
+	for k, v := range extra {
+		d[k] = v
+	}
+	data, err := bencode.Encode(d)
+	if err != nil {
+		t.Fatalf("failed to encode test torrent: %v", err)
+	}
+	return data
+}
+
+func fakePieces(n int) string {
+	// Each piece hash is 20 bytes (SHA1)
+	var b strings.Builder
+	for i := range n {
+		h := sha1.Sum([]byte{byte(i)})
+		b.Write(h[:])
+	}
+	return b.String()
+}
+
+func TestParseSingleFile(t *testing.T) {
+	info := map[string]any{
+		"name":         "test.txt",
+		"piece length": int64(262144),
+		"pieces":       fakePieces(2),
+		"length":       int64(524288),
+	}
+	data := buildTestTorrent(t, info, nil)
+
+	tf, err := Parse(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if tf.Announce != "http://tracker.example.com/announce" {
+		t.Errorf("announce: got %q", tf.Announce)
+	}
+	if tf.Info.Name != "test.txt" {
+		t.Errorf("name: got %q", tf.Info.Name)
+	}
+	if tf.Info.PieceLength != 262144 {
+		t.Errorf("piece length: got %d", tf.Info.PieceLength)
+	}
+	if len(tf.Info.PieceHashes) != 2 {
+		t.Errorf("piece hashes: got %d, want 2", len(tf.Info.PieceHashes))
+	}
+	if tf.Info.Length != 524288 {
+		t.Errorf("length: got %d", tf.Info.Length)
+	}
+	if len(tf.Info.Files) != 0 {
+		t.Errorf("files: got %d, want 0 for single file", len(tf.Info.Files))
+	}
+	// InfoHash should be 20 bytes
+	if len(tf.InfoHash) != 20 {
+		t.Errorf("info hash length: got %d, want 20", len(tf.InfoHash))
+	}
+}
+
+func TestParseMultiFile(t *testing.T) {
+	info := map[string]any{
+		"name":         "my-folder",
+		"piece length": int64(262144),
+		"pieces":       fakePieces(3),
+		"files": []any{
+			map[string]any{
+				"length": int64(100000),
+				"path":   []any{"subdir", "file1.txt"},
+			},
+			map[string]any{
+				"length": int64(200000),
+				"path":   []any{"file2.txt"},
+			},
+		},
+	}
+	data := buildTestTorrent(t, info, nil)
+
+	tf, err := Parse(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if tf.Info.Name != "my-folder" {
+		t.Errorf("name: got %q", tf.Info.Name)
+	}
+	if len(tf.Info.Files) != 2 {
+		t.Fatalf("files: got %d, want 2", len(tf.Info.Files))
+	}
+	if tf.Info.Files[0].Length != 100000 {
+		t.Errorf("file[0] length: got %d", tf.Info.Files[0].Length)
+	}
+	if len(tf.Info.Files[0].Path) != 2 || tf.Info.Files[0].Path[0] != "subdir" {
+		t.Errorf("file[0] path: got %v", tf.Info.Files[0].Path)
+	}
+	if tf.Info.Files[1].Length != 200000 {
+		t.Errorf("file[1] length: got %d", tf.Info.Files[1].Length)
+	}
+}
+
+func TestParseAnnounceList(t *testing.T) {
+	info := map[string]any{
+		"name":         "test.txt",
+		"piece length": int64(262144),
+		"pieces":       fakePieces(1),
+		"length":       int64(100),
+	}
+	extra := map[string]any{
+		"announce-list": []any{
+			[]any{"http://tracker1.example.com/announce", "http://tracker2.example.com/announce"},
+			[]any{"http://tracker3.example.com/announce"},
+		},
+	}
+	data := buildTestTorrent(t, info, extra)
+
+	tf, err := Parse(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(tf.AnnounceList) != 2 {
+		t.Fatalf("announce-list tiers: got %d, want 2", len(tf.AnnounceList))
+	}
+	if len(tf.AnnounceList[0]) != 2 {
+		t.Errorf("tier 0: got %d trackers, want 2", len(tf.AnnounceList[0]))
+	}
+}
+
+func TestParseInvalidPiecesLength(t *testing.T) {
+	info := map[string]any{
+		"name":         "test.txt",
+		"piece length": int64(262144),
+		"pieces":       "not-multiple-of-20",
+		"length":       int64(100),
+	}
+	data := buildTestTorrent(t, info, nil)
+
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error for invalid pieces length")
+	}
+}
+
+func TestParseMissingInfo(t *testing.T) {
+	d := map[string]any{
+		"announce": "http://tracker.example.com/announce",
+	}
+	data, _ := bencode.Encode(d)
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error for missing info")
+	}
+}
+
+func TestInfoHashConsistency(t *testing.T) {
+	info := map[string]any{
+		"name":         "test.txt",
+		"piece length": int64(262144),
+		"pieces":       fakePieces(1),
+		"length":       int64(100),
+	}
+	data := buildTestTorrent(t, info, nil)
+
+	tf1, _ := Parse(data)
+	tf2, _ := Parse(data)
+
+	if tf1.InfoHash != tf2.InfoHash {
+		t.Error("info hash should be deterministic")
+	}
+}
