@@ -146,6 +146,44 @@ func TestPieceQueueAddRemoveBitfield(t *testing.T) {
 	pq.mu.Unlock()
 }
 
+func TestPieceQueueEndgame(t *testing.T) {
+	// 3 pieces, threshold = max(5, 3/100) = 5, so endgame triggers immediately
+	pieces := []PieceWork{
+		{Index: 0, Length: 100},
+		{Index: 1, Length: 100},
+		{Index: 2, Length: 100},
+	}
+	pq := NewPieceQueue(pieces)
+	hasAll := func(int) bool { return true }
+
+	// Pick first piece — should trigger endgame (3 <= 5)
+	pw1, ok := pq.Pick(hasAll)
+	if !ok {
+		t.Fatal("expected a piece")
+	}
+
+	if !pq.IsEndgame() {
+		t.Fatal("expected endgame mode")
+	}
+
+	// In endgame, should be able to pick the same pending piece again
+	pw2, ok := pq.Pick(hasAll)
+	if !ok {
+		t.Fatal("expected a piece in endgame (duplicate allowed)")
+	}
+	// pw2 might be the same as pw1 or different — both are valid in endgame
+
+	// Complete pw1 — should broadcast to cancelCh
+	pq.Complete(pw1.Index)
+
+	// Check IsDone
+	if !pq.IsDone(pw1.Index) {
+		t.Fatal("piece should be done")
+	}
+
+	_ = pw2 // used
+}
+
 func TestPieceQueueRemaining(t *testing.T) {
 	pieces := []PieceWork{
 		{Index: 0, Length: 100},

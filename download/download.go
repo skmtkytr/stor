@@ -590,6 +590,8 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		activeWorkers.Add(1)
 		go func() {
 			defer activeWorkers.Done()
+			// Allow reconnection after disconnect
+			defer seen.Delete(addr)
 
 			select {
 			case <-ctx.Done():
@@ -605,7 +607,6 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			client.maxPipeline = cfg.MaxPipeline
 			defer func() { _ = client.Close() }()
 
-			// Update piece availability from peer's bitfield
 			pq.AddPeerBitfield(client.bitfield)
 			defer pq.RemovePeerBitfield(client.bitfield)
 
@@ -624,8 +625,6 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 
 				pw, ok := pq.Pick(client.HasPiece)
 				if !ok {
-					// No work available for this peer right now.
-					// Wait for new work (piece returned, new peer bitfield) or exit.
 					select {
 					case <-ctx.Done():
 						return
@@ -634,10 +633,20 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 					}
 				}
 
+				// In endgame, check if another worker already completed this piece
+				if pq.IsDone(pw.Index) {
+					continue
+				}
+
 				data, err := client.DownloadPiece(pw)
 				if err != nil {
 					pq.Return(pw)
 					return
+				}
+
+				// In endgame, another worker may have finished first
+				if pq.IsDone(pw.Index) {
+					continue
 				}
 
 				pq.Complete(pw.Index)
@@ -650,6 +659,28 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			}
 		}()
 	}
+
+	// retryPeers goroutine: periodically re-attempt disconnected peers
+	retryDone := make(chan struct{})
+	go func() {
+		defer close(retryDone)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if pq.Remaining() == 0 {
+					return
+				}
+				// Re-try initial peers that have disconnected (seen was cleared on exit)
+				for _, p := range initialPeers {
+					spawnWorker(p)
+				}
+			}
+		}
+	}()
 
 	for _, p := range initialPeers {
 		spawnWorker(p)
@@ -680,6 +711,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		if feederDone != nil {
 			<-feederDone
 		}
+		<-retryDone
 		activeWorkers.Wait()
 		close(resultCh)
 	}()
