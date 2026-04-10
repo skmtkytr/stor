@@ -19,7 +19,7 @@
 	}
 
 	const defaultCols: ColDef[] = [
-		{ id: "name", label: "Name", width: 0, minWidth: 120 },  // 0 = flex
+		{ id: "name", label: "Name", width: 400, minWidth: 150 },
 		{ id: "size", label: "Size", width: 85, minWidth: 60, align: "right" },
 		{ id: "progress", label: "Progress", width: 170, minWidth: 100 },
 		{ id: "speed", label: "Speed", width: 90, minWidth: 60, align: "right" },
@@ -119,12 +119,20 @@
 		e.stopPropagation();
 		resizing = idx;
 		const startX = e.pageX;
-		const th = (e.target as HTMLElement).parentElement!;
-		const startW = th.offsetWidth;
+		const startW = cols[idx].width;
+		const nextIdx = idx + 1;
+		const startNextW = nextIdx < cols.length ? cols[nextIdx].width : 0;
 
 		const onMove = (ev: MouseEvent) => {
-			const c = cols[idx];
-			cols[idx] = { ...c, width: Math.max(c.minWidth, startW + ev.pageX - startX) };
+			const delta = ev.pageX - startX;
+			const newW = Math.max(cols[idx].minWidth, startW + delta);
+			const actualDelta = newW - startW;
+			cols[idx] = { ...cols[idx], width: newW };
+			// Compensate: shrink/grow the next column
+			if (nextIdx < cols.length) {
+				const newNextW = Math.max(cols[nextIdx].minWidth, startNextW - actualDelta);
+				cols[nextIdx] = { ...cols[nextIdx], width: newNextW };
+			}
 		};
 		const onUp = () => {
 			resizing = null;
@@ -136,8 +144,7 @@
 		document.addEventListener("mouseup", onUp);
 	}
 
-	// --- Fixed widths for non-flex columns ---
-	const fixedTotal = $derived(cols.reduce((s, c) => s + (c.width > 0 ? c.width : 0), 0));
+	const tableWidth = $derived(cols.reduce((s, c) => s + c.width, 0));
 
 	// --- State badge variant ---
 	const stateVariant: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
@@ -187,14 +194,9 @@
 	<ContextMenu.Trigger class="w-full">
 		<div class="rounded-lg border bg-card overflow-hidden">
 			<div class="overflow-x-auto">
-				<table class="w-full" style="table-layout: fixed; min-width: {fixedTotal + 200}px;">
-					<!-- Column widths -->
+				<table style="table-layout: fixed; width: {tableWidth}px;">
 					{#each cols as col}
-						{#if col.width > 0}
-							<col style="width: {col.width}px;" />
-						{:else}
-							<col />
-						{/if}
+						<col style="width: {col.width}px;" />
 					{/each}
 
 					<thead>
