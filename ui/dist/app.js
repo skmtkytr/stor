@@ -9,13 +9,13 @@ let pollTimer = null;
 // --- Auth ---
 
 function showAuth() {
-  $("#auth-screen").hidden = false;
-  $("#app-screen").hidden = true;
+  $("#auth-screen").classList.add("active");
+  $("#app-screen").classList.remove("active");
 }
 
 function showApp() {
-  $("#auth-screen").hidden = true;
-  $("#app-screen").hidden = false;
+  $("#auth-screen").classList.remove("active");
+  $("#app-screen").classList.add("active");
   startPolling();
 }
 
