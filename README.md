@@ -2,7 +2,7 @@
 
 [日本語](README.ja.md)
 
-A BitTorrent client built from the ground up in Go — no third-party torrent libraries. Every layer, from bencoding to Kademlia DHT, follows the BEP specifications directly.
+A BitTorrent client built from the ground up in Go — no third-party torrent libraries. Every layer, from bencoding to uTP, follows the BEP specifications directly.
 
 ## Why
 
@@ -12,12 +12,26 @@ Most Go BitTorrent implementations wrap anacrolix/torrent or similar. stor exist
 
 | BEP | Spec | Status |
 |-----|------|--------|
-| 3 | The BitTorrent Protocol | Implemented (incl. choking algorithm) |
-| 5 | DHT Protocol | Implemented |
+| 3 | The BitTorrent Protocol | Implemented (choking, rarest-first, endgame) |
+| 5 | DHT Protocol | Implemented (shared instance, configurable alpha) |
 | 9 | Extension for Peers to Send Metadata Files | Implemented |
 | 10 | Extension Protocol | Implemented |
+| 11 | Peer Exchange (PEX) | Implemented |
 | 15 | UDP Tracker Protocol | Implemented |
 | 23 | Tracker Returns Compact Peer Lists | Implemented |
+| 29 | uTP (Micro Transport Protocol) | Implemented (LEDBAT congestion control) |
+| — | MSE/PE (Protocol Encryption) | Implemented (DH + RC4, plaintext fallback) |
+
+## Features
+
+- **Download**: rarest-first piece selection, endgame mode, resume with piece verification
+- **Upload**: seeding after download, incoming peer listener, upload choking
+- **Peers**: dynamic peer injection, periodic tracker re-announce, peer reconnection, PEX
+- **Encryption**: MSE/PE with RC4, automatic plaintext fallback
+- **Daemon**: JSON-RPC 2.0 API, persistent queue, configurable tuning
+- **Web UI**: Deluge-inspired layout, real-time stats, filter/sort
+- **Chrome Extension**: intercepts `.torrent`/`magnet:` links, popup management
+- **Docker**: multi-arch (amd64/arm64), ~9 MB distroless image
 
 ## Getting Started
 
@@ -33,6 +47,7 @@ On first launch, a config file is created at `~/.config/stor/config.toml` with a
 services:
   stor:
     image: ghcr.io/skmtkytr/stor:latest
+    user: "1000:1000"
     ports:
       - "9090:9090"
       - "6881:6881"
@@ -42,8 +57,6 @@ services:
       - ./data:/data
     restart: unless-stopped
 ```
-
-Multi-arch image (amd64 / arm64). ~9 MB (distroless).
 
 ### Standalone Download
 
@@ -84,13 +97,15 @@ Load `extension/` as an unpacked extension. Features:
 cmd/stor/       Entry point — daemon and standalone modes
 daemon/         HTTP server, JSON-RPC 2.0 API, configuration
 engine/         Torrent lifecycle, queue scheduling, parallel magnet resolution
-download/       Piece-level I/O, peer manager, BEP 3 choking
-peer/           Wire protocol, BEP 10 extension negotiation
+download/       Piece-level I/O, rarest-first, endgame, peer manager, choking
+peer/           Wire protocol, BEP 10/11 extensions, PEX
 tracker/        HTTP and UDP announce clients
 dht/            Kademlia routing table, iterative lookup, get_peers
 magnet/         Magnet URI parsing, BEP 9 metadata fetch
 torrent/        .torrent file parser
 bencode/        Bencoding codec
+mse/            Message Stream Encryption (DH + RC4)
+utp/            Micro Transport Protocol (LEDBAT congestion control)
 ui/             SvelteKit SPA, embedded in the binary at build time
 extension/      Chrome extension, Manifest V3
 ```

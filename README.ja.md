@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-Go でフルスクラッチ実装した BitTorrent クライアント。外部のトレントライブラリに依存せず、bencode から Kademlia DHT まで BEP 仕様に準拠して構築。
+Go でフルスクラッチ実装した BitTorrent クライアント。外部のトレントライブラリに依存せず、bencode から uTP まで BEP 仕様に準拠して構築。
 
 ## 動機
 
@@ -12,12 +12,26 @@ Go の BitTorrent 実装の多くは anacrolix/torrent 等のラッパー。stor
 
 | BEP | 仕様 | 状態 |
 |-----|------|------|
-| 3 | BitTorrent プロトコル | 実装済（チョーキングアルゴリズム含む） |
-| 5 | DHT プロトコル | 実装済 |
+| 3 | BitTorrent プロトコル | 実装済（チョーキング、rarest-first、endgame） |
+| 5 | DHT プロトコル | 実装済（共有インスタンス、alpha 設定可） |
 | 9 | メタデータ交換拡張 | 実装済 |
 | 10 | 拡張プロトコル | 実装済 |
+| 11 | ピア交換 (PEX) | 実装済 |
 | 15 | UDP トラッカープロトコル | 実装済 |
 | 23 | コンパクトピアリスト | 実装済 |
+| 29 | uTP (Micro Transport Protocol) | 実装済（LEDBAT 輻輳制御） |
+| — | MSE/PE（プロトコル暗号化） | 実装済（DH + RC4、平文フォールバック） |
+
+## 主な機能
+
+- **ダウンロード**: rarest-first ピース選択、endgame モード、ピース検証付きレジューム
+- **アップロード**: ダウンロード完了後の自動シード、incoming ピア受付、upload choking
+- **ピア管理**: 動的ピア注入、定期 re-announce、ピア再接続、PEX
+- **暗号化**: MSE/PE（RC4）、自動平文フォールバック
+- **デーモン**: JSON-RPC 2.0 API、永続キュー、チューニング設定
+- **Web UI**: Deluge 風レイアウト、リアルタイム統計、フィルタ/ソート
+- **Chrome 拡張**: `.torrent` / `magnet:` リンク自動キャプチャ、ポップアップ管理
+- **Docker**: マルチアーキ（amd64/arm64）、約 9 MB distroless イメージ
 
 ## はじめる
 
@@ -33,6 +47,7 @@ make && ./stor daemon
 services:
   stor:
     image: ghcr.io/skmtkytr/stor:latest
+    user: "1000:1000"
     ports:
       - "9090:9090"
       - "6881:6881"
@@ -42,8 +57,6 @@ services:
       - ./data:/data
     restart: unless-stopped
 ```
-
-マルチアーキテクチャ対応（amd64 / arm64）。イメージサイズ約 9 MB（distroless）。
 
 ### スタンドアロンダウンロード
 
@@ -84,13 +97,15 @@ dht_alpha = 8         # DHT lookup の並列度
 cmd/stor/       エントリポイント — デーモン / スタンドアロン
 daemon/         HTTP サーバー、JSON-RPC 2.0 API、設定管理
 engine/         トレントライフサイクル、キュースケジューリング、マグネット並列解決
-download/       ピース I/O、ピアマネージャー、BEP 3 チョーキング
-peer/           ワイヤープロトコル、BEP 10 拡張ネゴシエーション
+download/       ピース I/O、rarest-first、endgame、ピアマネージャー、チョーキング
+peer/           ワイヤープロトコル、BEP 10/11 拡張、PEX
 tracker/        HTTP / UDP アナウンスクライアント
 dht/            Kademlia ルーティングテーブル、反復探索、get_peers
 magnet/         マグネット URI パース、BEP 9 メタデータ取得
 torrent/        .torrent ファイルパーサー
 bencode/        bencode コーデック
+mse/            Message Stream Encryption（DH + RC4）
+utp/            Micro Transport Protocol（LEDBAT 輻輳制御）
 ui/             SvelteKit SPA（ビルド時にバイナリへ埋め込み）
 extension/      Chrome 拡張（Manifest V3）
 ```
