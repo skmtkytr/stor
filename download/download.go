@@ -371,24 +371,6 @@ func startWorkers(peers []tracker.Peer, infoHash, peerID [20]byte, workCh chan P
 	return resultCh
 }
 
-// buildWorkQueueWithBitfield builds a work queue, skipping pieces present in have.
-func buildWorkQueueWithBitfield(tf *torrent.TorrentFile, totalLength int64, have peer.Bitfield) chan PieceWork {
-	numPieces := len(tf.Info.PieceHashes)
-	workCh := make(chan PieceWork, numPieces)
-	for i, hash := range tf.Info.PieceHashes {
-		if have != nil && have.HasPiece(i) {
-			continue // already downloaded
-		}
-		length := int(tf.Info.PieceLength)
-		remaining := int(totalLength) - i*int(tf.Info.PieceLength)
-		if remaining < length {
-			length = remaining
-		}
-		workCh <- PieceWork{Index: i, Hash: hash, Length: length}
-	}
-	return workCh
-}
-
 func buildWorkQueue(tf *torrent.TorrentFile, totalLength int64) chan PieceWork {
 	numPieces := len(tf.Info.PieceHashes)
 	workCh := make(chan PieceWork, numPieces)
@@ -540,15 +522,28 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 		}
 	}
 
-	workCh := buildWorkQueueWithBitfield(p.TF, tl, p.Have)
-	remaining := numPieces - alreadyDone
+	// Build piece list for remaining work
+	var pieces []PieceWork
+	for i, hash := range p.TF.Info.PieceHashes {
+		if p.Have != nil && p.Have.HasPiece(i) {
+			continue
+		}
+		length := int(p.TF.Info.PieceLength)
+		rem := int(tl) - i*int(p.TF.Info.PieceLength)
+		if rem < length {
+			length = rem
+		}
+		pieces = append(pieces, PieceWork{Index: i, Hash: hash, Length: length})
+	}
+	remaining := len(pieces)
 
 	// Initialize progress with already-completed pieces
 	if alreadyDone > 0 {
 		p.Progress.SetInitial(alreadyDone, tl, int64(p.TF.Info.PieceLength))
 	}
 
-	resultCh := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, workCh, p.PeerCh, p.Progress, p.Cfg)
+	pq := NewPieceQueue(pieces)
+	resultCh := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.Progress, p.Cfg)
 
 	pieceLength := int(p.TF.Info.PieceLength)
 	for completed := 0; completed < remaining; {
@@ -574,25 +569,22 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 	return nil
 }
 
-// runWorkers launches peer workers with dynamic peer injection support.
-// Initial peers are connected immediately. New peers from peerCh are connected as they arrive.
-// Includes a PeerManager that runs the BEP 3 §5 choking algorithm.
-func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peerID [20]byte, workCh chan PieceWork, peerCh <-chan []tracker.Peer, progress *Progress, cfg DownloadConfig) <-chan PieceResult {
-	resultCh := make(chan PieceResult, cap(workCh))
+// runWorkers launches peer workers with rarest-first piece selection and dynamic peer injection.
+func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peerID [20]byte, pq *PieceQueue, peerCh <-chan []tracker.Peer, progress *Progress, cfg DownloadConfig) <-chan PieceResult {
+	resultCh := make(chan PieceResult, 64)
 
 	pm := NewPeerManager(DefaultUnchokeSlots)
 	go pm.Run(ctx)
 
 	sem := make(chan struct{}, cfg.MaxPeers)
-	seen := &sync.Map{} // tracks connected peer addresses
+	seen := &sync.Map{}
 
 	var activeWorkers sync.WaitGroup
 
-	// spawnWorker connects to a single peer and runs the download loop.
 	spawnWorker := func(p tracker.Peer) {
 		addr := p.String()
 		if _, loaded := seen.LoadOrStore(addr, true); loaded {
-			return // already connected or attempted
+			return
 		}
 
 		activeWorkers.Add(1)
@@ -613,6 +605,10 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			client.maxPipeline = cfg.MaxPipeline
 			defer func() { _ = client.Close() }()
 
+			// Update piece availability from peer's bitfield
+			pq.AddPeerBitfield(client.bitfield)
+			defer pq.RemovePeerBitfield(client.bitfield)
+
 			pm.Register(client)
 			defer pm.Unregister(client)
 
@@ -623,37 +619,42 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				select {
 				case <-ctx.Done():
 					return
-				case pw, ok := <-workCh:
-					if !ok {
-						return
-					}
-					if !client.HasPiece(pw.Index) {
-						workCh <- pw
-						continue
-					}
+				default:
+				}
 
-					data, err := client.DownloadPiece(pw)
-					if err != nil {
-						workCh <- pw
-						return
-					}
-
+				pw, ok := pq.Pick(client.HasPiece)
+				if !ok {
+					// No work available for this peer right now.
+					// Wait for new work (piece returned, new peer bitfield) or exit.
 					select {
-					case resultCh <- PieceResult{Index: pw.Index, Data: data}:
 					case <-ctx.Done():
 						return
+					case <-pq.Wait():
+						continue
 					}
+				}
+
+				data, err := client.DownloadPiece(pw)
+				if err != nil {
+					pq.Return(pw)
+					return
+				}
+
+				pq.Complete(pw.Index)
+
+				select {
+				case resultCh <- PieceResult{Index: pw.Index, Data: data}:
+				case <-ctx.Done():
+					return
 				}
 			}
 		}()
 	}
 
-	// Spawn initial peers
 	for _, p := range initialPeers {
 		spawnWorker(p)
 	}
 
-	// Peer feeder: spawn workers for dynamically discovered peers
 	var feederDone chan struct{}
 	if peerCh != nil {
 		feederDone = make(chan struct{})
@@ -675,13 +676,11 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		}()
 	}
 
-	// Closer: wait for all workers + feeder to finish, then close channels
 	go func() {
 		if feederDone != nil {
 			<-feederDone
 		}
 		activeWorkers.Wait()
-		close(workCh)
 		close(resultCh)
 	}()
 
