@@ -113,7 +113,7 @@ func decodeInt(data []byte) (int64, []byte, error) {
 
 	n, err := strconv.ParseInt(numStr, 10, 64)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w: %v", ErrInvalidFormat, err)
+		return 0, nil, fmt.Errorf("%w: %w", ErrInvalidFormat, err)
 	}
 
 	return n, data[endIdx+1:], nil

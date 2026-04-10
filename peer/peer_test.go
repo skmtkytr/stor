@@ -37,7 +37,7 @@ func TestHandshakeRoundTrip(t *testing.T) {
 func TestHandshakeProtocolString(t *testing.T) {
 	h := &Handshake{}
 	var buf bytes.Buffer
-	WriteHandshake(&buf, h)
+	_ = WriteHandshake(&buf, h)
 
 	data := buf.Bytes()
 	if data[0] != 19 {

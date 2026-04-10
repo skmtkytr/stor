@@ -4,6 +4,7 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"net"
+	"slices"
 	"testing"
 
 	"github.com/skmtkytr/stor/peer"
@@ -25,7 +26,7 @@ func fakePeer(t *testing.T, infoHash [20]byte, pieces map[int][]byte) net.Listen
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		// Read handshake
 		hs, err := peer.ReadHandshake(conn)
@@ -37,7 +38,7 @@ func fakePeer(t *testing.T, infoHash [20]byte, pieces map[int][]byte) net.Listen
 		}
 
 		// Write handshake
-		peer.WriteHandshake(conn, &peer.Handshake{
+		_ = peer.WriteHandshake(conn, &peer.Handshake{
 			InfoHash: infoHash,
 			PeerID:   [20]byte{'-', 'F', 'K', '0', '0', '0', '1', '-'},
 		})
@@ -55,7 +56,7 @@ func fakePeer(t *testing.T, infoHash [20]byte, pieces map[int][]byte) net.Listen
 			bf[k/8] |= 1 << (7 - k%8)
 		}
 		bfMsg := &peer.Message{ID: peer.MsgBitfield, Payload: bf}
-		bfMsg.Write(conn)
+		_ = bfMsg.Write(conn)
 
 		// Read messages and respond
 		for {
@@ -71,7 +72,7 @@ func fakePeer(t *testing.T, infoHash [20]byte, pieces map[int][]byte) net.Listen
 			case peer.MsgInterested:
 				// Send unchoke
 				unchoke := &peer.Message{ID: peer.MsgUnchoke}
-				unchoke.Write(conn)
+				_ = unchoke.Write(conn)
 			case peer.MsgRequest:
 				if len(msg.Payload) != 12 {
 					return
@@ -97,7 +98,7 @@ func fakePeer(t *testing.T, infoHash [20]byte, pieces map[int][]byte) net.Listen
 				copy(payload[8:], block)
 
 				pieceMsg := &peer.Message{ID: peer.MsgPiece, Payload: payload}
-				pieceMsg.Write(conn)
+				_ = pieceMsg.Write(conn)
 			}
 		}
 	}()
@@ -118,7 +119,7 @@ func TestDownloadPiece(t *testing.T) {
 
 	pieces := map[int][]byte{0: pieceData}
 	ln := fakePeer(t, infoHash, pieces)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	addr := ln.Addr().(*net.TCPAddr)
 	p := tracker.Peer{IP: net.IPv4(127, 0, 0, 1), Port: uint16(addr.Port)}
@@ -127,7 +128,7 @@ func TestDownloadPiece(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if !client.HasPiece(0) {
 		t.Fatal("client should report having piece 0")
@@ -159,7 +160,7 @@ func TestDownloadPieceHashMismatch(t *testing.T) {
 
 	pieces := map[int][]byte{0: pieceData}
 	ln := fakePeer(t, infoHash, pieces)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	addr := ln.Addr().(*net.TCPAddr)
 	p := tracker.Peer{IP: net.IPv4(127, 0, 0, 1), Port: uint16(addr.Port)}
@@ -168,7 +169,7 @@ func TestDownloadPieceHashMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	pw := PieceWork{Index: 0, Hash: wrongHash, Length: len(pieceData)}
 	_, err = client.DownloadPiece(pw)
@@ -195,7 +196,7 @@ func TestDownloadFull(t *testing.T) {
 
 	pieces := map[int][]byte{0: piece0, 1: piece1}
 	ln := fakePeer(t, infoHash, pieces)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	addr := ln.Addr().(*net.TCPAddr)
 	peers := []tracker.Peer{{IP: net.IPv4(127, 0, 0, 1), Port: uint16(addr.Port)}}
@@ -215,7 +216,7 @@ func TestDownloadFull(t *testing.T) {
 		t.Fatalf("Download failed: %v", err)
 	}
 
-	expected := append(piece0, piece1...)
+	expected := slices.Concat(piece0, piece1)
 	if len(data) != len(expected) {
 		t.Fatalf("data length: got %d, want %d", len(data), len(expected))
 	}

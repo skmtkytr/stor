@@ -47,21 +47,23 @@ func NewClient(p tracker.Peer, infoHash, peerID [20]byte) (*Client, error) {
 		return nil, fmt.Errorf("download: connect to %s failed: %w", p, err)
 	}
 
+	closeOnErr := func() { _ = conn.Close() }
+
 	// Send handshake
 	hs := &peer.Handshake{InfoHash: infoHash, PeerID: peerID}
 	if err := peer.WriteHandshake(conn, hs); err != nil {
-		conn.Close()
+		closeOnErr()
 		return nil, fmt.Errorf("download: handshake write failed: %w", err)
 	}
 
 	// Read handshake
 	resp, err := peer.ReadHandshake(conn)
 	if err != nil {
-		conn.Close()
+		closeOnErr()
 		return nil, fmt.Errorf("download: handshake read failed: %w", err)
 	}
 	if resp.InfoHash != infoHash {
-		conn.Close()
+		closeOnErr()
 		return nil, fmt.Errorf("download: info hash mismatch")
 	}
 
@@ -73,11 +75,11 @@ func NewClient(p tracker.Peer, infoHash, peerID [20]byte) (*Client, error) {
 		choked:   true,
 	}
 
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	msg, err := peer.ReadMessage(conn)
-	conn.SetDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Time{})
 	if err != nil {
-		conn.Close()
+		closeOnErr()
 		return nil, fmt.Errorf("download: read bitfield failed: %w", err)
 	}
 	if msg != nil && msg.ID == peer.MsgBitfield {
@@ -99,8 +101,8 @@ func (c *Client) HasPiece(index int) bool {
 
 // DownloadPiece downloads a single piece from the peer.
 func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
-	c.conn.SetDeadline(time.Now().Add(30 * time.Second))
-	defer c.conn.SetDeadline(time.Time{})
+	_ = c.conn.SetDeadline(time.Now().Add(30 * time.Second))
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
 
 	// Send interested
 	msg := &peer.Message{ID: peer.MsgInterested}
@@ -245,7 +247,7 @@ func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([
 			fmt.Printf("piece %d/%d downloaded\n", completed, len(work))
 		}
 
-		client.Close()
+		_ = client.Close()
 	}
 
 	if completed < len(work) {

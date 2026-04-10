@@ -100,7 +100,7 @@ func TestAnnounceHTTP(t *testing.T) {
 			http.Error(w, "missing info_hash", 400)
 			return
 		}
-		w.Write(respData)
+		_, _ = w.Write(respData)
 	}))
 	defer server.Close()
 
@@ -138,7 +138,7 @@ func TestAnnounceHTTPTrackerError(t *testing.T) {
 	respData, _ := bencode.Encode(resp)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(respData)
+		_, _ = w.Write(respData)
 	}))
 	defer server.Close()
 
@@ -171,7 +171,7 @@ func TestAnnounceHTTPDictPeers(t *testing.T) {
 	respData, _ := bencode.Encode(resp)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(respData)
+		_, _ = w.Write(respData)
 	}))
 	defer server.Close()
 
