@@ -155,14 +155,17 @@ func NewClientWithTimeout(p tracker.Peer, infoHash, peerID [20]byte, dialTimeout
 	return newClient(p, infoHash, peerID, dialTimeoutSec, false)
 }
 
-// NewClientEncrypted connects with MSE/PE encryption, falling back to plaintext on failure.
+// NewClientEncrypted tries plaintext first, then MSE/PE if plaintext fails.
+// This avoids corrupting connections to peers that don't support MSE
+// (sending DH key material to a non-MSE peer causes them to drop/block us).
 func NewClientEncrypted(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int) (*Client, error) {
-	c, err := newClient(p, infoHash, peerID, dialTimeoutSec, true)
-	if err != nil {
-		// Fall back to plaintext
-		return newClient(p, infoHash, peerID, dialTimeoutSec, false)
+	// Try plaintext first (most compatible)
+	c, err := newClient(p, infoHash, peerID, dialTimeoutSec, false)
+	if err == nil {
+		return c, nil
 	}
-	return c, nil
+	// If plaintext fails, try MSE (peer might require encryption)
+	return newClient(p, infoHash, peerID, dialTimeoutSec, true)
 }
 
 func newClient(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, encrypt bool) (*Client, error) {
