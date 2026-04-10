@@ -1,0 +1,146 @@
+package download
+
+import (
+	"context"
+	"sort"
+	"sync"
+	"time"
+)
+
+const (
+	// DefaultUnchokeSlots is the number of fastest peers to unchoke.
+	DefaultUnchokeSlots = 4
+	// RechokeInterval is how often to re-evaluate peer speeds.
+	RechokeInterval = 10 * time.Second
+	// OptimisticInterval is how often to rotate the optimistic unchoke slot.
+	OptimisticInterval = 30 * time.Second
+)
+
+// PeerManager implements the BEP 3 §5 choking algorithm.
+// It tracks all connected peers, periodically ranks them by download speed,
+// unchokes the fastest N, and rotates one optimistic unchoke slot.
+type PeerManager struct {
+	mu             sync.Mutex
+	peers          []*Client
+	unchokeSlots   int
+	optimisticPeer *Client
+}
+
+// NewPeerManager creates a new peer manager.
+func NewPeerManager(unchokeSlots int) *PeerManager {
+	if unchokeSlots <= 0 {
+		unchokeSlots = DefaultUnchokeSlots
+	}
+	return &PeerManager{
+		unchokeSlots: unchokeSlots,
+	}
+}
+
+// Register adds a peer to management. Called when a peer connects.
+func (pm *PeerManager) Register(c *Client) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.peers = append(pm.peers, c)
+}
+
+// Unregister removes a peer from management. Called when a peer disconnects.
+func (pm *PeerManager) Unregister(c *Client) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	for i, p := range pm.peers {
+		if p == c {
+			pm.peers = append(pm.peers[:i], pm.peers[i+1:]...)
+			if pm.optimisticPeer == c {
+				pm.optimisticPeer = nil
+			}
+			return
+		}
+	}
+}
+
+// Run starts the choking algorithm loop. Blocks until ctx is cancelled.
+func (pm *PeerManager) Run(ctx context.Context) {
+	rechokeTicker := time.NewTicker(RechokeInterval)
+	optimisticTicker := time.NewTicker(OptimisticInterval)
+	defer rechokeTicker.Stop()
+	defer optimisticTicker.Stop()
+
+	optimisticIdx := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-rechokeTicker.C:
+			pm.rechoke()
+		case <-optimisticTicker.C:
+			pm.mu.Lock()
+			optimisticIdx = pm.rotateOptimistic(optimisticIdx)
+			pm.mu.Unlock()
+		}
+	}
+}
+
+// rechoke re-evaluates all peers and unchokes the fastest ones.
+func (pm *PeerManager) rechoke() {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if len(pm.peers) == 0 {
+		return
+	}
+
+	// Snapshot speeds and reset measurement windows
+	type peerSpeed struct {
+		client *Client
+		speed  float64
+	}
+	ranked := make([]peerSpeed, 0, len(pm.peers))
+	for _, c := range pm.peers {
+		ranked = append(ranked, peerSpeed{client: c, speed: c.Speed()})
+		c.ResetSpeed()
+	}
+
+	// Sort by speed descending
+	sort.Slice(ranked, func(i, j int) bool {
+		return ranked[i].speed > ranked[j].speed
+	})
+
+	// Unchoke top N, choke the rest (but preserve optimistic unchoke)
+	for i, ps := range ranked {
+		if i < pm.unchokeSlots || ps.client == pm.optimisticPeer {
+			_ = ps.client.SendUnchoke()
+		} else {
+			_ = ps.client.SendChoke()
+		}
+	}
+}
+
+// rotateOptimistic picks the next choked peer for optimistic unchoke.
+// Returns the updated index for round-robin.
+func (pm *PeerManager) rotateOptimistic(startIdx int) int {
+	if len(pm.peers) == 0 {
+		return 0
+	}
+
+	// Find next choked peer (round-robin)
+	for i := 0; i < len(pm.peers); i++ {
+		idx := (startIdx + i) % len(pm.peers)
+		c := pm.peers[idx]
+		if c.IsChoking() {
+			// Unchoke the old optimistic peer (will be handled by rechoke)
+			pm.optimisticPeer = c
+			_ = c.SendUnchoke()
+			return (idx + 1) % len(pm.peers)
+		}
+	}
+
+	return startIdx
+}
+
+// PeerCount returns the number of registered peers.
+func (pm *PeerManager) PeerCount() int {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return len(pm.peers)
+}
