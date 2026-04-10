@@ -187,6 +187,43 @@ header h1 { font-size: 1.25rem; color: #58a6ff; }
 .actions button:hover { background: #30363d; }
 .actions button.danger:hover { background: #f8514933; color: #f85149; }
 
+/* Checkbox column */
+.chk-col { width: 30px; text-align: center; }
+.chk-col input { cursor: pointer; accent-color: #58a6ff; }
+tr.selected { background: #1f6feb22 !important; }
+
+/* Selection count */
+.sel-count { font-size: 0.8rem; color: #58a6ff; font-weight: 500; }
+
+/* Context menu */
+.ctx-menu {
+  position: fixed;
+  display: none;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 4px 0;
+  min-width: 160px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  z-index: 1000;
+}
+.ctx-menu.visible { display: block; }
+.ctx-menu button {
+  display: block;
+  width: 100%;
+  padding: 6px 14px;
+  background: none;
+  color: #c9d1d9;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.ctx-menu button:hover { background: #21262d; }
+.ctx-menu .ctx-danger { color: #f85149; }
+.ctx-menu .ctx-danger:hover { background: #f8514922; }
+.ctx-sep { height: 1px; background: #21262d; margin: 4px 0; }
+
 .empty { text-align: center; color: #8b949e; padding: 3rem; }
 
 /* Toast */

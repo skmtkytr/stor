@@ -1,10 +1,13 @@
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
 const KEY = "stor_api_key";
 
 let apiKey = localStorage.getItem(KEY) || "";
 let pollTimer = null;
+let selected = new Set(); // selected torrent IDs
+let lastChecked = null;   // for shift-click range select
 
 // --- Auth ---
 
@@ -82,27 +85,25 @@ $("#add-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#add-btn").click();
 });
 
+function encodeFile(file) {
+  return file.arrayBuffer().then((buf) => {
+    const bytes = new Uint8Array(buf);
+    let raw = "";
+    for (let i = 0; i < bytes.length; i += 8192) {
+      raw += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    }
+    return btoa(raw);
+  });
+}
+
 $("#add-file").addEventListener("change", async (e) => {
   const files = Array.from(e.target.files);
   if (!files.length) return;
   let ok = 0, fail = 0;
   await Promise.all(files.map(async (file) => {
-    try {
-      const buf = await file.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      // btoa in chunks to avoid call stack overflow on large files
-      let b64 = "";
-      for (let i = 0; i < bytes.length; i += 8192) {
-        b64 += String.fromCharCode(...bytes.subarray(i, i + 8192));
-      }
-      await rpc("torrent.addFile", { data: btoa(b64) });
-      ok++;
-    } catch {
-      fail++;
-    }
+    try { await rpc("torrent.addFile", { data: await encodeFile(file) }); ok++; } catch { fail++; }
   }));
-  const msg = `${ok} added` + (fail ? `, ${fail} failed` : "");
-  toast(msg, fail > 0);
+  toast(`${ok} added` + (fail ? `, ${fail} failed` : ""), fail > 0);
   refresh();
   e.target.value = "";
 });
@@ -116,21 +117,9 @@ document.addEventListener("drop", async (e) => {
   if (!files.length) return;
   let ok = 0, fail = 0;
   await Promise.all(files.map(async (file) => {
-    try {
-      const buf = await file.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      let b64 = "";
-      for (let i = 0; i < bytes.length; i += 8192) {
-        b64 += String.fromCharCode(...bytes.subarray(i, i + 8192));
-      }
-      await rpc("torrent.addFile", { data: btoa(b64) });
-      ok++;
-    } catch {
-      fail++;
-    }
+    try { await rpc("torrent.addFile", { data: await encodeFile(file) }); ok++; } catch { fail++; }
   }));
-  const msg = `${ok} added` + (fail ? `, ${fail} failed` : "");
-  toast(msg, fail > 0);
+  toast(`${ok} added` + (fail ? `, ${fail} failed` : ""), fail > 0);
   refresh();
 });
 
@@ -148,10 +137,11 @@ function formatETA(downloaded, total, speed) {
   const secs = Math.round((total - downloaded) / speed);
   if (secs < 60) return secs + "s";
   if (secs < 3600) return Math.floor(secs / 60) + "m " + (secs % 60) + "s";
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  return h + "h " + m + "m";
+  return Math.floor(secs / 3600) + "h " + Math.floor((secs % 3600) / 60) + "m";
 }
+
+// Keep sorted torrent list for shift-click range select
+let currentTorrents = [];
 
 function renderTorrents(torrents) {
   const tbody = $("#torrent-list");
@@ -160,38 +150,45 @@ function renderTorrents(torrents) {
   if (!torrents || torrents.length === 0) {
     tbody.innerHTML = "";
     empty.hidden = false;
+    currentTorrents = [];
     return;
   }
   empty.hidden = true;
 
-  // Sort: active first (by queue position), then queued, then complete
   torrents.sort((a, b) => {
-    const stateOrder = { downloading: 0, metadata: 0, adding: 1, paused: 2, error: 3, complete: 4 };
-    const sa = stateOrder[a.state] ?? 5;
-    const sb = stateOrder[b.state] ?? 5;
+    const so = { downloading: 0, metadata: 0, adding: 1, paused: 2, error: 3, complete: 4 };
+    const sa = so[a.state] ?? 5, sb = so[b.state] ?? 5;
     if (sa !== sb) return sa - sb;
     return (a.queue_position ?? 999) - (b.queue_position ?? 999);
   });
+  currentTorrents = torrents;
+
+  // Clean up selected IDs that no longer exist
+  const ids = new Set(torrents.map((t) => t.id));
+  for (const id of selected) { if (!ids.has(id)) selected.delete(id); }
 
   tbody.innerHTML = torrents.map((t) => {
     const p = t.progress;
     const pct = p.percent ? p.percent.toFixed(1) : "0.0";
-    const fillClass = t.state === "complete" ? "fill complete" : "fill";
+    const fillCls = t.state === "complete" ? "fill complete" : "fill";
     const speed = t.state === "downloading" && p.down_speed ? formatBytes(p.down_speed) + "/s" : "-";
     const eta = t.state === "downloading" ? formatETA(p.downloaded, p.total, p.down_speed) : "-";
     const peers = t.state === "downloading" && p.active_peers ? p.active_peers : "-";
     const size = t.total_bytes ? formatBytes(t.total_bytes) : "-";
     const name = t.name || t.id.slice(0, 12) + "...";
     const qpos = t.queue_position != null ? t.queue_position : "-";
+    const chk = selected.has(t.id) ? "checked" : "";
+    const rowCls = selected.has(t.id) ? "selected" : "";
 
-    return `<tr>
+    return `<tr class="${rowCls}" data-id="${t.id}">
+      <td class="chk-col"><input type="checkbox" ${chk} data-id="${t.id}"></td>
       <td title="${t.id}">
         <div class="name">${esc(name)}</div>
         ${t.error ? `<div class="error-detail">${esc(t.error)}</div>` : ""}
       </td>
       <td>${size}</td>
       <td>
-        <div class="progress-bar"><div class="${fillClass}" style="width:${pct}%"></div></div>
+        <div class="progress-bar"><div class="${fillCls}" style="width:${pct}%"></div></div>
         <div class="progress-text">${pct}%${p.done_pieces ? ` (${p.done_pieces}/${p.total_pieces})` : ""}</div>
       </td>
       <td>${speed}</td>
@@ -206,11 +203,6 @@ function renderTorrents(torrents) {
           <button title="Down" onclick="queueMove('${t.id}','down')">&#x25BC;</button>
           <button title="Bottom" onclick="queueMove('${t.id}','bottom')">&#x23EC;</button>
         </span>
-      </td>
-      <td class="actions">
-        ${t.state === "downloading" || t.state === "metadata" ? `<button onclick="pause('${t.id}')">Pause</button>` : ""}
-        ${t.state === "paused" || t.state === "error" ? `<button onclick="resume('${t.id}')">Resume</button>` : ""}
-        <button class="danger" onclick="remove('${t.id}')">Remove</button>
       </td>
     </tr>`;
   }).join("");
@@ -227,30 +219,114 @@ function renderStats(stats) {
   const speed = stats.total_down_speed ? formatBytes(stats.total_down_speed) + "/s" : "0 B/s";
   $("#stats-text").textContent = `${stats.active_torrents}/${stats.max_active} active | ${stats.total_torrents} total | ${speed}`;
   const input = $("#max-active-input");
-  if (document.activeElement !== input) {
-    input.value = stats.max_active;
+  if (document.activeElement !== input) input.value = stats.max_active;
+  // Selection count
+  const selCount = selected.size;
+  $("#sel-count").textContent = selCount ? `${selCount} selected` : "";
+}
+
+// --- Selection: checkbox click + shift range ---
+
+$("#torrent-list").addEventListener("click", (e) => {
+  const cb = e.target.closest("input[type=checkbox]");
+  if (!cb) return;
+  const id = cb.dataset.id;
+  const idx = currentTorrents.findIndex((t) => t.id === id);
+
+  if (e.shiftKey && lastChecked !== null) {
+    const from = Math.min(lastChecked, idx);
+    const to = Math.max(lastChecked, idx);
+    for (let i = from; i <= to; i++) {
+      selected.add(currentTorrents[i].id);
+    }
+  } else {
+    if (selected.has(id)) selected.delete(id);
+    else selected.add(id);
   }
+  lastChecked = idx;
+  renderTorrents(currentTorrents);
+});
+
+// Select all / none
+function selectAll() {
+  currentTorrents.forEach((t) => selected.add(t.id));
+  renderTorrents(currentTorrents);
+}
+function selectNone() {
+  selected.clear();
+  lastChecked = null;
+  renderTorrents(currentTorrents);
+}
+window.selectAll = selectAll;
+window.selectNone = selectNone;
+
+// --- Context menu ---
+
+const ctxMenu = $("#ctx-menu");
+
+$("#torrent-list").addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  // If right-clicked on a row that isn't selected, select only that row
+  const row = e.target.closest("tr[data-id]");
+  if (row) {
+    const id = row.dataset.id;
+    if (!selected.has(id)) {
+      selected.clear();
+      selected.add(id);
+      renderTorrents(currentTorrents);
+    }
+  }
+  if (selected.size === 0) return;
+  ctxMenu.style.left = e.pageX + "px";
+  ctxMenu.style.top = e.pageY + "px";
+  ctxMenu.classList.add("visible");
+});
+
+document.addEventListener("click", () => {
+  ctxMenu.classList.remove("visible");
+});
+
+async function ctxAction(action) {
+  ctxMenu.classList.remove("visible");
+  const ids = [...selected];
+  if (!ids.length) return;
+
+  switch (action) {
+    case "pause":
+      await batchRPC(ids, (id) => rpc("torrent.pause", { id }));
+      toast(`${ids.length} paused`);
+      break;
+    case "resume":
+      await batchRPC(ids, (id) => rpc("torrent.resume", { id }));
+      toast(`${ids.length} resumed`);
+      break;
+    case "remove":
+      if (!confirm(`Remove ${ids.length} torrent(s)?`)) return;
+      const del = confirm("Also delete downloaded files?");
+      await batchRPC(ids, (id) => rpc("torrent.remove", { id, delete_files: del }));
+      selected.clear();
+      toast(`${ids.length} removed`);
+      break;
+    case "queue-top":
+      // Move in reverse order so they stack at top in selection order
+      for (const id of ids.reverse()) { await rpc("torrent.queueTop", { id }); }
+      toast(`${ids.length} moved to top`);
+      break;
+    case "queue-bottom":
+      for (const id of ids) { await rpc("torrent.queueBottom", { id }); }
+      toast(`${ids.length} moved to bottom`);
+      break;
+  }
+  refresh();
 }
 
-// --- Actions ---
-
-async function pause(id) {
-  try { await rpc("torrent.pause", { id }); refresh(); } catch (e) { toast(e.message, true); }
+async function batchRPC(ids, fn) {
+  await Promise.all(ids.map((id) => fn(id).catch(() => {})));
 }
 
-async function resume(id) {
-  try { await rpc("torrent.resume", { id }); refresh(); } catch (e) { toast(e.message, true); }
-}
+window.ctxAction = ctxAction;
 
-async function remove(id) {
-  if (!confirm("Remove this torrent?")) return;
-  const deleteFiles = confirm("Also delete downloaded files?");
-  try {
-    await rpc("torrent.remove", { id, delete_files: deleteFiles });
-    toast("Removed");
-    refresh();
-  } catch (e) { toast(e.message, true); }
-}
+// --- Single row actions (kept for queue buttons) ---
 
 async function queueMove(id, direction) {
   try { await rpc("torrent.queue" + direction.charAt(0).toUpperCase() + direction.slice(1), { id }); refresh(); } catch (e) { toast(e.message, true); }
@@ -265,10 +341,6 @@ async function setMaxActive() {
   } catch (e) { toast(e.message, true); }
 }
 
-// Expose to inline handlers
-window.pause = pause;
-window.resume = resume;
-window.remove = remove;
 window.queueMove = queueMove;
 window.setMaxActive = setMaxActive;
 
@@ -312,9 +384,7 @@ function startPolling() {
 // --- Init ---
 
 if (apiKey) {
-  rpc("daemon.version")
-    .then(() => showApp())
-    .catch(() => showAuth());
+  rpc("daemon.version").then(() => showApp()).catch(() => showAuth());
 } else {
   showAuth();
 }

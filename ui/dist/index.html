@@ -22,6 +22,7 @@
       <div class="header-left">
         <h1>stor</h1>
         <span id="stats-text" class="stats"></span>
+        <span id="sel-count" class="sel-count"></span>
       </div>
       <div class="header-right">
         <label class="max-active-label">
@@ -43,6 +44,7 @@
     <table id="torrent-table">
       <thead>
         <tr>
+          <th class="chk-col"><input type="checkbox" id="select-all-cb" title="Select all"></th>
           <th>Name</th>
           <th>Size</th>
           <th>Progress</th>
@@ -51,7 +53,6 @@
           <th>Peers</th>
           <th>State</th>
           <th>Queue</th>
-          <th></th>
         </tr>
       </thead>
       <tbody id="torrent-list"></tbody>
@@ -60,8 +61,25 @@
     <p id="empty-msg" class="empty" hidden>No torrents. Add one above.</p>
   </div>
 
+  <!-- Context menu -->
+  <div id="ctx-menu" class="ctx-menu">
+    <button onclick="ctxAction('resume')">Resume</button>
+    <button onclick="ctxAction('pause')">Pause</button>
+    <div class="ctx-sep"></div>
+    <button onclick="ctxAction('queue-top')">Move to Top</button>
+    <button onclick="ctxAction('queue-bottom')">Move to Bottom</button>
+    <div class="ctx-sep"></div>
+    <button class="ctx-danger" onclick="ctxAction('remove')">Remove</button>
+  </div>
+
   <div id="toast" class="toast"></div>
 
   <script src="app.js"></script>
+  <script>
+    // Select all checkbox
+    document.getElementById("select-all-cb").addEventListener("change", function() {
+      if (this.checked) selectAll(); else selectNone();
+    });
+  </script>
 </body>
 </html>
