@@ -73,6 +73,10 @@ type Client struct {
 	uploaded   int64     // bytes uploaded to this peer
 	speedStart time.Time // start of current measurement window
 	lastSpeed  float64   // bytes/sec from last measurement
+
+	// PEX (BEP 11)
+	pexRemoteID uint8                 // remote's ut_pex message ID (0 = not supported)
+	PeerSink    chan<- []tracker.Peer // discovered peers from PEX are sent here
 }
 
 // Speed returns the current download speed in bytes/sec.
@@ -154,7 +158,7 @@ func NewClientWithTimeout(p tracker.Peer, infoHash, peerID [20]byte, dialTimeout
 
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
-	hs := &peer.Handshake{InfoHash: infoHash, PeerID: peerID}
+	hs := &peer.Handshake{InfoHash: infoHash, PeerID: peerID, Extensions: true}
 	if err := peer.WriteHandshake(conn, hs); err != nil {
 		closeOnErr()
 		return nil, fmt.Errorf("download: handshake write failed: %w", err)
@@ -192,7 +196,62 @@ func NewClientWithTimeout(p tracker.Peer, infoHash, peerID [20]byte, dialTimeout
 		c.bitfield = peer.Bitfield(msg.Payload)
 	}
 
+	// BEP 10: send extension handshake if peer supports extensions
+	if resp.Extensions {
+		const localPexID uint8 = 2
+		extHS := &peer.ExtHandshake{
+			M: map[string]int64{"ut_pex": int64(localPexID)},
+			V: "stor/0.1",
+		}
+		payload, _ := peer.EncodeExtHandshake(extHS)
+		extMsg := peer.NewExtendedMessage(peer.ExtHandshakeID, payload)
+		if err := extMsg.Write(c.w); err == nil {
+			_ = c.w.Flush()
+		}
+		// We'll read the peer's ext handshake response during message loop
+		// and set pexRemoteID then
+	}
+
 	return c, nil
+}
+
+// handleExtended processes BEP 10 extended messages (handshake response, PEX).
+func (c *Client) handleExtended(payload []byte) {
+	extID, data, err := peer.ParseExtended(payload)
+	if err != nil {
+		return
+	}
+
+	if extID == peer.ExtHandshakeID {
+		// Extension handshake response — learn peer's ut_pex ID
+		peerHS, err := peer.DecodeExtHandshake(data)
+		if err != nil {
+			return
+		}
+		if id, ok := peerHS.M["ut_pex"]; ok && id > 0 {
+			c.pexRemoteID = uint8(id)
+		}
+		return
+	}
+
+	// PEX message (our local ID is 2)
+	const localPexID uint8 = 2
+	if extID == localPexID {
+		pexMsg, err := peer.DecodePEX(data)
+		if err != nil || pexMsg == nil {
+			return
+		}
+		if len(pexMsg.Added) > 0 && c.PeerSink != nil {
+			peers := make([]tracker.Peer, 0, len(pexMsg.Added))
+			for _, p := range pexMsg.Added {
+				peers = append(peers, tracker.Peer{IP: p.IP, Port: p.Port})
+			}
+			select {
+			case c.PeerSink <- peers:
+			default:
+			}
+		}
+	}
 }
 
 // Close closes the connection.
@@ -239,6 +298,8 @@ func (c *Client) waitForUnchoke() error {
 			if err == nil {
 				c.bitfield.SetPiece(int(idx))
 			}
+		case peer.MsgExtended:
+			c.handleExtended(msg.Payload)
 		}
 	}
 	return nil
@@ -311,6 +372,8 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 			if err == nil {
 				c.bitfield.SetPiece(int(idx))
 			}
+		case peer.MsgExtended:
+			c.handleExtended(msg.Payload)
 		}
 	}
 
@@ -474,6 +537,7 @@ type DownloadParams struct {
 	PeerID   [20]byte
 	Peers    []tracker.Peer        // initial peers
 	PeerCh   <-chan []tracker.Peer // dynamic peer injection (nil = disabled)
+	PeerSink chan<- []tracker.Peer // for PEX: discovered peers are sent here (nil = disabled)
 	Path     string
 	Progress *Progress
 	Cfg      DownloadConfig
@@ -543,7 +607,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 	}
 
 	pq := NewPieceQueue(pieces)
-	resultCh := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.Progress, p.Cfg)
+	resultCh := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.PeerSink, p.Progress, p.Cfg)
 
 	pieceLength := int(p.TF.Info.PieceLength)
 	for completed := 0; completed < remaining; {
@@ -570,7 +634,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 }
 
 // runWorkers launches peer workers with rarest-first piece selection and dynamic peer injection.
-func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peerID [20]byte, pq *PieceQueue, peerCh <-chan []tracker.Peer, progress *Progress, cfg DownloadConfig) <-chan PieceResult {
+func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peerID [20]byte, pq *PieceQueue, peerCh <-chan []tracker.Peer, peerSink chan<- []tracker.Peer, progress *Progress, cfg DownloadConfig) <-chan PieceResult {
 	resultCh := make(chan PieceResult, 64)
 
 	pm := NewPeerManager(DefaultUnchokeSlots)
@@ -605,6 +669,9 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				return
 			}
 			client.maxPipeline = cfg.MaxPipeline
+			if peerSink != nil {
+				client.PeerSink = peerSink
+			}
 			defer func() { _ = client.Close() }()
 
 			pq.AddPeerBitfield(client.bitfield)

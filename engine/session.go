@@ -269,6 +269,7 @@ func (s *Session) run(ctx context.Context) error {
 		PeerID:   s.peerID,
 		Peers:    peers,
 		PeerCh:   peerCh,
+		PeerSink: peerCh,
 		Path:     savePath,
 		Progress: progress,
 		Cfg:      s.dlCfg,
