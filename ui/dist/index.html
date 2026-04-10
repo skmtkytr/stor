@@ -19,8 +19,16 @@
 
   <div id="app-screen" class="screen">
     <header>
-      <h1>stor</h1>
-      <div id="stats" class="stats"></div>
+      <div class="header-left">
+        <h1>stor</h1>
+        <span id="stats-text" class="stats"></span>
+      </div>
+      <div class="header-right">
+        <label class="max-active-label">
+          Max active:
+          <input type="number" id="max-active-input" min="1" max="50" value="5">
+        </label>
+      </div>
     </header>
 
     <div class="add-bar">
@@ -39,8 +47,10 @@
           <th>Size</th>
           <th>Progress</th>
           <th>Speed</th>
+          <th>ETA</th>
           <th>Peers</th>
           <th>State</th>
+          <th>Queue</th>
           <th></th>
         </tr>
       </thead>
@@ -49,6 +59,8 @@
 
     <p id="empty-msg" class="empty" hidden>No torrents. Add one above.</p>
   </div>
+
+  <div id="toast" class="toast"></div>
 
   <script src="app.js"></script>
 </body>

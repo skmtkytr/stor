@@ -82,8 +82,14 @@ func (h *RPCHandler) dispatch(method string, params json.RawMessage) (any, *rpcE
 		return h.torrentGet(params)
 	case "torrent.list":
 		return h.torrentList()
-	case "torrent.setPriority":
-		return h.torrentSetPriority(params)
+	case "torrent.queueTop":
+		return h.torrentQueueMove(params, "top")
+	case "torrent.queueUp":
+		return h.torrentQueueMove(params, "up")
+	case "torrent.queueDown":
+		return h.torrentQueueMove(params, "down")
+	case "torrent.queueBottom":
+		return h.torrentQueueMove(params, "bottom")
 	case "daemon.stats":
 		return h.daemonStats()
 	case "daemon.setMaxActive":
@@ -192,19 +198,26 @@ func (h *RPCHandler) torrentList() (any, *rpcErr) {
 	return h.engine.ListTorrents(), nil
 }
 
-func (h *RPCHandler) torrentSetPriority(params json.RawMessage) (any, *rpcErr) {
+func (h *RPCHandler) torrentQueueMove(params json.RawMessage, direction string) (any, *rpcErr) {
 	var p struct {
-		ID       string `json:"id"`
-		Priority int    `json:"priority"` // 0=high, 1=normal, 2=low
+		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil || p.ID == "" {
 		return nil, &rpcErr{Code: -32602, Message: "invalid params: id required"}
 	}
-	if p.Priority < 0 || p.Priority > 2 {
-		return nil, &rpcErr{Code: -32602, Message: "invalid params: priority must be 0 (high), 1 (normal), or 2 (low)"}
-	}
 
-	if err := h.engine.SetPriority(p.ID, engine.Priority(p.Priority)); err != nil {
+	var err error
+	switch direction {
+	case "top":
+		err = h.engine.QueueTop(p.ID)
+	case "up":
+		err = h.engine.QueueUp(p.ID)
+	case "down":
+		err = h.engine.QueueDown(p.ID)
+	case "bottom":
+		err = h.engine.QueueBottom(p.ID)
+	}
+	if err != nil {
 		return nil, &rpcErr{Code: -32000, Message: err.Error()}
 	}
 	return struct{}{}, nil

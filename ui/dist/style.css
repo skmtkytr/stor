@@ -45,18 +45,37 @@ header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 1rem 1.5rem;
+  padding: 0.75rem 1.5rem;
   background: #161b22;
   border-bottom: 1px solid #30363d;
 }
+.header-left { display: flex; align-items: center; gap: 1rem; }
 header h1 { font-size: 1.25rem; color: #58a6ff; }
-.stats { color: #8b949e; font-size: 0.875rem; }
+.stats { color: #8b949e; font-size: 0.8rem; }
+.header-right { display: flex; align-items: center; gap: 0.5rem; }
+.max-active-label {
+  font-size: 0.8rem;
+  color: #8b949e;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.max-active-label input {
+  width: 50px;
+  padding: 2px 6px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #c9d1d9;
+  font-size: 0.8rem;
+  text-align: center;
+}
 
 /* Add bar */
 .add-bar {
   display: flex;
   gap: 0.5rem;
-  padding: 1rem 1.5rem;
+  padding: 0.75rem 1.5rem;
   background: #0d1117;
   border-bottom: 1px solid #21262d;
 }
@@ -88,22 +107,30 @@ header h1 { font-size: 1.25rem; color: #58a6ff; }
 }
 #torrent-table th {
   text-align: left;
-  padding: 0.5rem 1rem;
-  font-size: 0.75rem;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.7rem;
   text-transform: uppercase;
+  letter-spacing: 0.05em;
   color: #8b949e;
   border-bottom: 1px solid #21262d;
+  white-space: nowrap;
 }
 #torrent-table td {
-  padding: 0.75rem 1rem;
+  padding: 0.6rem 0.75rem;
   border-bottom: 1px solid #21262d;
-  font-size: 0.875rem;
+  font-size: 0.8rem;
+  white-space: nowrap;
 }
+#torrent-table td:first-child { white-space: normal; max-width: 300px; }
 #torrent-table tr:hover { background: #161b22; }
+
+.name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.error-detail { font-size: 0.7rem; color: #f85149; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
 
 /* Progress bar */
 .progress-bar {
   width: 100%;
+  min-width: 80px;
   height: 6px;
   background: #21262d;
   border-radius: 3px;
@@ -115,14 +142,14 @@ header h1 { font-size: 1.25rem; color: #58a6ff; }
   transition: width 0.3s;
 }
 .progress-bar .fill.complete { background: #238636; }
-.progress-text { font-size: 0.75rem; color: #8b949e; margin-top: 2px; }
+.progress-text { font-size: 0.7rem; color: #8b949e; margin-top: 2px; }
 
 /* State badges */
 .state {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 12px;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   font-weight: 500;
 }
 .state-downloading { background: #1f6feb33; color: #58a6ff; }
@@ -131,7 +158,22 @@ header h1 { font-size: 1.25rem; color: #58a6ff; }
 .state-error { background: #f8514933; color: #f85149; }
 .state-metadata, .state-adding { background: #8b949e33; color: #8b949e; }
 
+/* Queue column */
+.queue-col { white-space: nowrap; }
+.qpos { font-size: 0.75rem; color: #8b949e; margin-right: 4px; }
+.queue-btns button {
+  padding: 0 3px;
+  background: none;
+  color: #8b949e;
+  border: none;
+  cursor: pointer;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+.queue-btns button:hover { color: #58a6ff; }
+
 /* Actions */
+.actions { white-space: nowrap; }
 .actions button {
   padding: 2px 8px;
   margin-right: 4px;
@@ -140,9 +182,28 @@ header h1 { font-size: 1.25rem; color: #58a6ff; }
   border: 1px solid #30363d;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
 }
 .actions button:hover { background: #30363d; }
 .actions button.danger:hover { background: #f8514933; color: #f85149; }
 
 .empty { text-align: center; color: #8b949e; padding: 3rem; }
+
+/* Toast */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%) translateY(100px);
+  padding: 8px 20px;
+  background: #238636;
+  color: #fff;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  opacity: 0;
+  transition: transform 0.3s, opacity 0.3s;
+  pointer-events: none;
+  z-index: 1000;
+}
+.toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+.toast.error { background: #da3633; }

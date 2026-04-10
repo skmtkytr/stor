@@ -22,17 +22,17 @@ type Config struct {
 
 // TorrentInfo is the full info returned to API clients.
 type TorrentInfo struct {
-	ID          string                `json:"id"`
-	Name        string                `json:"name"`
-	Source      string                `json:"source"`
-	State       State                 `json:"state"`
-	Priority    Priority              `json:"priority"`
-	Progress    download.ProgressSnap `json:"progress"`
-	SavePath    string                `json:"save_path"`
-	TotalBytes  int64                 `json:"total_bytes"`
-	AddedAt     int64                 `json:"added_at"`
-	CompletedAt int64                 `json:"completed_at"`
-	Error       string                `json:"error,omitempty"`
+	ID            string                `json:"id"`
+	Name          string                `json:"name"`
+	Source        string                `json:"source"`
+	State         State                 `json:"state"`
+	QueuePosition int                   `json:"queue_position"`
+	Progress      download.ProgressSnap `json:"progress"`
+	SavePath      string                `json:"save_path"`
+	TotalBytes    int64                 `json:"total_bytes"`
+	AddedAt       int64                 `json:"added_at"`
+	CompletedAt   int64                 `json:"completed_at"`
+	Error         string                `json:"error,omitempty"`
 }
 
 // EngineStats is global daemon stats.
@@ -153,10 +153,11 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 	}
 
 	record := &TorrentRecord{
-		ID:      id,
-		Source:  source,
-		State:   StateAdding,
-		AddedAt: time.Now().Unix(),
+		ID:            id,
+		Source:        source,
+		State:         StateAdding,
+		QueuePosition: e.nextQueuePosition(),
+		AddedAt:       time.Now().Unix(),
 	}
 
 	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort)
@@ -308,23 +309,137 @@ func (e *Engine) PeerID() string {
 	return hex.EncodeToString(e.peerID[:])
 }
 
-// SetPriority changes a torrent's queue priority.
-func (e *Engine) SetPriority(id string, priority Priority) error {
-	e.mu.RLock()
-	s, ok := e.sessions[id]
-	e.mu.RUnlock()
+// QueueTop moves a torrent to the top of the queue (position 0).
+func (e *Engine) QueueTop(id string) error {
+	return e.setQueuePosition(id, 0)
+}
 
+// QueueUp moves a torrent one position up in the queue.
+func (e *Engine) QueueUp(id string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	s, ok := e.sessions[id]
+	if !ok {
+		return fmt.Errorf("engine: torrent %s not found", id)
+	}
+	r := s.Record()
+	if r.QueuePosition <= 0 {
+		return nil
+	}
+	return e.swapQueuePositions(r.QueuePosition, r.QueuePosition-1)
+}
+
+// QueueDown moves a torrent one position down in the queue.
+func (e *Engine) QueueDown(id string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	s, ok := e.sessions[id]
+	if !ok {
+		return fmt.Errorf("engine: torrent %s not found", id)
+	}
+	r := s.Record()
+	maxPos := e.maxQueuePosition()
+	if r.QueuePosition >= maxPos {
+		return nil
+	}
+	return e.swapQueuePositions(r.QueuePosition, r.QueuePosition+1)
+}
+
+// QueueBottom moves a torrent to the bottom of the queue.
+func (e *Engine) QueueBottom(id string) error {
+	e.mu.Lock()
+	maxPos := e.maxQueuePosition()
+	e.mu.Unlock()
+	return e.setQueuePosition(id, maxPos)
+}
+
+func (e *Engine) setQueuePosition(id string, newPos int) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	s, ok := e.sessions[id]
 	if !ok {
 		return fmt.Errorf("engine: torrent %s not found", id)
 	}
 
+	oldPos := s.Record().QueuePosition
+	if oldPos == newPos {
+		return nil
+	}
+
+	// Shift other torrents
+	for _, other := range e.sessions {
+		if other == s {
+			continue
+		}
+		or := other.Record()
+		if oldPos < newPos {
+			// Moving down: shift items between (oldPos, newPos] up by 1
+			if or.QueuePosition > oldPos && or.QueuePosition <= newPos {
+				other.mu.Lock()
+				other.record.QueuePosition--
+				other.mu.Unlock()
+			}
+		} else {
+			// Moving up: shift items between [newPos, oldPos) down by 1
+			if or.QueuePosition >= newPos && or.QueuePosition < oldPos {
+				other.mu.Lock()
+				other.record.QueuePosition++
+				other.mu.Unlock()
+			}
+		}
+	}
+
 	s.mu.Lock()
-	s.record.Priority = priority
+	s.record.QueuePosition = newPos
 	s.mu.Unlock()
 
 	e.saveState()
 	e.startQueued()
 	return nil
+}
+
+func (e *Engine) swapQueuePositions(posA, posB int) error {
+	var sa, sb *Session
+	for _, s := range e.sessions {
+		r := s.Record()
+		if r.QueuePosition == posA {
+			sa = s
+		}
+		if r.QueuePosition == posB {
+			sb = s
+		}
+	}
+	if sa != nil {
+		sa.mu.Lock()
+		sa.record.QueuePosition = posB
+		sa.mu.Unlock()
+	}
+	if sb != nil {
+		sb.mu.Lock()
+		sb.record.QueuePosition = posA
+		sb.mu.Unlock()
+	}
+	e.saveState()
+	e.startQueued()
+	return nil
+}
+
+func (e *Engine) nextQueuePosition() int {
+	return e.maxQueuePosition() + 1
+}
+
+func (e *Engine) maxQueuePosition() int {
+	maxPos := -1
+	for _, s := range e.sessions {
+		r := s.Record()
+		if r.QueuePosition > maxPos {
+			maxPos = r.QueuePosition
+		}
+	}
+	return maxPos
 }
 
 // SetMaxActive changes the max concurrent downloads and adjusts the queue.
@@ -349,17 +464,17 @@ func (e *Engine) sessionToInfo(s *Session) *TorrentInfo {
 	r := s.Record()
 	snap := s.Snap()
 	return &TorrentInfo{
-		ID:          r.ID,
-		Name:        r.Name,
-		Source:      r.Source,
-		State:       r.State,
-		Priority:    r.Priority,
-		Progress:    snap,
-		SavePath:    r.SavePath,
-		TotalBytes:  r.TotalBytes,
-		AddedAt:     r.AddedAt,
-		CompletedAt: r.CompletedAt,
-		Error:       r.Error,
+		ID:            r.ID,
+		Name:          r.Name,
+		Source:        r.Source,
+		State:         r.State,
+		QueuePosition: r.QueuePosition,
+		Progress:      snap,
+		SavePath:      r.SavePath,
+		TotalBytes:    r.TotalBytes,
+		AddedAt:       r.AddedAt,
+		CompletedAt:   r.CompletedAt,
+		Error:         r.Error,
 	}
 }
 
@@ -367,7 +482,7 @@ func (e *Engine) activeCount() int {
 	count := 0
 	for _, s := range e.sessions {
 		r := s.Record()
-		if r.State == StateDownloading || r.State == StateMetadata || r.State == StateAdding {
+		if r.State == StateDownloading || r.State == StateMetadata {
 			count++
 		}
 	}
@@ -379,7 +494,7 @@ func (e *Engine) onSessionDone(id string) {
 	e.startQueued()
 }
 
-// startQueued starts queued torrents in priority order if under MaxActive.
+// startQueued starts queued torrents in queue position order if under MaxActive.
 func (e *Engine) startQueued() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -389,7 +504,7 @@ func (e *Engine) startQueued() {
 		return
 	}
 
-	// Collect queued sessions, sort by priority then add time
+	// Collect queued sessions, sort by queue position
 	var queued []*Session
 	for _, s := range e.sessions {
 		r := s.Record()
@@ -398,9 +513,7 @@ func (e *Engine) startQueued() {
 		}
 	}
 
-	// Sort: lower priority value first (high=0 before normal=1 before low=2),
-	// then earlier AddedAt first
-	sortSessions(queued)
+	sortByQueuePosition(queued)
 
 	for _, s := range queued {
 		if active >= e.cfg.MaxActive {
@@ -411,16 +524,12 @@ func (e *Engine) startQueued() {
 	}
 }
 
-func sortSessions(sessions []*Session) {
+func sortByQueuePosition(sessions []*Session) {
 	for i := 1; i < len(sessions); i++ {
 		key := sessions[i]
-		kr := key.Record()
+		kpos := key.Record().QueuePosition
 		j := i - 1
-		for j >= 0 {
-			jr := sessions[j].Record()
-			if jr.Priority < kr.Priority || (jr.Priority == kr.Priority && jr.AddedAt <= kr.AddedAt) {
-				break
-			}
+		for j >= 0 && sessions[j].Record().QueuePosition > kpos {
 			sessions[j+1] = sessions[j]
 			j--
 		}
