@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/skmtkytr/stor/bencode"
@@ -53,8 +54,16 @@ type AnnounceResponse struct {
 	Peers    []Peer
 }
 
-// Announce sends an HTTP announce request and returns the response.
+// Announce sends a tracker announce, auto-detecting HTTP or UDP protocol.
 func Announce(req AnnounceRequest) (*AnnounceResponse, error) {
+	if strings.HasPrefix(req.AnnounceURL, "udp://") {
+		return AnnounceUDP(req)
+	}
+	return AnnounceHTTP(req)
+}
+
+// AnnounceHTTP sends an HTTP announce request and returns the response.
+func AnnounceHTTP(req AnnounceRequest) (*AnnounceResponse, error) {
 	u, err := buildAnnounceURL(req)
 	if err != nil {
 		return nil, err
