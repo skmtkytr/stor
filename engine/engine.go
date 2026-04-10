@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/skmtkytr/stor/download"
+	"github.com/skmtkytr/stor/torrent"
 )
 
 // Config holds engine configuration.
@@ -158,6 +159,15 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 		State:         StateAdding,
 		QueuePosition: e.nextQueuePosition(),
 		AddedAt:       time.Now().Unix(),
+	}
+
+	// Pre-populate name and torrent data for .torrent files
+	if data, readErr := os.ReadFile(source); readErr == nil {
+		if tf, parseErr := torrent.Parse(data); parseErr == nil {
+			record.Name = tf.Info.Name
+			record.TorrentData = data
+			record.TotalBytes = download.TotalSize(tf)
+		}
 	}
 
 	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.ListenPort)
@@ -396,8 +406,9 @@ func (e *Engine) setQueuePosition(id string, newPos int) error {
 	s.record.QueuePosition = newPos
 	s.mu.Unlock()
 
-	e.saveState()
-	e.startQueued()
+	e.saveStateLocked()
+	// startQueued needs lock, but we already hold it — call the inner logic directly
+	e.startQueuedLocked()
 	return nil
 }
 
@@ -422,8 +433,8 @@ func (e *Engine) swapQueuePositions(posA, posB int) error {
 		sb.record.QueuePosition = posA
 		sb.mu.Unlock()
 	}
-	e.saveState()
-	e.startQueued()
+	e.saveStateLocked()
+	e.startQueuedLocked()
 	return nil
 }
 
@@ -498,7 +509,11 @@ func (e *Engine) onSessionDone(id string) {
 func (e *Engine) startQueued() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.startQueuedLocked()
+}
 
+// startQueuedLocked is startQueued without acquiring the lock. Caller must hold e.mu.Lock().
+func (e *Engine) startQueuedLocked() {
 	active := e.activeCount()
 	if active >= e.cfg.MaxActive {
 		return
@@ -539,10 +554,15 @@ func sortByQueuePosition(sessions []*Session) {
 
 func (e *Engine) saveState() {
 	e.mu.RLock()
+	e.saveStateLocked()
+	e.mu.RUnlock()
+}
+
+// saveStateLocked persists state. Caller must hold at least e.mu.RLock.
+func (e *Engine) saveStateLocked() {
 	for _, s := range e.sessions {
 		r := s.Record()
 		e.store.Put(r)
 	}
-	e.mu.RUnlock()
 	_ = e.store.Save()
 }

@@ -1,9 +1,12 @@
 package download
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/binary"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -225,6 +228,121 @@ func TestDownloadFull(t *testing.T) {
 			t.Errorf("data mismatch at byte %d", i)
 			break
 		}
+	}
+}
+
+func TestDownloadToFileCtx(t *testing.T) {
+	infoHash := [20]byte{0xEE}
+	peerID := [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'}
+
+	piece0 := make([]byte, 256)
+	piece1 := make([]byte, 128)
+	for i := range piece0 {
+		piece0[i] = byte(i)
+	}
+	for i := range piece1 {
+		piece1[i] = byte(i + 50)
+	}
+	hash0 := sha1.Sum(piece0)
+	hash1 := sha1.Sum(piece1)
+
+	pieces := map[int][]byte{0: piece0, 1: piece1}
+	ln := fakePeer(t, infoHash, pieces)
+	defer func() { _ = ln.Close() }()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	peers := []tracker.Peer{{IP: net.IPv4(127, 0, 0, 1), Port: uint16(addr.Port)}}
+
+	tf := &torrent.TorrentFile{
+		InfoHash: infoHash,
+		Info: torrent.Info{
+			Name:        "ctx-test",
+			PieceLength: 256,
+			PieceHashes: [][20]byte{hash0, hash1},
+			Length:      int64(len(piece0) + len(piece1)),
+		},
+	}
+
+	outPath := filepath.Join(t.TempDir(), "ctx-test")
+	progress := NewProgress(2, int64(len(piece0)+len(piece1)))
+
+	ctx := context.Background()
+	err := DownloadToFileCtx(ctx, tf, peerID, peers, outPath, progress)
+	if err != nil {
+		t.Fatalf("DownloadToFileCtx: %v", err)
+	}
+
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+
+	expected := slices.Concat(piece0, piece1)
+	if len(data) != len(expected) {
+		t.Fatalf("data length: got %d, want %d", len(data), len(expected))
+	}
+
+	snap := progress.Snap()
+	if snap.DonePieces != 2 {
+		t.Errorf("snap done_pieces: got %d", snap.DonePieces)
+	}
+}
+
+func TestDownloadToFileCtxCancel(t *testing.T) {
+	infoHash := [20]byte{0xFF}
+	peerID := [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'}
+
+	hash := sha1.Sum([]byte("x"))
+	tf := &torrent.TorrentFile{
+		InfoHash: infoHash,
+		Info: torrent.Info{
+			Name:        "cancel-test",
+			PieceLength: 256,
+			PieceHashes: [][20]byte{hash},
+			Length:      256,
+		},
+	}
+
+	outPath := filepath.Join(t.TempDir(), "cancel-test")
+	progress := NewProgress(1, 256)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := DownloadToFileCtx(ctx, tf, peerID, []tracker.Peer{{IP: net.IPv4(127, 0, 0, 1), Port: 1}}, outPath, progress)
+	if err == nil {
+		t.Error("expected error from cancelled context")
+	}
+}
+
+func TestProgressSnap(t *testing.T) {
+	p := NewProgress(10, 1000)
+	p.Add(100)
+	p.Add(200)
+	p.PeerConnect()
+	p.PeerConnect()
+
+	snap := p.Snap()
+	if snap.DonePieces != 2 {
+		t.Errorf("done_pieces: got %d", snap.DonePieces)
+	}
+	if snap.Downloaded != 300 {
+		t.Errorf("downloaded: got %d", snap.Downloaded)
+	}
+	if snap.ActivePeers != 2 {
+		t.Errorf("active_peers: got %d", snap.ActivePeers)
+	}
+}
+
+func TestDeduplicatePeers(t *testing.T) {
+	peers := []tracker.Peer{
+		{IP: net.IPv4(1, 2, 3, 4), Port: 6881},
+		{IP: net.IPv4(5, 6, 7, 8), Port: 6881},
+		{IP: net.IPv4(1, 2, 3, 4), Port: 6881},
+	}
+	result := deduplicatePeers(peers)
+	if len(result) != 2 {
+		t.Errorf("dedup: got %d, want 2", len(result))
 	}
 }
 
