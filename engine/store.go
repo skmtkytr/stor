@@ -42,6 +42,7 @@ type Store struct {
 	path    string
 	mu      sync.RWMutex
 	records map[string]*TorrentRecord
+	saveMu  sync.Mutex // serializes disk writes
 }
 
 // NewStore creates a new store. Call Load() to read from disk.
@@ -78,6 +79,7 @@ func (s *Store) Load() error {
 }
 
 // Save writes the store to disk atomically.
+// Concurrent calls are serialized to prevent file corruption.
 func (s *Store) Save() error {
 	s.mu.RLock()
 	records := make([]*TorrentRecord, 0, len(s.records))
@@ -91,19 +93,35 @@ func (s *Store) Save() error {
 		return fmt.Errorf("store: marshal failed: %w", err)
 	}
 
+	// Serialize disk writes to prevent race conditions
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	// Ensure parent directory exists
-	if dir := filepath.Dir(s.path); dir != "" {
+	dir := filepath.Dir(s.path)
+	if dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("store: mkdir failed: %w", err)
 		}
 	}
 
-	// Atomic write: write to temp file then rename
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("store: write failed: %w", err)
+	// Atomic write: create temp file in same directory then rename
+	tmp, err := os.CreateTemp(dir, "state-*.tmp")
+	if err != nil {
+		return fmt.Errorf("store: create tmp failed: %w", err)
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("store: write tmp failed: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("store: close tmp failed: %w", err)
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		_ = os.Remove(tmpName)
 		return fmt.Errorf("store: rename failed: %w", err)
 	}
 	return nil
