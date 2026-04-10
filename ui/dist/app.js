@@ -83,18 +83,55 @@ $("#add-input").addEventListener("keydown", (e) => {
 });
 
 $("#add-file").addEventListener("change", async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  const buf = await file.arrayBuffer();
-  const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-  try {
-    await rpc("torrent.addFile", { data: b64 });
-    toast("Torrent uploaded");
-    refresh();
-  } catch (err) {
-    toast("Upload failed: " + err.message, true);
-  }
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+  let ok = 0, fail = 0;
+  await Promise.all(files.map(async (file) => {
+    try {
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      // btoa in chunks to avoid call stack overflow on large files
+      let b64 = "";
+      for (let i = 0; i < bytes.length; i += 8192) {
+        b64 += String.fromCharCode(...bytes.subarray(i, i + 8192));
+      }
+      await rpc("torrent.addFile", { data: btoa(b64) });
+      ok++;
+    } catch {
+      fail++;
+    }
+  }));
+  const msg = `${ok} added` + (fail ? `, ${fail} failed` : "");
+  toast(msg, fail > 0);
+  refresh();
   e.target.value = "";
+});
+
+// --- Drag & Drop ---
+
+document.addEventListener("dragover", (e) => { e.preventDefault(); });
+document.addEventListener("drop", async (e) => {
+  e.preventDefault();
+  const files = Array.from(e.dataTransfer.files).filter((f) => f.name.endsWith(".torrent"));
+  if (!files.length) return;
+  let ok = 0, fail = 0;
+  await Promise.all(files.map(async (file) => {
+    try {
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let b64 = "";
+      for (let i = 0; i < bytes.length; i += 8192) {
+        b64 += String.fromCharCode(...bytes.subarray(i, i + 8192));
+      }
+      await rpc("torrent.addFile", { data: btoa(b64) });
+      ok++;
+    } catch {
+      fail++;
+    }
+  }));
+  const msg = `${ok} added` + (fail ? `, ${fail} failed` : "");
+  toast(msg, fail > 0);
+  refresh();
 });
 
 // --- Torrent list ---
