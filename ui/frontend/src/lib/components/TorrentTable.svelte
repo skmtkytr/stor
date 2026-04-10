@@ -28,6 +28,7 @@
 	const filterFn: Record<string, (t: TorrentInfo) => boolean> = {
 		all: () => true,
 		downloading: (t) => t.state === "downloading" || t.state === "metadata" || t.state === "adding",
+		seeding: (t) => t.state === "seeding",
 		complete: (t) => t.state === "complete",
 		paused: (t) => t.state === "paused",
 		error: (t) => t.state === "error",
@@ -37,7 +38,7 @@
 
 	// --- Sorting (dynamic: re-sort every poll) ---
 	const stateOrder: Record<string, number> = {
-		downloading: 0, metadata: 1, adding: 2, paused: 3, error: 4, complete: 5,
+		downloading: 0, metadata: 1, adding: 2, seeding: 3, paused: 4, error: 5, complete: 6,
 	};
 
 	function getSortValue(t: TorrentInfo, key: string): number | string {

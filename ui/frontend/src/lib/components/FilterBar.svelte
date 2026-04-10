@@ -14,6 +14,7 @@
 	const filters: Filter[] = [
 		{ id: "all", label: "All", match: () => true },
 		{ id: "downloading", label: "Downloading", match: (t) => t.state === "downloading" || t.state === "metadata" || t.state === "adding" },
+		{ id: "seeding", label: "Seeding", match: (t) => t.state === "seeding" },
 		{ id: "complete", label: "Complete", match: (t) => t.state === "complete" },
 		{ id: "paused", label: "Paused", match: (t) => t.state === "paused" },
 		{ id: "error", label: "Error", match: (t) => t.state === "error" },

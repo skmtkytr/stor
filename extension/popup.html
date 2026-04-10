@@ -53,6 +53,7 @@
     .bar { height: 4px; background: #27272a; border-radius: 2px; margin-top: 4px; overflow: hidden; }
     .bar .fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
     .bar .fill.downloading { background: #3b82f6; }
+    .bar .fill.seeding { background: #10b981; }
     .bar .fill.complete { background: #22c55e; }
     .bar .fill.paused { background: #71717a; }
     .bar .fill.error { background: #ef4444; }
@@ -73,6 +74,7 @@
   <div class="stats">
     <div class="stat" id="stat-total"><span class="n">-</span>Total</div>
     <div class="stat" id="stat-dl"><span class="n">-</span>DL</div>
+    <div class="stat" id="stat-seed"><span class="n">-</span>Seed</div>
     <div class="stat" id="stat-done"><span class="n">-</span>Done</div>
     <div class="stat" id="stat-paused"><span class="n">-</span>Paused</div>
     <div class="stat" id="stat-error"><span class="n">-</span>Error</div>
@@ -101,6 +103,7 @@
     <select id="filter-select">
       <option value="all">All</option>
       <option value="downloading">Downloading</option>
+      <option value="seeding">Seeding</option>
       <option value="complete">Complete</option>
       <option value="paused">Paused</option>
       <option value="error">Error</option>

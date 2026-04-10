@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { torrents } from "$lib/stores/torrents.svelte";
 	import { formatBytes, formatSpeed } from "$lib/format";
+
+	const seedingCount = $derived(torrents.list.filter((t) => t.state === "seeding").length);
 </script>
 
 <footer class="flex items-center justify-between border-t border-zinc-800 bg-zinc-900 px-3 py-1 text-xs text-zinc-500">
@@ -10,6 +12,11 @@
 			<span>
 				<span class="text-zinc-400">{s.active_torrents}</span>/{s.max_active} active
 			</span>
+			{#if seedingCount > 0}
+				<span>
+					<span class="text-emerald-400">{seedingCount}</span> seeding
+				</span>
+			{/if}
 			<span>
 				<span class="text-zinc-400">{s.total_torrents}</span> total
 			</span>

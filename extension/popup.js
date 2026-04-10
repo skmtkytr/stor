@@ -89,6 +89,7 @@ function sortTorrents(list, key, desc) {
 const filterMap = {
   all: () => true,
   downloading: (t) => t.state === "downloading" || t.state === "metadata" || t.state === "adding",
+  seeding: (t) => t.state === "seeding",
   complete: (t) => t.state === "complete",
   paused: (t) => t.state === "paused",
   error: (t) => t.state === "error",
@@ -117,15 +118,17 @@ async function doRemove(id, name) {
 // --- Render ---
 
 function renderStats(torrents) {
-  const counts = { total: torrents.length, dl: 0, done: 0, paused: 0, error: 0 };
+  const counts = { total: torrents.length, dl: 0, seed: 0, done: 0, paused: 0, error: 0 };
   for (const t of torrents) {
     if (t.state === "downloading" || t.state === "metadata" || t.state === "adding") counts.dl++;
+    else if (t.state === "seeding") counts.seed++;
     else if (t.state === "complete") counts.done++;
     else if (t.state === "paused") counts.paused++;
     else if (t.state === "error") counts.error++;
   }
   $("#stat-total .n").textContent = counts.total;
   $("#stat-dl .n").textContent = counts.dl;
+  $("#stat-seed .n").textContent = counts.seed;
   $("#stat-done .n").textContent = counts.done;
   $("#stat-paused .n").textContent = counts.paused;
   $("#stat-error .n").textContent = counts.error;
@@ -133,7 +136,7 @@ function renderStats(torrents) {
   // Highlight active stat
   document.querySelectorAll(".stat").forEach((el) => el.classList.remove("active"));
   const filter = $("#filter-select").value;
-  const statMap = { all: "stat-total", downloading: "stat-dl", complete: "stat-done", paused: "stat-paused", error: "stat-error" };
+  const statMap = { all: "stat-total", downloading: "stat-dl", seeding: "stat-seed", complete: "stat-done", paused: "stat-paused", error: "stat-error" };
   if (statMap[filter]) document.getElementById(statMap[filter])?.classList.add("active");
 }
 
