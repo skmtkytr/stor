@@ -184,15 +184,96 @@ func TestDaemonCORS(t *testing.T) {
 func TestDaemonUIServed(t *testing.T) {
 	d, _ := newTestDaemon(t)
 
+	tests := []struct {
+		path        string
+		wantStatus  int
+		wantType    string
+		wantContain string
+	}{
+		{"/", 200, "text/html", "<title>stor</title>"},
+		{"/index.html", 301, "", ""}, // FileServer redirects /index.html to /
+		{"/style.css", 200, "text/css", ".screen"},
+		{"/app.js", 200, "text/javascript", "async function rpc"},
+		{"/nonexistent", 404, "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, http.NoBody)
+			w := httptest.NewRecorder()
+			d.server.Handler.ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status: got %d, want %d", w.Code, tt.wantStatus)
+			}
+			if tt.wantType != "" && !strings.Contains(w.Header().Get("Content-Type"), tt.wantType) {
+				t.Errorf("content-type: got %q, want to contain %q", w.Header().Get("Content-Type"), tt.wantType)
+			}
+			if tt.wantContain != "" && !strings.Contains(w.Body.String(), tt.wantContain) {
+				t.Errorf("body should contain %q", tt.wantContain)
+			}
+		})
+	}
+}
+
+func TestDaemonUIAssetsConsistency(t *testing.T) {
+	d, _ := newTestDaemon(t)
+
+	// index.html should reference style.css and app.js
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	d.server.Handler.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("UI: got %d, want 200", w.Code)
+	body := w.Body.String()
+	for _, ref := range []string{"style.css", "app.js", "auth-screen", "app-screen", "ctx-menu", "torrent-list"} {
+		if !strings.Contains(body, ref) {
+			t.Errorf("index.html should reference %q", ref)
+		}
 	}
-	if !strings.Contains(w.Body.String(), "<title>stor</title>") {
-		t.Error("UI should contain stor title")
+
+	// app.js should have all required RPC methods
+	req = httptest.NewRequest(http.MethodGet, "/app.js", http.NoBody)
+	w = httptest.NewRecorder()
+	d.server.Handler.ServeHTTP(w, req)
+
+	js := w.Body.String()
+	for _, fn := range []string{
+		"daemon.version", "daemon.stats", "daemon.setMaxActive",
+		"torrent.list", "torrent.add", "torrent.addFile",
+		"torrent.pause", "torrent.resume", "torrent.remove",
+		"torrent.queueTop", "torrent.queueBottom",
+	} {
+		if !strings.Contains(js, fn) {
+			t.Errorf("app.js should reference RPC method %q", fn)
+		}
+	}
+
+	// style.css should have key class definitions
+	req = httptest.NewRequest(http.MethodGet, "/style.css", http.NoBody)
+	w = httptest.NewRecorder()
+	d.server.Handler.ServeHTTP(w, req)
+
+	css := w.Body.String()
+	for _, cls := range []string{".screen", ".auth-box", ".progress-bar", ".state-downloading", ".ctx-menu", ".toast"} {
+		if !strings.Contains(css, cls) {
+			t.Errorf("style.css should define %q", cls)
+		}
+	}
+}
+
+func TestDaemonUINoAuthRequired(t *testing.T) {
+	d, _ := newTestDaemon(t)
+
+	// Static files should NOT require auth
+	for _, path := range []string{"/", "/style.css", "/app.js"} {
+		req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+		// No Authorization header
+		w := httptest.NewRecorder()
+		d.server.Handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("%s without auth: got %d, want 200", path, w.Code)
+		}
 	}
 }
 
