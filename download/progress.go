@@ -1,0 +1,68 @@
+package download
+
+import (
+	"fmt"
+	"sync/atomic"
+	"time"
+)
+
+// Progress tracks download progress and speed.
+type Progress struct {
+	totalPieces int
+	totalBytes  int64
+	completed   atomic.Int32
+	downloaded  atomic.Int64
+	startTime   time.Time
+}
+
+// NewProgress creates a new progress tracker.
+func NewProgress(totalPieces int, totalBytes int64) *Progress {
+	return &Progress{
+		totalPieces: totalPieces,
+		totalBytes:  totalBytes,
+		startTime:   time.Now(),
+	}
+}
+
+// Add records a completed piece.
+func (p *Progress) Add(bytes int) {
+	p.completed.Add(1)
+	p.downloaded.Add(int64(bytes))
+}
+
+// String returns the current progress line.
+func (p *Progress) String() string {
+	completed := int(p.completed.Load())
+	downloaded := p.downloaded.Load()
+	elapsed := time.Since(p.startTime).Seconds()
+
+	pct := float64(0)
+	if p.totalBytes > 0 {
+		pct = float64(downloaded) / float64(p.totalBytes) * 100
+	}
+
+	speed := float64(0)
+	if elapsed > 0 {
+		speed = float64(downloaded) / elapsed
+	}
+
+	return fmt.Sprintf("\r[%5.1f%%] %d/%d pieces | %s / %s | %s/s",
+		pct,
+		completed, p.totalPieces,
+		formatBytes(downloaded), formatBytes(p.totalBytes),
+		formatBytes(int64(speed)),
+	)
+}
+
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.2f GB", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.0f KB", float64(b)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}

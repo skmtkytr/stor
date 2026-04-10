@@ -298,13 +298,15 @@ func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([
 	}()
 
 	// Collect results
+	progress := NewProgress(numPieces, totalLength)
 	results := make([][]byte, numPieces)
 	for completed := 0; completed < numPieces; {
 		select {
 		case res := <-resultCh:
 			results[res.Index] = res.Data
+			progress.Add(len(res.Data))
 			completed++
-			fmt.Printf("\rpiece %d/%d downloaded", completed, numPieces)
+			fmt.Print(progress)
 		case <-time.After(2 * time.Minute):
 			return nil, fmt.Errorf("download: timed out at %d/%d pieces", completed, numPieces)
 		}
@@ -401,6 +403,7 @@ func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Pe
 		close(workCh)
 	}()
 
+	progress := NewProgress(numPieces, totalLength)
 	pieceLength := int(tf.Info.PieceLength)
 	for completed := 0; completed < numPieces; {
 		select {
@@ -409,8 +412,9 @@ func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Pe
 			if _, err := f.WriteAt(res.data, offset); err != nil {
 				return fmt.Errorf("download: write piece %d failed: %w", res.index, err)
 			}
+			progress.Add(len(res.data))
 			completed++
-			fmt.Printf("\rpiece %d/%d downloaded", completed, numPieces)
+			fmt.Print(progress)
 		case <-time.After(2 * time.Minute):
 			return fmt.Errorf("download: timed out at %d/%d pieces", completed, numPieces)
 		}
