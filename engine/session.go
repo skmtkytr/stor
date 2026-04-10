@@ -249,7 +249,10 @@ func (s *Session) run(ctx context.Context) error {
 		return err
 	}
 
-	// Close peer injection channel (download is done, no more need for new download peers)
+	// Stop download-phase announcer before closing peerCh to avoid send-on-closed-channel panic
+	announceCancel()
+
+	// Close peer injection channel (download is done)
 	s.mu.Lock()
 	if s.peerCh != nil {
 		close(s.peerCh)
@@ -262,8 +265,21 @@ func (s *Session) run(ctx context.Context) error {
 
 	slog.Info("download complete, seeding", "id", s.record.ID, "name", s.tf.Info.Name, "save_path", savePath)
 
-	// Announce completed to trackers
-	announcer.AnnounceCompleted(ctx)
+	// Create a new announcer for seeding (no peerSink needed)
+	seedAnnouncer := NewAnnouncer(AnnounceConfig{
+		TF:      s.tf,
+		PeerID:  s.peerID,
+		Port:    s.port,
+		NumWant: 0,
+		DHT:     s.dht,
+		Downloaded: func() int64 {
+			return tl
+		},
+		Left: func() int64 {
+			return 0
+		},
+	})
+	seedAnnouncer.AnnounceCompleted(ctx)
 
 	// Build full bitfield
 	fullBF := make(peer.Bitfield, (numPieces+7)/8)
@@ -282,6 +298,11 @@ func (s *Session) run(ctx context.Context) error {
 		s.listener.Register(s.tf.InfoHash, s)
 		defer s.listener.Unregister(s.tf.InfoHash)
 	}
+
+	// Run seed announcer in background for periodic re-announce during seeding
+	seedAnnounceCtx, seedAnnounceCancel := context.WithCancel(ctx)
+	go seedAnnouncer.Run(seedAnnounceCtx)
+	defer seedAnnounceCancel()
 
 	// Run uploader (choking algorithm) until context is cancelled
 	slog.Info("seeding started", "id", s.record.ID, "name", s.tf.Info.Name)
