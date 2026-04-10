@@ -611,6 +611,7 @@ func (e *Engine) downloadConfig() download.DownloadConfig {
 		MaxPeers:    e.cfg.MaxPeers,
 		MaxPipeline: e.cfg.MaxPipeline,
 		DialTimeout: e.cfg.DialTimeout,
+		Encryption:  true, // always try MSE/PE in production
 	}
 }
 

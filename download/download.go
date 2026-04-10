@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/skmtkytr/stor/mse"
 	"github.com/skmtkytr/stor/peer"
 	"github.com/skmtkytr/stor/torrent"
 	"github.com/skmtkytr/stor/tracker"
@@ -27,9 +28,10 @@ const (
 
 // DownloadConfig holds tunable parameters for the download engine.
 type DownloadConfig struct {
-	MaxPeers    int // max concurrent peer connections
-	MaxPipeline int // outstanding requests per peer
-	DialTimeout int // peer dial timeout in seconds
+	MaxPeers    int  // max concurrent peer connections
+	MaxPipeline int  // outstanding requests per peer
+	DialTimeout int  // peer dial timeout in seconds
+	Encryption  bool // attempt MSE/PE encryption (default: true)
 }
 
 // DefaultDownloadConfig returns default download config.
@@ -38,6 +40,7 @@ func DefaultDownloadConfig() DownloadConfig {
 		MaxPeers:    DefaultMaxPeers,
 		MaxPipeline: DefaultMaxPipeline,
 		DialTimeout: DefaultDialTimeout,
+		Encryption:  false, // enable explicitly via config
 	}
 }
 
@@ -149,12 +152,37 @@ func NewClient(p tracker.Peer, infoHash, peerID [20]byte) (*Client, error) {
 
 // NewClientWithTimeout connects to a peer with a configurable dial timeout.
 func NewClientWithTimeout(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int) (*Client, error) {
-	conn, err := net.DialTimeout("tcp", p.String(), time.Duration(dialTimeoutSec)*time.Second)
+	return newClient(p, infoHash, peerID, dialTimeoutSec, false)
+}
+
+// NewClientEncrypted connects with MSE/PE encryption, falling back to plaintext on failure.
+func NewClientEncrypted(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int) (*Client, error) {
+	c, err := newClient(p, infoHash, peerID, dialTimeoutSec, true)
+	if err != nil {
+		// Fall back to plaintext
+		return newClient(p, infoHash, peerID, dialTimeoutSec, false)
+	}
+	return c, nil
+}
+
+func newClient(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, encrypt bool) (*Client, error) {
+	rawConn, err := net.DialTimeout("tcp", p.String(), time.Duration(dialTimeoutSec)*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("download: connect to %s failed: %w", p, err)
 	}
 
-	closeOnErr := func() { _ = conn.Close() }
+	conn := net.Conn(rawConn)
+	closeOnErr := func() { _ = rawConn.Close() }
+
+	// MSE/PE encryption handshake
+	if encrypt {
+		encConn, _, mseErr := mse.HandshakeOutgoing(rawConn, infoHash, mse.CryptoRC4)
+		if mseErr != nil {
+			closeOnErr()
+			return nil, fmt.Errorf("download: MSE handshake to %s failed: %w", p, mseErr)
+		}
+		conn = encConn
+	}
 
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
@@ -664,7 +692,13 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				defer func() { <-sem }()
 			}
 
-			client, err := NewClientWithTimeout(p, infoHash, peerID, cfg.DialTimeout)
+			var client *Client
+			var err error
+			if cfg.Encryption {
+				client, err = NewClientEncrypted(p, infoHash, peerID, cfg.DialTimeout)
+			} else {
+				client, err = NewClientWithTimeout(p, infoHash, peerID, cfg.DialTimeout)
+			}
 			if err != nil {
 				return
 			}
@@ -778,9 +812,9 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		if feederDone != nil {
 			<-feederDone
 		}
-		<-retryDone
 		activeWorkers.Wait()
 		close(resultCh)
+		// retryDone will stop on its own via ctx cancellation or pq.Remaining()==0
 	}()
 
 	return resultCh
