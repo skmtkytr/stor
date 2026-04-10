@@ -1,11 +1,15 @@
 BIN := stor
 CMD := ./cmd/stor
+UI  := ui/frontend
 
-.PHONY: all build test lint vet fmt check clean daemon
+.PHONY: all build test lint vet fmt check clean daemon ui
 
 all: check build
 
-build:
+ui:
+	cd $(UI) && bun install && bun run build
+
+build: ui
 	go build -o $(BIN) $(CMD)
 
 test:
@@ -29,4 +33,5 @@ daemon: build
 
 clean:
 	rm -f $(BIN)
+	rm -rf $(UI)/node_modules $(UI)/.svelte-kit ui/dist
 	go clean -testcache
