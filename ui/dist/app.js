@@ -369,44 +369,47 @@ const COL_WIDTHS_KEY = "stor_col_widths";
 
 (function initColumnResize() {
   const table = $("#torrent-table");
-  const cols = [...table.querySelectorAll("colgroup col")];
   const ths = [...table.querySelectorAll("thead th")];
 
-  // Restore saved widths, with sanity checks
-  const saved = (() => {
-    try {
-      const v = JSON.parse(localStorage.getItem(COL_WIDTHS_KEY));
-      if (Array.isArray(v) && v.length === cols.length && v.every((w) => w >= 40 && w <= 2000)) return v;
-    } catch { /* ignore */ }
-    return null;
-  })();
-
-  if (saved) {
-    saved.forEach((w, i) => { if (cols[i]) cols[i].style.width = w + "px"; });
+  function applyWidths(widths) {
+    ths.forEach((th, i) => {
+      if (widths[i]) th.style.width = widths[i] + "px";
+    });
   }
-  // If no saved widths, the inline styles on <col> in HTML provide defaults
 
   function saveWidths() {
     const widths = ths.map((th) => th.offsetWidth);
     localStorage.setItem(COL_WIDTHS_KEY, JSON.stringify(widths));
   }
 
-  ths.forEach((th, i) => {
+  // Restore saved widths
+  try {
+    const saved = JSON.parse(localStorage.getItem(COL_WIDTHS_KEY));
+    if (Array.isArray(saved) && saved.length === ths.length && saved.every((w) => w >= 30 && w <= 3000)) {
+      applyWidths(saved);
+    }
+  } catch { /* ignore */ }
+
+  ths.forEach((th) => {
     const handle = document.createElement("div");
     handle.className = "col-resize";
     th.appendChild(handle);
 
-    // Drag to resize
     handle.addEventListener("mousedown", (e) => {
       e.preventDefault();
       e.stopPropagation();
+
+      // Lock all columns to current px widths to prevent reflow
+      const snapshot = ths.map((h) => h.offsetWidth);
+      applyWidths(snapshot);
+      table.style.tableLayout = "fixed";
+
       const startX = e.pageX;
       const startW = th.offsetWidth;
       handle.classList.add("active");
 
       const onMove = (ev) => {
-        const w = Math.max(40, startW + ev.pageX - startX);
-        cols[i].style.width = w + "px";
+        th.style.width = Math.max(30, startW + ev.pageX - startX) + "px";
       };
       const onUp = () => {
         handle.classList.remove("active");
@@ -414,25 +417,20 @@ const COL_WIDTHS_KEY = "stor_col_widths";
         document.removeEventListener("mouseup", onUp);
         document.body.style.cursor = "";
         saveWidths();
+        // Switch back to auto so Name can stretch
+        table.style.tableLayout = "";
       };
       document.body.style.cursor = "col-resize";
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
     });
 
-    // Double-click to auto-fit
+    // Double-click to reset column
     handle.addEventListener("dblclick", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      // Temporarily remove fixed layout to measure content
-      table.style.tableLayout = "auto";
-      cols[i].style.width = "";
-      requestAnimationFrame(() => {
-        const autoW = th.offsetWidth;
-        table.style.tableLayout = "fixed";
-        cols[i].style.width = Math.max(40, autoW) + "px";
-        saveWidths();
-      });
+      th.style.width = "";
+      saveWidths();
     });
   });
 })();

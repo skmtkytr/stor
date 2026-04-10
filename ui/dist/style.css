@@ -104,7 +104,6 @@ header h1 { font-size: 1.25rem; color: #58a6ff; }
 #torrent-table {
   width: 100%;
   border-collapse: collapse;
-  table-layout: fixed;
 }
 #torrent-table th, #torrent-table td {
   padding: 0.5rem 0.75rem;
@@ -123,7 +122,7 @@ header h1 { font-size: 1.25rem; color: #58a6ff; }
 #torrent-table td {
   font-size: 0.8rem;
 }
-/* Column resize — default widths are set as inline styles on <col> in HTML */
+/* Column resize */
 #torrent-table th { position: relative; }
 .col-resize {
   position: absolute;
