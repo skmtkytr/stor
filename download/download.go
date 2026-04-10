@@ -217,16 +217,6 @@ func newClient(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, en
 		speedStart:  time.Now(),
 	}
 
-	msg, err := peer.ReadMessage(c.r)
-	_ = conn.SetDeadline(time.Time{})
-	if err != nil {
-		closeOnErr()
-		return nil, fmt.Errorf("download: read bitfield failed: %w", err)
-	}
-	if msg != nil && msg.ID == peer.MsgBitfield {
-		c.bitfield = peer.Bitfield(msg.Payload)
-	}
-
 	// BEP 10: send extension handshake if peer supports extensions
 	if resp.Extensions {
 		const localPexID uint8 = 2
@@ -239,11 +229,36 @@ func newClient(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, en
 		if err := extMsg.Write(c.w); err == nil {
 			_ = c.w.Flush()
 		}
-		// We'll read the peer's ext handshake response during message loop
-		// and set pexRemoteID then
 	}
 
-	return c, nil
+	// Read initial messages: bitfield and/or ext handshake response.
+	// Some peers send ext handshake before bitfield, so read up to 3 messages.
+	// Use a short deadline to avoid blocking if peer has nothing more to send.
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	for range 3 {
+		msg, readErr := peer.ReadMessage(c.r)
+		if readErr != nil {
+			break
+		}
+		if msg == nil {
+			continue // keep-alive
+		}
+		switch msg.ID {
+		case peer.MsgBitfield:
+			c.bitfield = peer.Bitfield(msg.Payload)
+		case peer.MsgExtended:
+			c.handleExtended(msg.Payload)
+		case peer.MsgUnchoke:
+			c.choked = false
+		default:
+			// Got a non-initial message, stop reading initial messages
+			goto doneInit
+		}
+	}
+doneInit:
+	_ = conn.SetDeadline(time.Time{})
+
+	return c, nil //nolint:nilerr // initial message read errors are not fatal
 }
 
 // handleExtended processes BEP 10 extended messages (handshake response, PEX).
@@ -647,8 +662,8 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 			return ctx.Err()
 		case res, ok := <-resultCh:
 			if !ok {
-				if completed < numPieces {
-					return fmt.Errorf("download: workers finished at %d/%d pieces", completed, numPieces)
+				if completed < remaining {
+					return fmt.Errorf("download: workers finished at %d/%d pieces", completed+alreadyDone, numPieces)
 				}
 				return nil
 			}
