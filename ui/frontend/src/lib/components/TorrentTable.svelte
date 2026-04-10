@@ -18,7 +18,7 @@
 
 	let selected = $state(new Set<string>());
 	let lastIdx = $state<number | null>(null);
-	let sortKey = $state<string>("queue_position");
+	let sortKey = $state<string>("queue");
 	let sortDesc = $state(false);
 	let container: HTMLDivElement;
 	let initialized = $state(false);

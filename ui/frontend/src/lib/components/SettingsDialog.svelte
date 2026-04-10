@@ -21,8 +21,6 @@
 	} = $props();
 
 	let maxActive = $state(5);
-	let dragIdx = $state<number | null>(null);
-
 	$effect(() => {
 		if (stats) maxActive = stats.max_active;
 	});
@@ -37,36 +35,25 @@
 	}
 
 	function toggleCol(idx: number) {
-		// Don't allow hiding Name
 		if (columns[idx].id === "name") return;
 		columns[idx] = { ...columns[idx], visible: !columns[idx].visible };
 		onColumnsChange();
 	}
 
-	function moveCol(from: number, to: number) {
-		if (from === to) return;
-		const item = columns[from];
+	function moveUp(idx: number) {
+		if (idx <= 0) return;
 		const next = [...columns];
-		next.splice(from, 1);
-		next.splice(to, 0, item);
+		[next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
 		columns = next;
 		onColumnsChange();
 	}
 
-	function handleDragStart(idx: number) {
-		dragIdx = idx;
-	}
-
-	function handleDragOver(e: DragEvent, idx: number) {
-		e.preventDefault();
-		if (dragIdx !== null && dragIdx !== idx) {
-			moveCol(dragIdx, idx);
-			dragIdx = idx;
-		}
-	}
-
-	function handleDragEnd() {
-		dragIdx = null;
+	function moveDown(idx: number) {
+		if (idx >= columns.length - 1) return;
+		const next = [...columns];
+		[next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+		columns = next;
+		onColumnsChange();
 	}
 
 	function resetColumns() {
@@ -105,18 +92,24 @@
 				<p class="text-xs text-muted-foreground">Drag to reorder. Toggle visibility.</p>
 				<div class="space-y-1">
 					{#each columns as col, idx}
-						<!-- svelte-ignore a11y_no_static_element_interactions -->
 						<div
-							class="flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm {dragIdx === idx ? 'opacity-50' : ''} {col.visible ? '' : 'opacity-40'}"
-							draggable="true"
-							ondragstart={() => handleDragStart(idx)}
-							ondragover={(e) => handleDragOver(e, idx)}
-							ondragend={handleDragEnd}
+							class="flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm {col.visible ? '' : 'opacity-40'}"
 						>
-							<span class="cursor-grab text-muted-foreground">⠿</span>
+							<div class="flex flex-col gap-0.5">
+								<button
+									class="text-[10px] leading-none text-muted-foreground hover:text-foreground disabled:opacity-20"
+									onclick={() => moveUp(idx)}
+									disabled={idx === 0}
+								>▲</button>
+								<button
+									class="text-[10px] leading-none text-muted-foreground hover:text-foreground disabled:opacity-20"
+									onclick={() => moveDown(idx)}
+									disabled={idx === columns.length - 1}
+								>▼</button>
+							</div>
 							<span class="flex-1">{col.label}</span>
 							<button
-								class="text-xs {col.visible ? 'text-foreground' : 'text-muted-foreground'}"
+								class="text-xs {col.visible ? 'text-foreground' : 'text-muted-foreground'} disabled:opacity-30"
 								onclick={() => toggleCol(idx)}
 								disabled={col.id === "name"}
 							>
