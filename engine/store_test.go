@@ -1,0 +1,149 @@
+package engine
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestStoreRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	s := NewStore(path)
+
+	s.Put(&TorrentRecord{
+		ID:         "abc123",
+		Name:       "test-file.txt",
+		Source:     "magnet:?xt=urn:btih:abc123",
+		State:      StateDownloading,
+		TotalBytes: 1024,
+		AddedAt:    1700000000,
+	})
+	s.Put(&TorrentRecord{
+		ID:    "def456",
+		Name:  "other.zip",
+		State: StateComplete,
+	})
+
+	if s.Len() != 2 {
+		t.Fatalf("len: got %d, want 2", s.Len())
+	}
+
+	// Save
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Load into new store
+	s2 := NewStore(path)
+	if err := s2.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	if s2.Len() != 2 {
+		t.Fatalf("loaded len: got %d, want 2", s2.Len())
+	}
+
+	r, ok := s2.Get("abc123")
+	if !ok {
+		t.Fatal("abc123 not found")
+	}
+	if r.Name != "test-file.txt" {
+		t.Errorf("name: got %q", r.Name)
+	}
+	if r.State != StateDownloading {
+		t.Errorf("state: got %q", r.State)
+	}
+	if r.TotalBytes != 1024 {
+		t.Errorf("total_bytes: got %d", r.TotalBytes)
+	}
+}
+
+func TestStoreDelete(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(filepath.Join(dir, "state.json"))
+
+	s.Put(&TorrentRecord{ID: "a", Name: "a"})
+	s.Put(&TorrentRecord{ID: "b", Name: "b"})
+	s.Delete("a")
+
+	if s.Len() != 1 {
+		t.Fatalf("len after delete: got %d, want 1", s.Len())
+	}
+	if _, ok := s.Get("a"); ok {
+		t.Error("a should be deleted")
+	}
+}
+
+func TestStoreLoadNonExistent(t *testing.T) {
+	s := NewStore("/nonexistent/path/state.json")
+	if err := s.Load(); err != nil {
+		t.Fatalf("load nonexistent should not error: %v", err)
+	}
+	if s.Len() != 0 {
+		t.Error("should be empty")
+	}
+}
+
+func TestStoreAtomicWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	s := NewStore(path)
+
+	s.Put(&TorrentRecord{ID: "x", Name: "x"})
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Temp file should not exist
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Error("temp file should be cleaned up after rename")
+	}
+
+	// Main file should exist
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("state file should exist: %v", err)
+	}
+}
+
+func TestStoreAll(t *testing.T) {
+	s := NewStore("")
+	s.Put(&TorrentRecord{ID: "1"})
+	s.Put(&TorrentRecord{ID: "2"})
+	s.Put(&TorrentRecord{ID: "3"})
+
+	all := s.All()
+	if len(all) != 3 {
+		t.Errorf("all: got %d, want 3", len(all))
+	}
+}
+
+func TestStoreBitfieldPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	s := NewStore(path)
+
+	bf := []byte{0b10101010, 0b01010101}
+	s.Put(&TorrentRecord{
+		ID:       "bf-test",
+		Bitfield: bf,
+	})
+
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	s2 := NewStore(path)
+	if err := s2.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	r, ok := s2.Get("bf-test")
+	if !ok {
+		t.Fatal("not found")
+	}
+	if len(r.Bitfield) != 2 || r.Bitfield[0] != 0b10101010 || r.Bitfield[1] != 0b01010101 {
+		t.Errorf("bitfield: got %v", r.Bitfield)
+	}
+}
