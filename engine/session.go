@@ -45,8 +45,9 @@ type Session struct {
 	port        uint16
 	dlCfg       download.DownloadConfig
 	numWant     int
-	dht         *dhtpkg.DHT    // shared DHT instance from engine (may be nil)
-	cachedPeers []tracker.Peer // peers collected during metadata phase (avoids double query)
+	dht         *dhtpkg.DHT         // shared DHT instance from engine (may be nil)
+	cachedPeers []tracker.Peer      // peers collected during metadata phase (avoids double query)
+	peerCh      chan []tracker.Peer // dynamic peer injection channel (active during download)
 }
 
 // NewSession creates a session from a persisted record.
@@ -179,6 +180,23 @@ func (s *Session) run(ctx context.Context) error {
 	s.mu.Unlock()
 
 	savePath := filepath.Join(s.downloadDir, s.tf.Info.Name)
+
+	// Create peer channel for dynamic injection (used by re-announce in the future)
+	peerCh := make(chan []tracker.Peer, 16)
+	s.mu.Lock()
+	s.peerCh = peerCh
+	s.mu.Unlock()
+
+	// Close peerCh when download finishes (no more peers will be injected)
+	defer func() {
+		s.mu.Lock()
+		if s.peerCh != nil {
+			close(s.peerCh)
+			s.peerCh = nil
+		}
+		s.mu.Unlock()
+	}()
+
 	slog.Info("download starting",
 		"id", s.record.ID,
 		"name", s.tf.Info.Name,
@@ -187,7 +205,15 @@ func (s *Session) run(ctx context.Context) error {
 		"peers", len(peers),
 		"save_path", savePath,
 	)
-	if err := download.DownloadToFileCtxWithConfig(ctx, s.tf, s.peerID, peers, savePath, progress, s.dlCfg); err != nil {
+	if err := download.DownloadWithParams(ctx, download.DownloadParams{
+		TF:       s.tf,
+		PeerID:   s.peerID,
+		Peers:    peers,
+		PeerCh:   peerCh,
+		Path:     savePath,
+		Progress: progress,
+		Cfg:      s.dlCfg,
+	}); err != nil {
 		return err
 	}
 

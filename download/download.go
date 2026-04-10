@@ -458,19 +458,39 @@ func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Pe
 	return nil
 }
 
+// DownloadParams consolidates parameters for a download session.
+type DownloadParams struct {
+	TF       *torrent.TorrentFile
+	PeerID   [20]byte
+	Peers    []tracker.Peer        // initial peers
+	PeerCh   <-chan []tracker.Peer // dynamic peer injection (nil = disabled)
+	Path     string
+	Progress *Progress
+	Cfg      DownloadConfig
+}
+
 // DownloadToFileCtx is like DownloadToFile but accepts a context for cancellation.
-// Progress is provided externally so the caller can read snapshots.
 func DownloadToFileCtx(ctx context.Context, tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer, path string, progress *Progress) error {
-	return DownloadToFileCtxWithConfig(ctx, tf, peerID, peers, path, progress, DefaultDownloadConfig())
+	return DownloadWithParams(ctx, DownloadParams{
+		TF: tf, PeerID: peerID, Peers: peers, Path: path, Progress: progress, Cfg: DefaultDownloadConfig(),
+	})
 }
 
 // DownloadToFileCtxWithConfig is like DownloadToFileCtx but with tunable parameters.
 func DownloadToFileCtxWithConfig(ctx context.Context, tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer, path string, progress *Progress, cfg DownloadConfig) error {
-	tl := TotalSize(tf)
-	numPieces := len(tf.Info.PieceHashes)
-	peers = deduplicatePeers(peers)
+	return DownloadWithParams(ctx, DownloadParams{
+		TF: tf, PeerID: peerID, Peers: peers, Path: path, Progress: progress, Cfg: cfg,
+	})
+}
 
-	f, err := os.Create(path)
+// DownloadWithParams runs a download session with full control over parameters.
+// Supports dynamic peer injection via PeerCh.
+func DownloadWithParams(ctx context.Context, p DownloadParams) error {
+	tl := TotalSize(p.TF)
+	numPieces := len(p.TF.Info.PieceHashes)
+	peers := deduplicatePeers(p.Peers)
+
+	f, err := os.Create(p.Path)
 	if err != nil {
 		return err
 	}
@@ -480,10 +500,10 @@ func DownloadToFileCtxWithConfig(ctx context.Context, tf *torrent.TorrentFile, p
 		return fmt.Errorf("download: truncate failed: %w", err)
 	}
 
-	workCh := buildWorkQueue(tf, tl)
-	resultCh := startWorkersCtxWithConfig(ctx, peers, tf.InfoHash, peerID, workCh, progress, cfg)
+	workCh := buildWorkQueue(p.TF, tl)
+	resultCh := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, workCh, p.PeerCh, p.Progress, p.Cfg)
 
-	pieceLength := int(tf.Info.PieceLength)
+	pieceLength := int(p.TF.Info.PieceLength)
 	for completed := 0; completed < numPieces; {
 		select {
 		case <-ctx.Done():
@@ -499,7 +519,7 @@ func DownloadToFileCtxWithConfig(ctx context.Context, tf *torrent.TorrentFile, p
 			if _, err := f.WriteAt(res.Data, offset); err != nil {
 				return fmt.Errorf("download: write piece %d failed: %w", res.Index, err)
 			}
-			progress.Add(len(res.Data))
+			p.Progress.Add(len(res.Data))
 			completed++
 		}
 	}
@@ -507,21 +527,30 @@ func DownloadToFileCtxWithConfig(ctx context.Context, tf *torrent.TorrentFile, p
 	return nil
 }
 
-// startWorkersCtxWithConfig launches peer workers with tunable parameters.
+// runWorkers launches peer workers with dynamic peer injection support.
+// Initial peers are connected immediately. New peers from peerCh are connected as they arrive.
 // Includes a PeerManager that runs the BEP 3 §5 choking algorithm.
-func startWorkersCtxWithConfig(ctx context.Context, peers []tracker.Peer, infoHash, peerID [20]byte, workCh chan PieceWork, progress *Progress, cfg DownloadConfig) <-chan PieceResult {
+func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peerID [20]byte, workCh chan PieceWork, peerCh <-chan []tracker.Peer, progress *Progress, cfg DownloadConfig) <-chan PieceResult {
 	resultCh := make(chan PieceResult, cap(workCh))
 
 	pm := NewPeerManager(DefaultUnchokeSlots)
 	go pm.Run(ctx)
 
-	var wg sync.WaitGroup
 	sem := make(chan struct{}, cfg.MaxPeers)
+	seen := &sync.Map{} // tracks connected peer addresses
 
-	for _, p := range peers {
-		wg.Add(1)
-		go func(p tracker.Peer) {
-			defer wg.Done()
+	var activeWorkers sync.WaitGroup
+
+	// spawnWorker connects to a single peer and runs the download loop.
+	spawnWorker := func(p tracker.Peer) {
+		addr := p.String()
+		if _, loaded := seen.LoadOrStore(addr, true); loaded {
+			return // already connected or attempted
+		}
+
+		activeWorkers.Add(1)
+		go func() {
+			defer activeWorkers.Done()
 
 			select {
 			case <-ctx.Done():
@@ -569,11 +598,42 @@ func startWorkersCtxWithConfig(ctx context.Context, peers []tracker.Peer, infoHa
 					}
 				}
 			}
-		}(p)
+		}()
 	}
 
+	// Spawn initial peers
+	for _, p := range initialPeers {
+		spawnWorker(p)
+	}
+
+	// Peer feeder: spawn workers for dynamically discovered peers
+	var feederDone chan struct{}
+	if peerCh != nil {
+		feederDone = make(chan struct{})
+		go func() {
+			defer close(feederDone)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case batch, ok := <-peerCh:
+					if !ok {
+						return
+					}
+					for _, p := range batch {
+						spawnWorker(p)
+					}
+				}
+			}
+		}()
+	}
+
+	// Closer: wait for all workers + feeder to finish, then close channels
 	go func() {
-		wg.Wait()
+		if feederDone != nil {
+			<-feederDone
+		}
+		activeWorkers.Wait()
 		close(workCh)
 		close(resultCh)
 	}()

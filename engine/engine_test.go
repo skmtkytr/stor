@@ -63,7 +63,10 @@ func newTestEngine(t *testing.T) *Engine {
 	if err := eng.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _ = eng.Stop() })
+	t.Cleanup(func() {
+		_ = eng.Stop()
+		_ = os.RemoveAll(cfg.DownloadDir)
+	})
 	return eng
 }
 
