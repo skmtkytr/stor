@@ -94,11 +94,11 @@ type Client struct {
 	maxPipeline    int
 	Addr           string // peer address for identification
 
-	// Speed tracking
-	downloaded int64     // bytes downloaded from this peer
-	uploaded   int64     // bytes uploaded to this peer
-	speedStart time.Time // start of current measurement window
-	lastSpeed  float64   // bytes/sec from last measurement
+	// Speed tracking (atomic: accessed from both worker and PeerManager goroutines)
+	downloaded atomic.Int64
+	uploaded   atomic.Int64
+	speedStart time.Time
+	lastSpeed  atomic.Int64 // bytes/sec * 1000 (fixed-point)
 
 	// PEX (BEP 11)
 	pexRemoteID uint8                 // remote's ut_pex message ID (0 = not supported)
@@ -117,16 +117,17 @@ type Client struct {
 func (c *Client) Speed() float64 {
 	elapsed := time.Since(c.speedStart).Seconds()
 	if elapsed < 1 {
-		return c.lastSpeed
+		return float64(c.lastSpeed.Load())
 	}
-	c.lastSpeed = float64(c.downloaded) / elapsed
-	return c.lastSpeed
+	speed := int64(float64(c.downloaded.Load()) / elapsed)
+	c.lastSpeed.Store(speed)
+	return float64(speed)
 }
 
 // ResetSpeed resets the speed measurement window.
 func (c *Client) ResetSpeed() {
-	c.lastSpeed = c.Speed()
-	c.downloaded = 0
+	c.Speed() // update lastSpeed
+	c.downloaded.Store(0)
 	c.speedStart = time.Now()
 }
 
@@ -136,7 +137,7 @@ func (c *Client) UploadSpeed() float64 {
 	if elapsed < 1 {
 		return 0
 	}
-	return float64(c.uploaded) / elapsed
+	return float64(c.uploaded.Load()) / elapsed
 }
 
 // SendChoke sends a choke message to the peer.
@@ -441,7 +442,7 @@ func (c *Client) handleRequest(payload []byte) {
 	msg := peer.NewPieceMessage(index, begin, block)
 	_ = msg.Write(c.w)
 	_ = c.w.Flush()
-	c.uploaded += int64(len(block))
+	c.uploaded.Add(int64(len(block)))
 }
 
 // DownloadPiece downloads a single piece from the peer.
@@ -523,7 +524,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 			}
 			copy(buf[begin:], block)
 			downloaded += len(block)
-			c.downloaded += int64(len(block))
+			c.downloaded.Add(int64(len(block)))
 			backlog--
 		case peer.MsgChoke:
 			c.choked = true
@@ -981,8 +982,11 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		}()
 	}
 
-	// BEP 19: webseed workers
+	// BEP 19: webseed workers (only http/https URLs)
 	for _, wsURL := range webSeedURLs {
+		if !validWebSeedURL(wsURL) {
+			continue
+		}
 		activeWorkers.Add(1)
 		go func(baseURL string) {
 			defer activeWorkers.Done()

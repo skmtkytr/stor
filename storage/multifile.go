@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/skmtkytr/stor/torrent"
@@ -37,9 +38,15 @@ func NewMultiFileWriter(baseDir string, tf *torrent.TorrentFile) (*MultiFileWrit
 	var entries []fileEntry
 	var offset int64
 
+	cleanBase := filepath.Clean(baseDir) + string(os.PathSeparator)
 	for _, f := range tf.Info.Files {
 		relPath := filepath.Join(f.Path...)
-		fullPath := filepath.Join(baseDir, relPath)
+		fullPath := filepath.Clean(filepath.Join(baseDir, relPath))
+
+		// Prevent path traversal
+		if !strings.HasPrefix(fullPath, cleanBase) {
+			return nil, fmt.Errorf("multifile: path traversal in %q", relPath)
+		}
 
 		// Create parent directories
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {

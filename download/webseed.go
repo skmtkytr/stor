@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -14,6 +15,15 @@ import (
 )
 
 var httpClient = &http.Client{Timeout: 60 * time.Second}
+
+// validWebSeedURL checks that a webseed URL uses http or https scheme.
+func validWebSeedURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "http" || u.Scheme == "https"
+}
 
 // downloadPieceHTTP downloads a single piece from a webseed URL using HTTP Range.
 func downloadPieceHTTP(ctx context.Context, baseURL string, tf *torrent.TorrentFile, pw PieceWork) ([]byte, error) {

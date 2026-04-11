@@ -213,7 +213,7 @@ func (u *Uploader) serveLoop(c *Client) {
 				return
 			}
 
-			c.uploaded += int64(length)
+			c.uploaded.Add(int64(length))
 
 		case peer.MsgCancel:
 			// Ignore cancel for now (we send immediately)

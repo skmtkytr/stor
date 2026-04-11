@@ -151,12 +151,13 @@ func (pq *PieceQueue) Complete(index int) {
 	pq.mu.Unlock()
 
 	if eg {
-		// Non-blocking broadcast — workers check this between blocks
 		select {
 		case pq.cancelCh <- index:
 		default:
 		}
 	}
+	// Wake blocked workers so they can exit if no work remains
+	pq.signal()
 }
 
 // CancelCh returns a channel that receives piece indices completed by other workers.
