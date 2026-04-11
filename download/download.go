@@ -80,6 +80,9 @@ type Client struct {
 	// PEX (BEP 11)
 	pexRemoteID uint8                 // remote's ut_pex message ID (0 = not supported)
 	PeerSink    chan<- []tracker.Peer // discovered peers from PEX are sent here
+
+	// Upload while downloading: callback to serve incoming requests
+	OnRequest func(index, begin, length uint32) []byte
 }
 
 // Speed returns the current download speed in bytes/sec.
@@ -346,9 +349,30 @@ func (c *Client) waitForUnchoke() error {
 			}
 		case peer.MsgExtended:
 			c.handleExtended(msg.Payload)
+		case peer.MsgRequest:
+			c.handleRequest(msg.Payload)
 		}
 	}
 	return nil
+}
+
+// handleRequest serves an incoming piece request from a peer (upload while downloading).
+func (c *Client) handleRequest(payload []byte) {
+	if c.OnRequest == nil {
+		return
+	}
+	index, begin, length, err := peer.ParseRequest(payload)
+	if err != nil || length > 32*1024 {
+		return
+	}
+	block := c.OnRequest(index, begin, length)
+	if block == nil {
+		return
+	}
+	msg := peer.NewPieceMessage(index, begin, block)
+	_ = msg.Write(c.w)
+	_ = c.w.Flush()
+	c.uploaded += int64(len(block))
 }
 
 // DownloadPiece downloads a single piece from the peer.
@@ -579,16 +603,17 @@ func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Pe
 
 // DownloadParams consolidates parameters for a download session.
 type DownloadParams struct {
-	TF       *torrent.TorrentFile
-	PeerID   [20]byte
-	Peers    []tracker.Peer        // initial peers
-	PeerCh   <-chan []tracker.Peer // dynamic peer injection (nil = disabled)
-	PeerSink chan<- []tracker.Peer // for PEX: discovered peers are sent here (nil = disabled)
-	Path     string
-	Progress *Progress
-	Cfg      DownloadConfig
-	Have     peer.Bitfield   // pieces already downloaded (for resume)
-	OnPiece  func(index int) // called when a piece is downloaded (for upload during download)
+	TF        *torrent.TorrentFile
+	PeerID    [20]byte
+	Peers     []tracker.Peer        // initial peers
+	PeerCh    <-chan []tracker.Peer // dynamic peer injection (nil = disabled)
+	PeerSink  chan<- []tracker.Peer // for PEX: discovered peers are sent here (nil = disabled)
+	Path      string
+	Progress  *Progress
+	Cfg       DownloadConfig
+	Have      peer.Bitfield                            // pieces already downloaded (for resume)
+	OnPiece   func(index int)                          // called when a piece is downloaded (for upload during download)
+	OnRequest func(index, begin, length uint32) []byte // serve incoming piece requests
 }
 
 // DownloadToFileCtx is like DownloadToFile but accepts a context for cancellation.
@@ -673,7 +698,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 	}
 
 	pq := NewPieceQueue(pieces)
-	resultCh := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.PeerSink, p.Progress, p.Cfg)
+	resultCh := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.PeerSink, p.Progress, p.Cfg, p.OnRequest)
 
 	pieceLength := int(p.TF.Info.PieceLength)
 	for completed := 0; completed < remaining; {
@@ -703,7 +728,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 }
 
 // runWorkers launches peer workers with rarest-first piece selection and dynamic peer injection.
-func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peerID [20]byte, pq *PieceQueue, peerCh <-chan []tracker.Peer, peerSink chan<- []tracker.Peer, progress *Progress, cfg DownloadConfig) <-chan PieceResult {
+func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peerID [20]byte, pq *PieceQueue, peerCh <-chan []tracker.Peer, peerSink chan<- []tracker.Peer, progress *Progress, cfg DownloadConfig, onRequest func(uint32, uint32, uint32) []byte) <-chan PieceResult {
 	resultCh := make(chan PieceResult, 64)
 
 	pm := NewPeerManager(DefaultUnchokeSlots)
@@ -746,6 +771,9 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			client.maxPipeline = cfg.MaxPipeline
 			if peerSink != nil {
 				client.PeerSink = peerSink
+			}
+			if onRequest != nil {
+				client.OnRequest = onRequest
 			}
 			defer func() { _ = client.Close() }()
 

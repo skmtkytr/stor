@@ -9,10 +9,13 @@ import (
 	"github.com/skmtkytr/stor/torrent"
 )
 
-// readAtReader abstracts single-file and multi-file read targets.
-type readAtReader interface {
+// ReadAtReader abstracts single-file and multi-file read targets.
+type ReadAtReader interface {
 	ReadAt([]byte, int64) (int, error)
 }
+
+// For internal use
+type readAtReader = ReadAtReader
 
 // VerifyPieces reads existing file data, hashes each piece, and returns
 // a Bitfield of verified pieces along with the count of valid pieces.

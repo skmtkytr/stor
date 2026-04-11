@@ -305,6 +305,20 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	slog.Info("download starting", "id", s.record.ID, "name", s.tf.Info.Name,
 		"total_bytes", tl, "pieces", numPieces, "peers", len(peers), "save_path", savePath)
 
+	// Create file reader for upload-while-downloading
+	var fileReader download.ReadAtReader
+	if download.IsMultiFile(s.tf) {
+		mw, _ := download.NewMultiFileWriter(savePath, s.tf)
+		fileReader = mw
+	} else {
+		f, ferr := os.Open(savePath)
+		if ferr == nil {
+			defer func() { _ = f.Close() }()
+			fileReader = f
+		}
+	}
+
+	pieceLen := int64(s.tf.Info.PieceLength)
 	dlErr := download.DownloadWithParams(ctx, download.DownloadParams{
 		TF:       s.tf,
 		PeerID:   s.peerID,
@@ -316,6 +330,18 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		Cfg:      s.dlCfg,
 		Have:     haveBitfield,
 		OnPiece:  func(index int) { up.SetPiece(index) },
+		OnRequest: func(index, begin, length uint32) []byte {
+			if fileReader == nil || !uploadBF.HasPiece(int(index)) {
+				return nil // don't have this piece yet
+			}
+			block := make([]byte, length)
+			offset := int64(index)*pieceLen + int64(begin)
+			n, err := fileReader.ReadAt(block, offset)
+			if err != nil || n != int(length) {
+				return nil
+			}
+			return block
+		},
 	})
 	if dlErr != nil {
 		cleanup()
