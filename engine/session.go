@@ -355,7 +355,10 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		Cfg:         dlCfg,
 		Have:        haveBitfield,
 		WebSeedURLs: s.tf.WebSeedURLs,
-		OnPiece:     func(index int) { up.SetPiece(index) },
+		OnPiece: func(index int) {
+			uploadBF.SetPiece(index) // update local bitfield for OnRequest
+			up.SetPiece(index)       // update Uploader bitfield + notify connected peers
+		},
 		OnRequest: func(index, begin, length uint32) []byte {
 			if fileReader == nil || !uploadBF.HasPiece(int(index)) {
 				return nil // don't have this piece yet

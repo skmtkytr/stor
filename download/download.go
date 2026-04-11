@@ -824,6 +824,13 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 	piecePool := newPiecePool(pq.maxPieceLen())
 
 	sem := make(chan struct{}, cfg.MaxPeers)
+	// Limit concurrent dial attempts to avoid NAT session exhaustion.
+	// sem limits established connections; dialSem limits in-flight dials.
+	maxDials := cfg.MaxPeers / 4
+	if maxDials < 10 {
+		maxDials = 10
+	}
+	dialSem := make(chan struct{}, maxDials)
 	seen := &sync.Map{}
 	var preferEncrypt atomic.Bool
 
@@ -838,14 +845,13 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		activeWorkers.Add(1)
 		go func() {
 			defer activeWorkers.Done()
-			// Allow reconnection after disconnect
 			defer seen.Delete(addr)
 
+			// Limit concurrent dial attempts to avoid NAT session exhaustion
 			select {
 			case <-ctx.Done():
 				return
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
+			case dialSem <- struct{}{}:
 			}
 
 			var client *Client
@@ -855,8 +861,19 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			} else {
 				client, err = newClientFull(p, infoHash, peerID, cfg.DialTimeout, false, cfg.EnableUTP, cfg.DisablePEX)
 			}
+			<-dialSem // release dial slot after connection attempt
+
 			if err != nil {
 				return
+			}
+
+			// Acquire peer slot for established connection
+			select {
+			case <-ctx.Done():
+				_ = client.Close()
+				return
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
 			}
 			client.maxPipeline = cfg.MaxPipeline
 			client.piecePool = piecePool
@@ -927,13 +944,13 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		}()
 	}
 
-	// retryPeers goroutine: re-attempt disconnected peers with exponential backoff
+	// retryPeers goroutine: re-attempt disconnected peers periodically.
+	// Uses a conservative interval to avoid NAT session exhaustion.
 	retryDone := make(chan struct{})
 	go func() {
 		defer close(retryDone)
-		interval := 5 * time.Second
-		const maxInterval = 30 * time.Second
-		timer := time.NewTimer(interval)
+		const retryInterval = 60 * time.Second
+		timer := time.NewTimer(retryInterval)
 		defer timer.Stop()
 		for {
 			select {
@@ -943,16 +960,13 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				if pq.Remaining() == 0 {
 					return
 				}
-				// Re-try initial peers that have disconnected (seen was cleared on exit)
-				for _, p := range initialPeers {
-					spawnWorker(p)
+				// Only retry if we have few active peers
+				if pm.PeerCount() < cfg.MaxPeers/2 {
+					for _, p := range initialPeers {
+						spawnWorker(p)
+					}
 				}
-				// Exponential backoff: 5s → 10s → 20s → 30s (capped)
-				interval = interval * 2
-				if interval > maxInterval {
-					interval = maxInterval
-				}
-				timer.Reset(interval)
+				timer.Reset(retryInterval)
 			}
 		}
 	}()

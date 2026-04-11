@@ -41,11 +41,21 @@ func (u *Uploader) Run(ctx context.Context) {
 	u.pm.Run(ctx)
 }
 
-// SetPiece marks a piece as available for upload (called during download).
+// SetPiece marks a piece as available for upload and notifies all connected
+// peers via MsgHave so they know they can request it.
 func (u *Uploader) SetPiece(index int) {
 	u.mu.Lock()
 	u.bitfield.SetPiece(index)
+	clients := make([]*Client, len(u.clients))
+	copy(clients, u.clients)
 	u.mu.Unlock()
+
+	// Broadcast MsgHave to all connected upload peers
+	haveMsg := peer.NewHaveMessage(uint32(index))
+	for _, c := range clients {
+		_ = haveMsg.Write(c.w)
+		_ = c.w.Flush()
+	}
 }
 
 // HandleIncoming handles an incoming peer connection.
