@@ -77,6 +77,7 @@ type Progress struct {
 	activePeers atomic.Int32
 	startTime   time.Time
 	speed       *emaSpeed
+	upSpeed     *emaSpeed // upload speed from outgoing peer connections
 }
 
 // NewProgress creates a new progress tracker.
@@ -86,14 +87,28 @@ func NewProgress(totalPieces int, totalBytes int64) *Progress {
 		totalBytes:  totalBytes,
 		startTime:   time.Now(),
 		speed:       newEMASpeed(),
+		upSpeed:     newEMASpeed(),
 	}
 }
 
-// Close stops the speed ticker goroutine.
+// Close stops the speed ticker goroutines.
 func (p *Progress) Close() {
 	if p.speed != nil {
 		p.speed.close()
 	}
+	if p.upSpeed != nil {
+		p.upSpeed.close()
+	}
+}
+
+// AddUploadBytes records uploaded bytes for speed tracking.
+func (p *Progress) AddUploadBytes(n int64) {
+	p.upSpeed.add(n)
+}
+
+// UploadRate returns the current upload speed from outgoing peer connections.
+func (p *Progress) UploadRate() int64 {
+	return p.upSpeed.rate()
 }
 
 // SetInitial sets the initial completed pieces count for resume.

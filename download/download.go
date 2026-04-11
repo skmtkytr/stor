@@ -327,6 +327,8 @@ func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int
 			c.handleExtended(msg.Payload)
 		case peer.MsgUnchoke:
 			c.choked = false
+		case peer.MsgInterested:
+			// will be handled after init
 		default:
 			goto doneInit
 		}
@@ -462,6 +464,10 @@ func (c *Client) waitForUnchoke() error {
 			if err == nil {
 				c.bitfield.SetPiece(int(idx))
 			}
+		case peer.MsgInterested:
+			_ = c.SendUnchoke()
+		case peer.MsgNotInterested:
+			// ignored
 		case peer.MsgExtended:
 			c.handleExtended(msg.Payload)
 		case peer.MsgRequest:
@@ -489,7 +495,11 @@ func (c *Client) handleRequest(payload []byte) {
 	_ = msg.Write(c.w)
 	_ = c.w.Flush()
 	c.wmu.Unlock()
-	c.uploaded.Add(int64(len(block)))
+	n := int64(len(block))
+	c.uploaded.Add(n)
+	if c.progress != nil {
+		c.progress.AddUploadBytes(n)
+	}
 }
 
 // DownloadPiece downloads a single piece from the peer.
@@ -589,6 +599,11 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 			if err == nil {
 				c.bitfield.SetPiece(int(idx))
 			}
+		case peer.MsgInterested:
+			// Peer wants our data — immediately unchoke them
+			_ = c.SendUnchoke()
+		case peer.MsgNotInterested:
+			// ignored
 		case peer.MsgRequest:
 			c.handleRequest(msg.Payload)
 		case peer.MsgReject:

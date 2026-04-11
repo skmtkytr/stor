@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/skmtkytr/stor/peer"
 	"github.com/skmtkytr/stor/storage"
@@ -76,14 +77,15 @@ func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {
 	w := bufio.NewWriterSize(conn, 32*1024)
 
 	client := &Client{
-		conn:     conn,
-		r:        r,
-		w:        w,
-		peerID:   u.peerID,
-		infoHash: u.tf.InfoHash,
-		Addr:     conn.RemoteAddr().String(),
-		choking:  true, // start by choking them
-		fastExt:  remoteHS.FastExtension,
+		conn:       conn,
+		r:          r,
+		w:          w,
+		peerID:     u.peerID,
+		infoHash:   u.tf.InfoHash,
+		Addr:       conn.RemoteAddr().String(),
+		choking:    true, // start by choking them
+		fastExt:    remoteHS.FastExtension,
+		speedStart: time.Now(),
 	}
 
 	u.pm.Register(client)

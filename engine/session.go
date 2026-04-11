@@ -94,10 +94,13 @@ func (s *Session) Snap() download.ProgressSnap {
 			snap.DownSpeed = 0
 			snap.UpSpeed = 0
 		}
-		// Add upload stats if uploading
-		if u != nil && state != StatePaused && state != StateComplete && state != StateError {
-			snap.UpSpeed = u.TotalUploadSpeed()
-			snap.ActivePeers += u.PeerCount()
+		// Upload speed: outgoing peers (via Progress) + incoming peers (via Uploader)
+		if state != StatePaused && state != StateComplete && state != StateError {
+			snap.UpSpeed = p.UploadRate() // upload via download peer connections
+			if u != nil {
+				snap.UpSpeed += u.TotalUploadSpeed() // upload via incoming peers
+				snap.ActivePeers += u.PeerCount()
+			}
 		}
 		return snap
 	}
