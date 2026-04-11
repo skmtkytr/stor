@@ -20,6 +20,15 @@ const (
 	MsgCancel        uint8 = 8
 )
 
+// BEP 6: Fast Extension message IDs.
+const (
+	MsgSuggest     uint8 = 13
+	MsgHaveAll     uint8 = 14
+	MsgHaveNone    uint8 = 15
+	MsgReject      uint8 = 16
+	MsgAllowedFast uint8 = 17
+)
+
 // Message represents a peer wire protocol message.
 type Message struct {
 	ID      uint8
@@ -147,6 +156,34 @@ func ParseHave(payload []byte) (uint32, error) {
 		return 0, fmt.Errorf("peer: have payload must be 4 bytes, got %d", len(payload))
 	}
 	return binary.BigEndian.Uint32(payload), nil
+}
+
+// BEP 6: Fast Extension message constructors and parsers.
+
+// NewRejectMessage creates a reject message (same format as request/cancel).
+func NewRejectMessage(index, begin, length uint32) *Message {
+	payload := make([]byte, 12)
+	binary.BigEndian.PutUint32(payload[0:4], index)
+	binary.BigEndian.PutUint32(payload[4:8], begin)
+	binary.BigEndian.PutUint32(payload[8:12], length)
+	return &Message{ID: MsgReject, Payload: payload}
+}
+
+// ParseReject extracts index, begin, length from a reject payload.
+func ParseReject(payload []byte) (index, begin, length uint32, err error) {
+	return ParseRequest(payload) // same format
+}
+
+// NewAllowedFastMessage creates an allowed-fast message.
+func NewAllowedFastMessage(index uint32) *Message {
+	payload := make([]byte, 4)
+	binary.BigEndian.PutUint32(payload, index)
+	return &Message{ID: MsgAllowedFast, Payload: payload}
+}
+
+// ParseAllowedFast extracts the piece index from an allowed-fast payload.
+func ParseAllowedFast(payload []byte) (uint32, error) {
+	return ParseHave(payload) // same format
 }
 
 // Bitfield represents which pieces a peer has.

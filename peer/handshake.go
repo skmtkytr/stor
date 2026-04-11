@@ -15,6 +15,8 @@ type Handshake struct {
 	PeerID   [20]byte
 	// Extensions indicates BEP 10 extension protocol support.
 	Extensions bool
+	// FastExtension indicates BEP 6 fast extension support.
+	FastExtension bool
 }
 
 // WriteHandshake writes the 68-byte handshake to the writer.
@@ -25,6 +27,9 @@ func WriteHandshake(w io.Writer, h *Handshake) error {
 	// reserved bytes [20:28]
 	if h.Extensions {
 		buf[25] |= 0x10 // bit 20 from the right = byte 5, bit 4
+	}
+	if h.FastExtension {
+		buf[27] |= 0x04 // BEP 6: bit 2 of reserved[7]
 	}
 	copy(buf[28:48], h.InfoHash[:])
 	copy(buf[48:68], h.PeerID[:])
@@ -47,7 +52,8 @@ func ReadHandshake(r io.Reader) (*Handshake, error) {
 	}
 
 	h := &Handshake{
-		Extensions: buf[25]&0x10 != 0,
+		Extensions:    buf[25]&0x10 != 0,
+		FastExtension: buf[27]&0x04 != 0,
 	}
 	copy(h.InfoHash[:], buf[28:48])
 	copy(h.PeerID[:], buf[48:68])
