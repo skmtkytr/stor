@@ -8,12 +8,14 @@ import (
 	"sync"
 
 	"github.com/skmtkytr/stor/peer"
+	"github.com/skmtkytr/stor/utp"
 )
 
-// PeerListener accepts incoming TCP connections from peers
-// and routes them to the appropriate session by info hash.
+// PeerListener accepts incoming TCP (and optionally uTP) connections
+// from peers and routes them to the appropriate session by info hash.
 type PeerListener struct {
-	ln       net.Listener
+	tcpLn    net.Listener
+	utpLn    *utp.Listener // nil if uTP disabled
 	mu       sync.RWMutex
 	handlers map[[20]byte]IncomingPeerHandler
 	closed   chan struct{}
@@ -24,22 +26,41 @@ type IncomingPeerHandler interface {
 	HandleIncoming(conn net.Conn, peerHS *peer.Handshake)
 }
 
-// NewPeerListener creates a listener on the given address (e.g. ":6881").
+// NewPeerListener creates a TCP listener on the given address (e.g. ":6881").
 func NewPeerListener(addr string) (*PeerListener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listener: %w", err)
 	}
 	return &PeerListener{
-		ln:       ln,
+		tcpLn:    ln,
 		handlers: make(map[[20]byte]IncomingPeerHandler),
 		closed:   make(chan struct{}),
 	}, nil
 }
 
-// Addr returns the listener's address.
+// NewPeerListenerWithUTP creates TCP and uTP listeners on the given address.
+func NewPeerListenerWithUTP(addr string) (*PeerListener, error) {
+	tcpLn, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listener: tcp: %w", err)
+	}
+	utpLn, err := utp.Listen("udp", addr)
+	if err != nil {
+		_ = tcpLn.Close()
+		return nil, fmt.Errorf("listener: utp: %w", err)
+	}
+	return &PeerListener{
+		tcpLn:    tcpLn,
+		utpLn:    utpLn,
+		handlers: make(map[[20]byte]IncomingPeerHandler),
+		closed:   make(chan struct{}),
+	}, nil
+}
+
+// Addr returns the TCP listener's address.
 func (pl *PeerListener) Addr() net.Addr {
-	return pl.ln.Addr()
+	return pl.tcpLn.Addr()
 }
 
 // Register adds a handler for a specific info hash.
@@ -58,8 +79,15 @@ func (pl *PeerListener) Unregister(infoHash [20]byte) {
 
 // Run accepts connections in a loop. Blocks until Close is called.
 func (pl *PeerListener) Run() {
+	if pl.utpLn != nil {
+		go pl.acceptLoop(pl.utpLn)
+	}
+	pl.acceptLoop(pl.tcpLn)
+}
+
+func (pl *PeerListener) acceptLoop(ln net.Listener) {
 	for {
-		conn, err := pl.ln.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-pl.closed:
@@ -73,10 +101,16 @@ func (pl *PeerListener) Run() {
 	}
 }
 
-// Close shuts down the listener.
+// Close shuts down all listeners.
 func (pl *PeerListener) Close() error {
 	close(pl.closed)
-	return pl.ln.Close()
+	err := pl.tcpLn.Close()
+	if pl.utpLn != nil {
+		if utpErr := pl.utpLn.Close(); utpErr != nil && err == nil {
+			err = utpErr
+		}
+	}
+	return err
 }
 
 func (pl *PeerListener) handleConn(conn net.Conn) {

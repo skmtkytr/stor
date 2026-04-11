@@ -24,6 +24,7 @@ import (
 	"github.com/skmtkytr/stor/engine"
 	"github.com/skmtkytr/stor/magnet"
 	"github.com/skmtkytr/stor/peer"
+	"github.com/skmtkytr/stor/storage"
 	"github.com/skmtkytr/stor/torrent"
 	"github.com/skmtkytr/stor/tracker"
 )
@@ -126,6 +127,7 @@ func runDaemon() {
 		DialTimeout: cfg.DialTimeout,
 		NumWant:     cfg.NumWant,
 		DHTAlpha:    cfg.DHTAlpha,
+		EnableUTP:   cfg.EnableUTP,
 	}
 
 	eng, err := engine.New(engCfg)
@@ -479,7 +481,7 @@ func announceToTrackers(tf *torrent.TorrentFile, peerID [20]byte) ([]tracker.Pee
 		wg.Add(1)
 		go func(tr string) {
 			defer wg.Done()
-			tl := download.TotalSize(tf)
+			tl := storage.TotalSize(tf)
 			req := tracker.AnnounceRequest{
 				AnnounceURL: tr,
 				InfoHash:    tf.InfoHash,
