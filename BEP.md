@@ -89,13 +89,32 @@ ref: https://www.bittorrent.org/beps/bep_0000.html
 - Plaintext / RC4 の自動ネゴシエーション
 - 適応的プロトコル選択（成功したプロトコルを学習）
 
+### Phase 5: 互換性拡張
+
+| BEP | タイトル | 状態 | 対応パッケージ | 実装状況 |
+|-----|---------|------|--------------|---------|
+| [BEP 6](https://www.bittorrent.org/beps/bep_0006.html) | Fast Extension | Accepted | `peer/`, `download/` | ✅ 完了 |
+| [BEP 19](https://www.bittorrent.org/beps/bep_0019.html) | WebSeed (GetRight) | Accepted | `torrent/`, `download/` | ✅ 完了 |
+| [BEP 27](https://www.bittorrent.org/beps/bep_0027.html) | Private Torrents | Accepted | `torrent/`, `engine/`, `download/` | ✅ 完了 |
+
+**BEP 6 (Fast Extension):**
+- have-all/have-none でシーダーの bitfield 送信を省略
+- reject メッセージでチョーク中のリクエストを明示的に拒否
+- reserved[7] bit 2 でネゴシエーション
+
+**BEP 19 (WebSeed):**
+- `.torrent` の `url-list` から HTTP Range リクエストでピース取得
+- 単一ファイル・マルチファイル両対応
+- ピアワーカーと並行して HTTP ワーカーが動作
+
+**BEP 27 (Private Torrents):**
+- info dict の `private: 1` フラグをパース
+- private 時は DHT / PEX を自動無効化、トラッカーのみ使用
+
 ### 将来的に対応を検討
 
 | BEP | タイトル | 状態 | 用途 |
 |-----|---------|------|------|
-| [BEP 6](https://www.bittorrent.org/beps/bep_0006.html) | Fast Extension | Accepted | have-all/have-none/reject/suggest/allowed-fast |
-| [BEP 19](https://www.bittorrent.org/beps/bep_0019.html) | WebSeed (GetRight) | Accepted | HTTP/FTP サーバからピース取得 |
-| [BEP 27](https://www.bittorrent.org/beps/bep_0027.html) | Private Torrents | Accepted | DHT/PEX 無効化フラグ |
 | [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) | BitTorrent v2 | Draft | Merkle tree, SHA-256, per-file piece tree |
 
 ## プロトコル主要フォーマット早見表

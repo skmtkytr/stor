@@ -19,7 +19,10 @@ Go の BitTorrent 実装の多くは anacrolix/torrent 等のラッパー。stor
 | 11 | ピア交換 (PEX) | 実装済 |
 | 15 | UDP トラッカープロトコル | 実装済 |
 | 23 | コンパクトピアリスト | 実装済 |
+| 6 | Fast Extension | 実装済（have-all、have-none、reject） |
 | 12 | マルチトラッカー拡張 | 実装済 |
+| 19 | WebSeed (GetRight) | 実装済（HTTP Range、マルチファイル対応） |
+| 27 | Private Torrents | 実装済（DHT/PEX 自動無効化） |
 | 29 | uTP (Micro Transport Protocol) | 実装済（LEDBAT 輻輳制御） |
 | — | MSE/PE（プロトコル暗号化） | 実装済（DH + RC4、平文フォールバック） |
 

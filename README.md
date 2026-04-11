@@ -19,7 +19,10 @@ Most Go BitTorrent implementations wrap anacrolix/torrent or similar. stor exist
 | 11 | Peer Exchange (PEX) | Implemented |
 | 15 | UDP Tracker Protocol | Implemented |
 | 23 | Tracker Returns Compact Peer Lists | Implemented |
+| 6 | Fast Extension | Implemented (have-all, have-none, reject) |
 | 12 | Multitracker Metadata Extension | Implemented |
+| 19 | WebSeed (GetRight) | Implemented (HTTP Range, multi-file) |
+| 27 | Private Torrents | Implemented (DHT/PEX auto-disable) |
 | 29 | uTP (Micro Transport Protocol) | Implemented (LEDBAT congestion control) |
 | — | MSE/PE (Protocol Encryption) | Implemented (DH + RC4, plaintext fallback) |
 
