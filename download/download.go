@@ -898,11 +898,12 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 			}
 			p.Progress.Add(len(res.Data))
 			res.Free()
-			// Notify all connected peers that we have this piece
-			pm.BroadcastHave(res.Index)
+			// Update bitfield BEFORE notifying peers, so OnRequest
+			// can serve the piece immediately when peers request it.
 			if p.OnPiece != nil {
 				p.OnPiece(res.Index)
 			}
+			pm.BroadcastHave(res.Index)
 			completed++
 		}
 	}

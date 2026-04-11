@@ -172,8 +172,9 @@ func (u *Uploader) serveLoop(c *Client) {
 
 		switch msg.ID {
 		case peer.MsgInterested:
-			// Peer wants data — PeerManager will decide when to unchoke
-			slog.Debug("upload: peer interested", "addr", c.Addr)
+			// Immediately unchoke — don't make them wait for PeerManager rechoke
+			slog.Debug("upload: peer interested, unchoking", "addr", c.Addr)
+			_ = c.SendUnchoke()
 
 		case peer.MsgNotInterested:
 			slog.Debug("upload: peer not interested", "addr", c.Addr)
