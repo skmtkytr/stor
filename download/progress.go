@@ -7,49 +7,65 @@ import (
 	"time"
 )
 
-const speedWindowSize = 5 // number of 1-second buckets
-
-// speedWindow tracks bytes downloaded in a ring buffer of 1-second buckets
-// to compute a sliding-window speed instead of an all-time average.
-type speedWindow struct {
+// emaSpeed implements libtorrent-style speed measurement using an
+// Exponential Moving Average (EMA). Bytes are accumulated in a counter
+// and sampled once per second: avg = avg * 0.8 + sample * 0.2.
+// This produces smooth, responsive speed readings.
+type emaSpeed struct {
 	mu      sync.Mutex
-	buckets [speedWindowSize]int64
-	times   [speedWindowSize]int64 // unix second for each bucket
-	cursor  int
+	counter int64   // bytes accumulated since last tick
+	average float64 // EMA of bytes/sec
+	stop    chan struct{}
 }
 
-func (sw *speedWindow) add(bytes int64) {
-	now := time.Now().Unix()
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
-	if sw.times[sw.cursor] == now {
-		sw.buckets[sw.cursor] += bytes
-	} else {
-		// Advance cursor
-		sw.cursor = (sw.cursor + 1) % speedWindowSize
-		sw.buckets[sw.cursor] = bytes
-		sw.times[sw.cursor] = now
-	}
+func newEMASpeed() *emaSpeed {
+	e := &emaSpeed{stop: make(chan struct{})}
+	go e.run()
+	return e
 }
 
-func (sw *speedWindow) bytesPerSec() int64 {
-	now := time.Now().Unix()
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
-	var total int64
-	var count int64
-	for i := range speedWindowSize {
-		age := now - sw.times[i]
-		if sw.times[i] > 0 && age < int64(speedWindowSize) {
-			total += sw.buckets[i]
-			count++
+func (e *emaSpeed) run() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	last := time.Now()
+	for {
+		select {
+		case <-e.stop:
+			return
+		case now := <-ticker.C:
+			elapsed := now.Sub(last).Milliseconds()
+			if elapsed <= 0 {
+				elapsed = 1000
+			}
+			last = now
+
+			e.mu.Lock()
+			sample := float64(e.counter) * 1000.0 / float64(elapsed)
+			e.average = e.average*0.8 + sample*0.2
+			e.counter = 0
+			e.mu.Unlock()
 		}
 	}
-	if count == 0 {
-		return 0
+}
+
+func (e *emaSpeed) add(bytes int64) {
+	e.mu.Lock()
+	e.counter += bytes
+	e.mu.Unlock()
+}
+
+func (e *emaSpeed) rate() int64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return int64(e.average)
+}
+
+func (e *emaSpeed) close() {
+	select {
+	case <-e.stop:
+	default:
+		close(e.stop)
 	}
-	// Use actual window span for more accurate calculation
-	return total / count
 }
 
 // Progress tracks download progress and speed.
@@ -60,7 +76,7 @@ type Progress struct {
 	downloaded  atomic.Int64
 	activePeers atomic.Int32
 	startTime   time.Time
-	speed       speedWindow
+	speed       *emaSpeed
 }
 
 // NewProgress creates a new progress tracker.
@@ -69,6 +85,14 @@ func NewProgress(totalPieces int, totalBytes int64) *Progress {
 		totalPieces: totalPieces,
 		totalBytes:  totalBytes,
 		startTime:   time.Now(),
+		speed:       newEMASpeed(),
+	}
+}
+
+// Close stops the speed ticker goroutine.
+func (p *Progress) Close() {
+	if p.speed != nil {
+		p.speed.close()
 	}
 }
 
@@ -116,7 +140,7 @@ func (p *Progress) String() string {
 		pct = float64(downloaded) / float64(p.totalBytes) * 100
 	}
 
-	speed := p.speed.bytesPerSec()
+	speed := p.speed.rate()
 
 	return fmt.Sprintf("\r[%5.1f%%] %d/%d pieces | %s / %s | %s/s | %d peers",
 		pct,
@@ -154,7 +178,7 @@ func (p *Progress) Snap() ProgressSnap {
 
 	var speed int64
 	if completed < p.totalPieces {
-		speed = p.speed.bytesPerSec()
+		speed = p.speed.rate()
 	}
 
 	return ProgressSnap{
