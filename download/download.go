@@ -277,7 +277,8 @@ func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int
 		w:           bufio.NewWriterSize(conn, 32*1024),
 		peerID:      peerID,
 		infoHash:    infoHash,
-		choked:      true,
+		choked:      true, // we are choked by peer (default per BT protocol)
+		choking:     true, // we are choking peer (default per BT protocol)
 		maxPipeline: DefaultMaxPipeline,
 		Addr:        p.String(),
 		speedStart:  time.Now(),
@@ -594,6 +595,8 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 		case peer.MsgChoke:
 			c.choked = true
 			return fail(fmt.Errorf("download: peer choked during piece %d", pw.Index))
+		case peer.MsgUnchoke:
+			c.choked = false
 		case peer.MsgHave:
 			idx, err := peer.ParseHave(msg.Payload)
 			if err == nil {

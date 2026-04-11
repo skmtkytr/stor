@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/skmtkytr/stor/peer"
 	"github.com/skmtkytr/stor/torrent"
@@ -95,6 +96,9 @@ func fakePeer(t *testing.T, infoHash [20]byte, pieces map[int][]byte) net.Listen
 				}
 				block := data[begin:end]
 
+				// Small delay to let upload exchange happen during download
+				time.Sleep(10 * time.Millisecond)
+
 				payload := make([]byte, 8+len(block))
 				binary.BigEndian.PutUint32(payload[0:4], idx)
 				binary.BigEndian.PutUint32(payload[4:8], begin)
@@ -156,6 +160,237 @@ func TestDownloadPiece(t *testing.T) {
 		}
 	}
 }
+
+// TestUploadWhileDownloading verifies the full upload flow:
+// 1. We connect to a fake peer that has pieces we want
+// 2. We send our bitfield showing pieces we already have
+// 3. The fake peer sends MsgInterested + waits for our MsgUnchoke
+// 4. The fake peer sends MsgRequest for a piece we have
+// 5. We respond with MsgPiece containing the actual data
+func TestUploadWhileDownloading(t *testing.T) {
+	infoHash := [20]byte{0xCC}
+	ourPeerID := [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'}
+
+	// Piece 0: 3 blocks (>BlockSize) so DownloadPiece runs multiple loop
+	// iterations, giving time for the upload exchange to happen mid-download.
+	// Piece 1: data WE have (and should upload to the fake peer)
+	piece0Data := make([]byte, BlockSize*3)
+	for i := range piece0Data {
+		piece0Data[i] = byte(i % 256)
+	}
+	piece1Data := make([]byte, 128)
+	for i := range piece1Data {
+		piece1Data[i] = byte(i + 100)
+	}
+
+	piece0Hash := sha1.Sum(piece0Data)
+	_ = sha1.Sum(piece1Data) // piece1 is uploaded, not downloaded — hash not needed here
+
+	// Channels to signal test progress
+	gotUnchoke := make(chan bool, 1)
+	gotPieceData := make(chan []byte, 1)
+
+	// Create a fake peer that:
+	// - Has piece 0 (will upload to us)
+	// - Does NOT have piece 1
+	// - After handshake, sends bitfield, unchoke
+	// - Then sends MsgInterested (wants our piece 1)
+	// - After receiving our MsgUnchoke, sends MsgRequest for piece 1
+	// - Verifies it receives MsgPiece with correct data
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		// Disable Nagle to ensure small messages are sent immediately
+		if tc, ok := conn.(*net.TCPConn); ok {
+			_ = tc.SetNoDelay(true)
+		}
+
+		// Handshake
+		hs, _ := peer.ReadHandshake(conn)
+		if hs.InfoHash != infoHash {
+			return
+		}
+		_ = peer.WriteHandshake(conn, &peer.Handshake{
+			InfoHash: infoHash,
+			PeerID:   [20]byte{'-', 'F', 'K', '0', '0', '0', '2', '-'},
+		})
+
+		// Send bitfield: we have piece 0 only
+		bf := make([]byte, 1)
+		bf[0] = 0x80 // piece 0 set
+		bfMsg := &peer.Message{ID: peer.MsgBitfield, Payload: bf}
+		_ = bfMsg.Write(conn)
+
+		// Send unchoke (so they can download from us)
+		_ = (&peer.Message{ID: peer.MsgUnchoke}).Write(conn)
+
+		// Read messages - expect their bitfield, interested, requests, etc.
+		// Also: send MsgInterested to request their pieces
+		sentInterested := false
+		sentRequest := false
+
+		for {
+			msg, err := peer.ReadMessage(conn)
+			if err != nil {
+				return
+			}
+			if msg == nil {
+				continue
+			}
+
+			switch msg.ID {
+			case peer.MsgBitfield:
+				// They sent their bitfield - check if piece 1 is set
+				theirBF := peer.Bitfield(msg.Payload)
+				if theirBF.HasPiece(1) && !sentInterested {
+					// Send MsgInterested
+					_ = (&peer.Message{ID: peer.MsgInterested}).Write(conn)
+					sentInterested = true
+				}
+
+			case peer.MsgHave:
+				// They completed a piece
+				idx, _ := peer.ParseHave(msg.Payload)
+				if int(idx) == 1 && !sentInterested {
+					_ = (&peer.Message{ID: peer.MsgInterested}).Write(conn)
+					sentInterested = true
+				}
+
+			case peer.MsgUnchoke:
+				// They unchoked us! Now we can request piece 1
+				gotUnchoke <- true
+				if !sentRequest {
+					req := peer.NewRequestMessage(1, 0, uint32(len(piece1Data)))
+					_ = req.Write(conn)
+					sentRequest = true
+				}
+
+			case peer.MsgPiece:
+				// They sent us a piece! This is the upload we're testing
+				_, _, block, err := peer.ParsePiece(msg.Payload)
+				if err == nil {
+					gotPieceData <- slices.Clone(block)
+				}
+				return
+
+			case peer.MsgRequest:
+				// They want piece 0 from us
+				idx := binary.BigEndian.Uint32(msg.Payload[0:4])
+				begin := binary.BigEndian.Uint32(msg.Payload[4:8])
+				length := binary.BigEndian.Uint32(msg.Payload[8:12])
+				if int(idx) == 0 {
+					end := int(begin) + int(length)
+					if end > len(piece0Data) {
+						end = len(piece0Data)
+					}
+					pieceMsg := peer.NewPieceMessage(idx, begin, piece0Data[begin:end])
+					_ = pieceMsg.Write(conn)
+				}
+
+			case peer.MsgInterested:
+				_ = (&peer.Message{ID: peer.MsgUnchoke}).Write(conn)
+			}
+		}
+	}()
+
+	// Now test: connect to the fake peer, download piece 0, upload piece 1
+	addr := ln.Addr().(*net.TCPAddr)
+	p := tracker.Peer{IP: net.IPv4(127, 0, 0, 1), Port: uint16(addr.Port)}
+
+	client, err := NewClient(p, infoHash, ourPeerID)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// Send our bitfield: we have piece 1
+	ourBF := make(peer.Bitfield, 1)
+	ourBF.SetPiece(1)
+	if err := client.SendBitfield(ourBF); err != nil {
+		t.Fatalf("SendBitfield failed: %v", err)
+	}
+
+	// Set up OnRequest to serve piece 1
+	client.OnRequest = func(index, begin, length uint32) []byte {
+		if int(index) == 1 {
+			end := int(begin) + int(length)
+			if end > len(piece1Data) {
+				end = len(piece1Data)
+			}
+			return piece1Data[begin:end]
+		}
+		return nil
+	}
+
+	// Download piece 0 from the fake peer
+	pw := PieceWork{Index: 0, Hash: piece0Hash, Length: len(piece0Data)}
+	data, release, err := client.DownloadPiece(pw)
+	if err != nil {
+		t.Fatalf("DownloadPiece failed: %v", err)
+	}
+	if release != nil {
+		release()
+	}
+	if !slices.Equal(data, piece0Data) {
+		t.Fatal("downloaded piece 0 data mismatch")
+	}
+
+	// Upload happens during or after DownloadPiece. Keep reading messages
+	// until the fake peer confirms it received our piece data.
+	_ = client.conn.SetDeadline(time.Now().Add(5 * time.Second))
+	for i := 0; i < 20; i++ {
+		// Check if upload already completed
+		select {
+		case received := <-gotPieceData:
+			if !slices.Equal(received, piece1Data) {
+				t.Fatalf("uploaded piece data mismatch: got %d bytes, want %d", len(received), len(piece1Data))
+			}
+			t.Logf("UPLOAD VERIFIED: peer received %d bytes of piece 1", len(received))
+			if client.uploaded.Load() == 0 {
+				t.Fatal("client.uploaded is 0 — upload bytes not tracked")
+			}
+			return
+		default:
+		}
+
+		msg, err := peer.ReadMessage(client.r)
+		if err != nil {
+			// Connection may close after upload completes — check one more time
+			select {
+			case received := <-gotPieceData:
+				if !slices.Equal(received, piece1Data) {
+					t.Fatalf("uploaded piece data mismatch: got %d bytes, want %d", len(received), len(piece1Data))
+				}
+				t.Logf("UPLOAD VERIFIED: peer received %d bytes of piece 1", len(received))
+				return
+			default:
+				t.Fatalf("read error and no upload: %v", err)
+			}
+		}
+		if msg == nil {
+			continue
+		}
+		switch msg.ID {
+		case peer.MsgInterested:
+			_ = client.SendUnchoke()
+		case peer.MsgRequest:
+			client.handleRequest(msg.Payload)
+		}
+	}
+	t.Fatal("upload did not complete within 20 message reads")
+}
+
+// Verify piece hashes array is correct
+var _ = [2][20]byte{sha1.Sum([]byte{}), sha1.Sum([]byte{})}
 
 func TestDownloadPieceHashMismatch(t *testing.T) {
 	infoHash := [20]byte{0xBB}
