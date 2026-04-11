@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -315,6 +316,13 @@ func (e *Engine) RemoveTorrent(id string, deleteFiles bool) error {
 		if r.SavePath != "" {
 			slog.Info("deleting torrent files", "id", id, "path", r.SavePath)
 			_ = os.RemoveAll(r.SavePath)
+		}
+		// Also clean up tmpDir if configured (in-progress downloads live there)
+		if e.cfg.TmpDir != "" && r.Name != "" {
+			tmpPath := filepath.Join(e.cfg.TmpDir, r.Name)
+			if tmpPath != r.SavePath {
+				_ = os.RemoveAll(tmpPath)
+			}
 		}
 	}
 
