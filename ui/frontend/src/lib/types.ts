@@ -15,11 +15,24 @@ export interface TorrentInfo {
 export type TorrentState =
 	| "adding"
 	| "metadata"
+	| "verifying"
 	| "downloading"
 	| "seeding"
 	| "complete"
 	| "paused"
 	| "error";
+
+export interface EngineConfig {
+	download_dir: string;
+	tmp_dir: string;
+	max_active: number;
+	max_peers: number;
+	max_pipeline: number;
+	dial_timeout: number;
+	numwant: number;
+	log_level: string;
+	enable_utp: boolean;
+}
 
 export interface ProgressSnap {
 	state: string;
@@ -43,4 +56,5 @@ export interface EngineStats {
 	total_peers: number;
 	dht_nodes: number;
 	free_space: number;
+	config: EngineConfig;
 }

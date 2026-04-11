@@ -114,6 +114,8 @@ func (h *RPCHandler) dispatch(method string, params json.RawMessage) (any, *rpcE
 		return h.daemonStats()
 	case "daemon.setMaxActive":
 		return h.daemonSetMaxActive(params)
+	case "daemon.setConfig":
+		return h.daemonSetConfig(params)
 	case "daemon.version":
 		return h.daemonVersion()
 	default:
@@ -287,7 +289,9 @@ func (h *RPCHandler) torrentQueueMove(params json.RawMessage, direction string) 
 }
 
 func (h *RPCHandler) daemonStats() (any, *rpcErr) {
-	return h.engine.GetStats(), nil
+	stats := h.engine.GetStats()
+	stats.Config.LogLevel = h.cfg.LogLevel
+	return stats, nil
 }
 
 func (h *RPCHandler) daemonSetMaxActive(params json.RawMessage) (any, *rpcErr) {
@@ -301,6 +305,64 @@ func (h *RPCHandler) daemonSetMaxActive(params json.RawMessage) (any, *rpcErr) {
 	h.cfg.MaxActive = p.MaxActive
 	_ = h.cfg.Save()
 	return map[string]int{"max_active": p.MaxActive}, nil
+}
+
+func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
+	// Use pointers to distinguish "not set" from zero values
+	var p struct {
+		DownloadDir *string `json:"download_dir"`
+		TmpDir      *string `json:"tmp_dir"`
+		MaxActive   *int    `json:"max_active"`
+		MaxPeers    *int    `json:"max_peers"`
+		MaxPipeline *int    `json:"max_pipeline"`
+		DialTimeout *int    `json:"dial_timeout"`
+		NumWant     *int    `json:"numwant"`
+		LogLevel    *string `json:"log_level"`
+		EnableUTP   *bool   `json:"enable_utp"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, &rpcErr{Code: -32602, Message: "invalid params"}
+	}
+
+	if p.DownloadDir != nil {
+		h.engine.SetDownloadDir(*p.DownloadDir)
+		h.cfg.DownloadDir = *p.DownloadDir
+	}
+	if p.TmpDir != nil {
+		h.engine.SetTmpDir(*p.TmpDir)
+		h.cfg.TmpDir = *p.TmpDir
+	}
+	if p.MaxActive != nil && *p.MaxActive >= 1 {
+		h.engine.SetMaxActive(*p.MaxActive)
+		h.cfg.MaxActive = *p.MaxActive
+	}
+	if p.MaxPeers != nil && *p.MaxPeers >= 1 {
+		h.engine.SetMaxPeers(*p.MaxPeers)
+		h.cfg.MaxPeers = *p.MaxPeers
+	}
+	if p.MaxPipeline != nil && *p.MaxPipeline >= 1 {
+		h.engine.SetMaxPipeline(*p.MaxPipeline)
+		h.cfg.MaxPipeline = *p.MaxPipeline
+	}
+	if p.DialTimeout != nil && *p.DialTimeout >= 1 {
+		h.engine.SetDialTimeout(*p.DialTimeout)
+		h.cfg.DialTimeout = *p.DialTimeout
+	}
+	if p.NumWant != nil && *p.NumWant >= 1 {
+		h.engine.SetNumWant(*p.NumWant)
+		h.cfg.NumWant = *p.NumWant
+	}
+	if p.LogLevel != nil {
+		h.cfg.LogLevel = *p.LogLevel
+		slog.SetLogLoggerLevel(ParseLogLevel(*p.LogLevel))
+	}
+	if p.EnableUTP != nil {
+		h.engine.SetEnableUTP(*p.EnableUTP)
+		h.cfg.EnableUTP = *p.EnableUTP
+	}
+
+	_ = h.cfg.Save()
+	return struct{}{}, nil
 }
 
 func (h *RPCHandler) daemonVersion() (any, *rpcErr) {

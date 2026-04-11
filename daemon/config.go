@@ -25,11 +25,12 @@ type Config struct {
 	LogLevel string `toml:"log_level"` // debug, info, warn, error (default: info)
 
 	// Performance tuning (0 = use defaults)
-	MaxPeers    int `toml:"max_peers"`
-	MaxPipeline int `toml:"max_pipeline"`
-	DialTimeout int `toml:"dial_timeout"`
-	NumWant     int `toml:"numwant"`
-	DHTAlpha    int `toml:"dht_alpha"`
+	MaxPeers    int  `toml:"max_peers"`
+	MaxPipeline int  `toml:"max_pipeline"`
+	DialTimeout int  `toml:"dial_timeout"`
+	NumWant     int  `toml:"numwant"`
+	DHTAlpha    int  `toml:"dht_alpha"`
+	EnableUTP   bool `toml:"enable_utp"`
 
 	path string // file path for saving back
 }
@@ -92,16 +93,37 @@ func (c *Config) Save() error {
 		return err
 	}
 
-	content := fmt.Sprintf(`# stor daemon configuration
+	var b strings.Builder
+	fmt.Fprintf(&b, "# stor daemon configuration\n\n")
+	fmt.Fprintf(&b, "port = %d\n", c.Port)
+	fmt.Fprintf(&b, "download_dir = %q\n", c.DownloadDir)
+	if c.TmpDir != "" {
+		fmt.Fprintf(&b, "tmp_dir = %q\n", c.TmpDir)
+	}
+	fmt.Fprintf(&b, "api_key = %q\n", c.APIKey)
+	fmt.Fprintf(&b, "max_active = %d\n", c.MaxActive)
+	fmt.Fprintf(&b, "log_level = %q\n", c.LogLevel)
+	fmt.Fprintf(&b, "\n# Performance tuning (0 = use defaults)\n")
+	if c.MaxPeers > 0 {
+		fmt.Fprintf(&b, "max_peers = %d\n", c.MaxPeers)
+	}
+	if c.MaxPipeline > 0 {
+		fmt.Fprintf(&b, "max_pipeline = %d\n", c.MaxPipeline)
+	}
+	if c.DialTimeout > 0 {
+		fmt.Fprintf(&b, "dial_timeout = %d\n", c.DialTimeout)
+	}
+	if c.NumWant > 0 {
+		fmt.Fprintf(&b, "numwant = %d\n", c.NumWant)
+	}
+	if c.DHTAlpha > 0 {
+		fmt.Fprintf(&b, "dht_alpha = %d\n", c.DHTAlpha)
+	}
+	if c.EnableUTP {
+		fmt.Fprintf(&b, "enable_utp = true\n")
+	}
 
-port = %d
-download_dir = %q
-api_key = %q
-max_active = %d
-log_level = %q
-`, c.Port, c.DownloadDir, c.APIKey, c.MaxActive, c.LogLevel)
-
-	return os.WriteFile(c.path, []byte(content), 0o600)
+	return os.WriteFile(c.path, []byte(b.String()), 0o600)
 }
 
 // parseTOML is a minimal TOML parser for flat key = value pairs.
@@ -161,6 +183,8 @@ func parseTOML(data string, cfg *Config) {
 			if n, err := strconv.Atoi(val); err == nil {
 				cfg.DHTAlpha = n
 			}
+		case "enable_utp":
+			cfg.EnableUTP = val == "true"
 		}
 	}
 }

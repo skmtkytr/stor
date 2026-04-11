@@ -1,4 +1,4 @@
-import type { TorrentInfo, EngineStats } from "./types";
+import type { TorrentInfo, EngineStats, EngineConfig } from "./types";
 
 const API_KEY_STORAGE = "stor_api_key";
 
@@ -53,6 +53,8 @@ export const api = {
 	stats: () => rpc<EngineStats>("daemon.stats"),
 	setMaxActive: (max_active: number) =>
 		rpc<{ max_active: number }>("daemon.setMaxActive", { max_active }),
+	setConfig: (cfg: Partial<EngineConfig>) =>
+		rpc<object>("daemon.setConfig", cfg),
 
 	list: () => rpc<TorrentInfo[]>("torrent.list"),
 	get: (id: string) => rpc<TorrentInfo>("torrent.get", { id }),

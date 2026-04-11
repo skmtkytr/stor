@@ -2,29 +2,44 @@
 	import { torrents } from "$lib/stores/torrents.svelte";
 	import { auth } from "$lib/stores/auth.svelte";
 	import { api } from "$lib/rpc";
+	import type { EngineConfig } from "$lib/types";
 
 	let { open = $bindable(false) }: { open: boolean } = $props();
 
-	let maxActive = $state(5);
+	let cfg = $state<EngineConfig>({
+		download_dir: "",
+		tmp_dir: "",
+		max_active: 5,
+		max_peers: 0,
+		max_pipeline: 0,
+		dial_timeout: 0,
+		numwant: 0,
+		log_level: "info",
+		enable_utp: false,
+	});
 	let saveMsg = $state("");
+	let saving = $state(false);
 	let initialized = $state(false);
 
-	// Only sync from server when dialog opens, not on every poll
 	$effect(() => {
-		if (open && !initialized && torrents.stats) {
-			maxActive = torrents.stats.max_active;
+		if (open && !initialized && torrents.stats?.config) {
+			cfg = { ...torrents.stats.config };
 			initialized = true;
 		}
 		if (!open) initialized = false;
 	});
 
-	async function saveMaxActive() {
+	async function save() {
+		saving = true;
+		saveMsg = "";
 		try {
-			await api.setMaxActive(maxActive);
+			await api.setConfig(cfg);
 			saveMsg = "Saved";
 			setTimeout(() => (saveMsg = ""), 2000);
 		} catch (e: unknown) {
 			saveMsg = e instanceof Error ? e.message : "Failed";
+		} finally {
+			saving = false;
 		}
 	}
 
@@ -35,7 +50,6 @@
 </script>
 
 {#if open}
-	<!-- Backdrop -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div
 		class="fixed inset-0 z-40 bg-black/60"
@@ -43,13 +57,12 @@
 		onkeydown={(e) => e.key === "Escape" && (open = false)}
 	></div>
 
-	<!-- Dialog -->
 	<div class="fixed inset-0 z-50 flex items-center justify-center p-4">
-		<div class="w-full max-w-md rounded-lg border border-zinc-700 bg-zinc-900 shadow-xl">
+		<div class="w-full max-w-lg rounded-lg border border-zinc-700 bg-zinc-900 shadow-xl">
 			<div class="flex items-center justify-between border-b border-zinc-800 px-5 py-4">
 				<div>
 					<h2 class="text-lg font-semibold">Settings</h2>
-					<p class="text-sm text-zinc-400">Configure daemon settings.</p>
+					<p class="text-sm text-zinc-400">Changes apply to new downloads.</p>
 				</div>
 				<button
 					class="text-zinc-400 hover:text-zinc-100"
@@ -59,29 +72,129 @@
 				</button>
 			</div>
 
-			<div class="max-h-[70vh] space-y-5 overflow-y-auto p-5">
-				<!-- Max active downloads -->
-				<div class="space-y-2">
-					<label class="text-sm font-medium" for="max-active">Max concurrent downloads</label>
-					<div class="flex items-center gap-2">
+			<div class="max-h-[70vh] space-y-4 overflow-y-auto p-5">
+				<!-- General -->
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-zinc-500">General</h3>
+
+				<label class="block space-y-1">
+					<span class="text-sm text-zinc-300">Download Directory</span>
+					<input
+						type="text"
+						bind:value={cfg.download_dir}
+						class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+					/>
+				</label>
+
+				<label class="block space-y-1">
+					<span class="text-sm text-zinc-300">Temp Directory</span>
+					<input
+						type="text"
+						bind:value={cfg.tmp_dir}
+						placeholder="(same as download dir)"
+						class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+					/>
+				</label>
+
+				<div class="grid grid-cols-2 gap-3">
+					<label class="space-y-1">
+						<span class="text-sm text-zinc-300">Max Active Downloads</span>
 						<input
-							id="max-active"
 							type="number"
 							min="1"
 							max="50"
-							bind:value={maxActive}
-							class="w-20 rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+							bind:value={cfg.max_active}
+							class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
 						/>
-						<button
-							class="rounded-md bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900 hover:bg-zinc-200"
-							onclick={saveMaxActive}
+					</label>
+					<label class="space-y-1">
+						<span class="text-sm text-zinc-300">Log Level</span>
+						<select
+							bind:value={cfg.log_level}
+							class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
 						>
-							Save
-						</button>
-						{#if saveMsg}
-							<span class="text-xs text-zinc-400">{saveMsg}</span>
-						{/if}
-					</div>
+							<option value="debug">Debug</option>
+							<option value="info">Info</option>
+							<option value="warn">Warn</option>
+							<option value="error">Error</option>
+						</select>
+					</label>
+				</div>
+
+				<div class="border-t border-zinc-800"></div>
+
+				<!-- Connection -->
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-zinc-500">Connection</h3>
+
+				<div class="grid grid-cols-2 gap-3">
+					<label class="space-y-1">
+						<span class="text-sm text-zinc-300">Max Peers / Torrent</span>
+						<input
+							type="number"
+							min="1"
+							max="500"
+							bind:value={cfg.max_peers}
+							placeholder="100"
+							class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+						/>
+					</label>
+					<label class="space-y-1">
+						<span class="text-sm text-zinc-300">Pipeline Depth</span>
+						<input
+							type="number"
+							min="1"
+							max="64"
+							bind:value={cfg.max_pipeline}
+							placeholder="16"
+							class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+						/>
+					</label>
+					<label class="space-y-1">
+						<span class="text-sm text-zinc-300">Dial Timeout (s)</span>
+						<input
+							type="number"
+							min="1"
+							max="30"
+							bind:value={cfg.dial_timeout}
+							placeholder="3"
+							class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+						/>
+					</label>
+					<label class="space-y-1">
+						<span class="text-sm text-zinc-300">Tracker NumWant</span>
+						<input
+							type="number"
+							min="1"
+							max="1000"
+							bind:value={cfg.numwant}
+							placeholder="200"
+							class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+						/>
+					</label>
+				</div>
+
+				<label class="flex items-center gap-2">
+					<input
+						type="checkbox"
+						bind:checked={cfg.enable_utp}
+						class="rounded border-zinc-600 bg-zinc-800"
+					/>
+					<span class="text-sm text-zinc-300">Enable uTP (low-latency transport)</span>
+				</label>
+
+				<div class="border-t border-zinc-800"></div>
+
+				<!-- Save / Status -->
+				<div class="flex items-center gap-3">
+					<button
+						class="rounded-md bg-zinc-100 px-4 py-1.5 text-sm font-medium text-zinc-900 hover:bg-zinc-200 disabled:opacity-50"
+						onclick={save}
+						disabled={saving}
+					>
+						{saving ? "Saving..." : "Save"}
+					</button>
+					{#if saveMsg}
+						<span class="text-xs text-zinc-400">{saveMsg}</span>
+					{/if}
 				</div>
 
 				<div class="border-t border-zinc-800"></div>
