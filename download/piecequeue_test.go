@@ -21,6 +21,13 @@ func TestPieceQueueRarestFirst(t *testing.T) {
 	pq.availability[1] = 1
 	pq.availability[2] = 10
 	pq.availability[3] = 3
+	// Rebuild buckets to match
+	pq.buckets = map[int]map[int]bool{
+		5:  {0: true},
+		1:  {1: true},
+		10: {2: true},
+		3:  {3: true},
+	}
 	pq.mu.Unlock()
 
 	// Peer has all pieces
@@ -47,6 +54,11 @@ func TestPieceQueuePeerFilter(t *testing.T) {
 	pq.availability[0] = 10
 	pq.availability[1] = 1 // rarest, but peer doesn't have it
 	pq.availability[2] = 3
+	pq.buckets = map[int]map[int]bool{
+		10: {0: true},
+		1:  {1: true},
+		3:  {2: true},
+	}
 	pq.mu.Unlock()
 
 	// Peer only has pieces 0 and 2

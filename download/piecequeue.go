@@ -19,6 +19,10 @@ type PieceQueue struct {
 	totalPieces  int               // original total for threshold calculation
 	waitCh       chan struct{}     // signaled when new work may be available
 	cancelCh     chan int          // piece index broadcast when completed in endgame
+
+	// Availability buckets: avail level → set of piece indices.
+	// Enables O(k) Pick where k = number of distinct availability levels.
+	buckets map[int]map[int]bool // availability → {piece indices}
 }
 
 // NewPieceQueue creates a piece queue from a list of pieces to download.
@@ -31,11 +35,35 @@ func NewPieceQueue(pieces []PieceWork) *PieceQueue {
 		totalPieces:  len(pieces),
 		waitCh:       make(chan struct{}, 1),
 		cancelCh:     make(chan int, 64),
+		buckets:      make(map[int]map[int]bool),
 	}
+	// All pieces start with availability 0
+	bucket0 := make(map[int]bool, len(pieces))
 	for _, pw := range pieces {
 		pq.pieces[pw.Index] = pw
+		bucket0[pw.Index] = true
+	}
+	if len(bucket0) > 0 {
+		pq.buckets[0] = bucket0
 	}
 	return pq
+}
+
+// moveBucket moves a piece from one availability bucket to another.
+// Caller must hold pq.mu.
+func (pq *PieceQueue) moveBucket(idx, oldAvail, newAvail int) {
+	if b, ok := pq.buckets[oldAvail]; ok {
+		delete(b, idx)
+		if len(b) == 0 {
+			delete(pq.buckets, oldAvail)
+		}
+	}
+	b, ok := pq.buckets[newAvail]
+	if !ok {
+		b = make(map[int]bool)
+		pq.buckets[newAvail] = b
+	}
+	b[idx] = true
 }
 
 // Pick selects the rarest available piece that the peer has.
@@ -57,33 +85,52 @@ func (pq *PieceQueue) Pick(hasPiece func(int) bool) (PieceWork, bool) {
 		}
 	}
 
-	bestIdx := -1
-	bestAvail := int(^uint(0) >> 1) // max int
-
-	for idx, pw := range pq.pieces {
-		if pq.done[idx] {
+	// Walk buckets from lowest availability upward.
+	// Find minimum availability first, then scan upward.
+	minAvail := int(^uint(0) >> 1)
+	maxAvail := 0
+	for a, b := range pq.buckets {
+		if len(b) == 0 {
 			continue
 		}
-		// In normal mode, skip pending pieces. In endgame, allow duplicates.
-		if !pq.endgame && pq.pending[idx] {
-			continue
+		if a < minAvail {
+			minAvail = a
 		}
-		if !hasPiece(pw.Index) {
-			continue
-		}
-		avail := pq.availability[idx]
-		if avail < bestAvail || (avail == bestAvail && rand.IntN(2) == 0) {
-			bestAvail = avail
-			bestIdx = idx
+		if a > maxAvail {
+			maxAvail = a
 		}
 	}
 
-	if bestIdx < 0 {
-		return PieceWork{}, false
+	for avail := minAvail; avail <= maxAvail; avail++ {
+		bucket := pq.buckets[avail]
+		if len(bucket) == 0 {
+			continue
+		}
+		// Count eligible pieces and pick one randomly using reservoir sampling
+		var chosen int
+		count := 0
+		for idx := range bucket {
+			if pq.done[idx] {
+				continue
+			}
+			if !pq.endgame && pq.pending[idx] {
+				continue
+			}
+			if !hasPiece(idx) {
+				continue
+			}
+			count++
+			if rand.IntN(count) == 0 {
+				chosen = idx
+			}
+		}
+		if count > 0 {
+			pq.pending[chosen] = true
+			return pq.pieces[chosen], true
+		}
 	}
 
-	pq.pending[bestIdx] = true
-	return pq.pieces[bestIdx], true
+	return PieceWork{}, false
 }
 
 // Return puts a piece back as available (e.g., download failed).
@@ -99,6 +146,14 @@ func (pq *PieceQueue) Return(pw PieceWork) {
 func (pq *PieceQueue) Complete(index int) {
 	pq.mu.Lock()
 	delete(pq.pending, index)
+	// Remove from bucket
+	avail := pq.availability[index]
+	if b, ok := pq.buckets[avail]; ok {
+		delete(b, index)
+		if len(b) == 0 {
+			delete(pq.buckets, avail)
+		}
+	}
 	delete(pq.pieces, index)
 	pq.done[index] = true
 	eg := pq.endgame
@@ -138,7 +193,9 @@ func (pq *PieceQueue) AddPeerBitfield(bf peer.Bitfield) {
 	pq.mu.Lock()
 	for idx := range pq.pieces {
 		if bf.HasPiece(idx) {
+			old := pq.availability[idx]
 			pq.availability[idx]++
+			pq.moveBucket(idx, old, old+1)
 		}
 	}
 	pq.mu.Unlock()
@@ -150,7 +207,9 @@ func (pq *PieceQueue) RemovePeerBitfield(bf peer.Bitfield) {
 	pq.mu.Lock()
 	for idx := range pq.pieces {
 		if bf.HasPiece(idx) {
+			old := pq.availability[idx]
 			pq.availability[idx]--
+			pq.moveBucket(idx, old, old-1)
 		}
 	}
 	pq.mu.Unlock()
@@ -159,9 +218,26 @@ func (pq *PieceQueue) RemovePeerBitfield(bf peer.Bitfield) {
 // PeerHave increments availability for a single piece (MsgHave received).
 func (pq *PieceQueue) PeerHave(index int) {
 	pq.mu.Lock()
+	old := pq.availability[index]
 	pq.availability[index]++
+	if _, ok := pq.pieces[index]; ok {
+		pq.moveBucket(index, old, old+1)
+	}
 	pq.mu.Unlock()
 	pq.signal()
+}
+
+// maxPieceLen returns the maximum piece length in the queue.
+func (pq *PieceQueue) maxPieceLen() int {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+	max := 0
+	for _, pw := range pq.pieces {
+		if pw.Length > max {
+			max = pw.Length
+		}
+	}
+	return max
 }
 
 // Remaining returns the number of pieces not yet completed.

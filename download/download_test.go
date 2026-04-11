@@ -138,9 +138,12 @@ func TestDownloadPiece(t *testing.T) {
 	}
 
 	pw := PieceWork{Index: 0, Hash: pieceHash, Length: len(pieceData)}
-	data, err := client.DownloadPiece(pw)
+	data, release, err := client.DownloadPiece(pw)
 	if err != nil {
 		t.Fatalf("DownloadPiece failed: %v", err)
+	}
+	if release != nil {
+		defer release()
 	}
 
 	if len(data) != len(pieceData) {
@@ -175,7 +178,7 @@ func TestDownloadPieceHashMismatch(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	pw := PieceWork{Index: 0, Hash: wrongHash, Length: len(pieceData)}
-	_, err = client.DownloadPiece(pw)
+	_, _, err = client.DownloadPiece(pw)
 	if err == nil {
 		t.Fatal("expected hash mismatch error")
 	}

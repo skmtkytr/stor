@@ -8,12 +8,15 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/skmtkytr/stor/mse"
 	"github.com/skmtkytr/stor/peer"
+	"github.com/skmtkytr/stor/storage"
 	"github.com/skmtkytr/stor/torrent"
 	"github.com/skmtkytr/stor/tracker"
+	"github.com/skmtkytr/stor/utp"
 )
 
 const (
@@ -32,6 +35,7 @@ type DownloadConfig struct {
 	MaxPipeline int  // outstanding requests per peer
 	DialTimeout int  // peer dial timeout in seconds
 	Encryption  bool // attempt MSE/PE encryption (default: true)
+	EnableUTP   bool // try uTP before TCP for peer connections
 }
 
 // DefaultDownloadConfig returns default download config.
@@ -46,8 +50,16 @@ func DefaultDownloadConfig() DownloadConfig {
 
 // PieceResult contains a downloaded and verified piece.
 type PieceResult struct {
-	Index int
-	Data  []byte
+	Index   int
+	Data    []byte
+	Release func() // returns buffer to pool; nil if not pooled
+}
+
+// Free returns the buffer to the pool if pooled. Safe to call when Release is nil.
+func (r *PieceResult) Free() {
+	if r.Release != nil {
+		r.Release()
+	}
 }
 
 // PieceWork describes a piece to download.
@@ -55,6 +67,16 @@ type PieceWork struct {
 	Index  int
 	Hash   [20]byte
 	Length int
+}
+
+// piecePool returns a sync.Pool for piece buffers of a given size.
+func newPiecePool(size int) *sync.Pool {
+	return &sync.Pool{
+		New: func() any {
+			buf := make([]byte, size)
+			return &buf
+		},
+	}
 }
 
 // Client represents a connection to a single peer with buffered I/O.
@@ -83,6 +105,9 @@ type Client struct {
 
 	// Upload while downloading: callback to serve incoming requests
 	OnRequest func(index, begin, length uint32) []byte
+
+	// Piece buffer pool (set by runWorkers for buffer reuse)
+	piecePool *sync.Pool
 }
 
 // Speed returns the current download speed in bytes/sec.
@@ -158,21 +183,48 @@ func NewClientWithTimeout(p tracker.Peer, infoHash, peerID [20]byte, dialTimeout
 	return newClient(p, infoHash, peerID, dialTimeoutSec, false)
 }
 
-// NewClientEncrypted tries plaintext first, then MSE/PE if plaintext fails.
-// This avoids corrupting connections to peers that don't support MSE
-// (sending DH key material to a non-MSE peer causes them to drop/block us).
-func NewClientEncrypted(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int) (*Client, error) {
-	// Try plaintext first (most compatible)
-	c, err := newClient(p, infoHash, peerID, dialTimeoutSec, false)
+// NewClientEncrypted tries the preferred protocol first, falling back to the
+// alternative after a short delay. The preferEncrypt hint (shared across
+// workers) is updated based on which method succeeds, so subsequent calls
+// try the winning protocol first.
+func NewClientEncrypted(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, preferEncrypt *atomic.Bool, tryUTP bool) (*Client, error) {
+	preferred := preferEncrypt != nil && preferEncrypt.Load()
+
+	// Try preferred method first
+	c, err := newClientFull(p, infoHash, peerID, dialTimeoutSec, preferred, tryUTP)
 	if err == nil {
 		return c, nil
 	}
-	// If plaintext fails, try MSE (peer might require encryption)
-	return newClient(p, infoHash, peerID, dialTimeoutSec, true)
+
+	// Preferred failed — try fallback
+	c, err2 := newClientFull(p, infoHash, peerID, dialTimeoutSec, !preferred, tryUTP)
+	if err2 == nil {
+		if preferEncrypt != nil {
+			preferEncrypt.Store(!preferred)
+		}
+		return c, nil
+	}
+	return nil, err
+}
+
+// dialPeer connects to a peer via uTP (if enabled) or TCP.
+func dialPeer(addr string, timeout time.Duration, tryUTP bool) (net.Conn, error) {
+	if tryUTP {
+		conn, err := utp.DialTimeout(addr, timeout)
+		if err == nil {
+			return conn, nil
+		}
+		// uTP failed, fall back to TCP
+	}
+	return net.DialTimeout("tcp", addr, timeout)
 }
 
 func newClient(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, encrypt bool) (*Client, error) {
-	rawConn, err := net.DialTimeout("tcp", p.String(), time.Duration(dialTimeoutSec)*time.Second)
+	return newClientFull(p, infoHash, peerID, dialTimeoutSec, encrypt, false)
+}
+
+func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, encrypt bool, tryUTP bool) (*Client, error) {
+	rawConn, err := dialPeer(p.String(), time.Duration(dialTimeoutSec)*time.Second, tryUTP)
 	if err != nil {
 		return nil, fmt.Errorf("download: connect to %s failed: %w", p, err)
 	}
@@ -376,18 +428,37 @@ func (c *Client) handleRequest(payload []byte) {
 }
 
 // DownloadPiece downloads a single piece from the peer.
-func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
+// Returns the piece data and a release function to return the buffer to the pool.
+// The release function may be nil if no pool is used. Caller must call release
+// after consuming the data.
+func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 	_ = c.conn.SetDeadline(time.Now().Add(30 * time.Second))
 	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
 
 	if err := c.sendInterested(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := c.waitForUnchoke(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	buf := make([]byte, pw.Length)
+	var buf []byte
+	var release func()
+	if c.piecePool != nil {
+		bp := c.piecePool.Get().(*[]byte)
+		buf = (*bp)[:pw.Length]
+		release = func() { c.piecePool.Put(bp) }
+	} else {
+		buf = make([]byte, pw.Length)
+	}
+
+	fail := func(err error) ([]byte, func(), error) {
+		if release != nil {
+			release()
+		}
+		return nil, nil, err
+	}
+
 	downloaded := 0
 	requested := 0
 	backlog := 0
@@ -401,7 +472,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 			}
 			req := peer.NewRequestMessage(uint32(pw.Index), uint32(requested), uint32(blockSize))
 			if err := req.Write(c.w); err != nil {
-				return nil, err
+				return fail(err)
 			}
 			requested += blockSize
 			backlog++
@@ -409,13 +480,13 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 		}
 		if !flushed {
 			if err := c.w.Flush(); err != nil {
-				return nil, err
+				return fail(err)
 			}
 		}
 
 		msg, err := peer.ReadMessage(c.r)
 		if err != nil {
-			return nil, err
+			return fail(err)
 		}
 		if msg == nil {
 			continue
@@ -425,7 +496,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 		case peer.MsgPiece:
 			idx, begin, block, err := peer.ParsePiece(msg.Payload)
 			if err != nil {
-				return nil, err
+				return fail(err)
 			}
 			if int(idx) != pw.Index {
 				continue
@@ -436,7 +507,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 			backlog--
 		case peer.MsgChoke:
 			c.choked = true
-			return nil, fmt.Errorf("download: peer choked during piece %d", pw.Index)
+			return fail(fmt.Errorf("download: peer choked during piece %d", pw.Index))
 		case peer.MsgHave:
 			idx, err := peer.ParseHave(msg.Payload)
 			if err == nil {
@@ -449,10 +520,10 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, error) {
 
 	hash := sha1.Sum(buf)
 	if hash != pw.Hash {
-		return nil, fmt.Errorf("download: piece %d hash mismatch", pw.Index)
+		return fail(fmt.Errorf("download: piece %d hash mismatch", pw.Index))
 	}
 
-	return buf, nil
+	return buf, release, nil
 }
 
 // startWorkers launches peer workers and returns a result channel.
@@ -485,13 +556,13 @@ func startWorkers(peers []tracker.Peer, infoHash, peerID [20]byte, workCh chan P
 					continue
 				}
 
-				data, err := client.DownloadPiece(pw)
+				data, release, err := client.DownloadPiece(pw)
 				if err != nil {
 					workCh <- pw
 					return
 				}
 
-				resultCh <- PieceResult{Index: pw.Index, Data: data}
+				resultCh <- PieceResult{Index: pw.Index, Data: data, Release: release}
 			}
 		}(p)
 	}
@@ -518,21 +589,9 @@ func buildWorkQueue(tf *torrent.TorrentFile, totalLength int64) chan PieceWork {
 	return workCh
 }
 
-// TotalSize returns the total size of the torrent in bytes.
-func TotalSize(tf *torrent.TorrentFile) int64 {
-	if tf.Info.Length > 0 {
-		return tf.Info.Length
-	}
-	var total int64
-	for _, f := range tf.Info.Files {
-		total += f.Length
-	}
-	return total
-}
-
 // Download downloads all pieces of a torrent concurrently and returns the assembled data.
 func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([]byte, error) {
-	tl := TotalSize(tf)
+	tl := storage.TotalSize(tf)
 	numPieces := len(tf.Info.PieceHashes)
 	peers = deduplicatePeers(peers)
 
@@ -563,7 +622,7 @@ func Download(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer) ([
 
 // DownloadToFile downloads all pieces concurrently and writes directly to a file.
 func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Peer, path string) error {
-	tl := TotalSize(tf)
+	tl := storage.TotalSize(tf)
 	numPieces := len(tf.Info.PieceHashes)
 	peers = deduplicatePeers(peers)
 
@@ -639,14 +698,14 @@ type writeAtCloser interface {
 // DownloadWithParams runs a download session with full control over parameters.
 // Supports dynamic peer injection via PeerCh and resume via Have bitfield.
 func DownloadWithParams(ctx context.Context, p DownloadParams) error {
-	tl := TotalSize(p.TF)
+	tl := storage.TotalSize(p.TF)
 	numPieces := len(p.TF.Info.PieceHashes)
 	peers := deduplicatePeers(p.Peers)
 
 	// Open write target: single file or multi-file directory
 	var w writeAtCloser
-	if IsMultiFile(p.TF) {
-		mw, err := NewMultiFileWriter(p.Path, p.TF)
+	if storage.IsMultiFile(p.TF) {
+		mw, err := storage.NewMultiFileWriter(p.Path, p.TF)
 		if err != nil {
 			return err
 		}
@@ -714,9 +773,11 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 			}
 			offset := int64(res.Index) * int64(pieceLength)
 			if _, err := w.WriteAt(res.Data, offset); err != nil {
+				res.Free()
 				return fmt.Errorf("download: write piece %d failed: %w", res.Index, err)
 			}
 			p.Progress.Add(len(res.Data))
+			res.Free()
 			if p.OnPiece != nil {
 				p.OnPiece(res.Index)
 			}
@@ -734,8 +795,12 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 	pm := NewPeerManager(DefaultUnchokeSlots)
 	go pm.Run(ctx)
 
+	// Create piece buffer pool based on max piece size
+	piecePool := newPiecePool(pq.maxPieceLen())
+
 	sem := make(chan struct{}, cfg.MaxPeers)
 	seen := &sync.Map{}
+	var preferEncrypt atomic.Bool
 
 	var activeWorkers sync.WaitGroup
 
@@ -761,14 +826,15 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			var client *Client
 			var err error
 			if cfg.Encryption {
-				client, err = NewClientEncrypted(p, infoHash, peerID, cfg.DialTimeout)
+				client, err = NewClientEncrypted(p, infoHash, peerID, cfg.DialTimeout, &preferEncrypt, cfg.EnableUTP)
 			} else {
-				client, err = NewClientWithTimeout(p, infoHash, peerID, cfg.DialTimeout)
+				client, err = newClientFull(p, infoHash, peerID, cfg.DialTimeout, false, cfg.EnableUTP)
 			}
 			if err != nil {
 				return
 			}
 			client.maxPipeline = cfg.MaxPipeline
+			client.piecePool = piecePool
 			if peerSink != nil {
 				client.PeerSink = peerSink
 			}
@@ -808,7 +874,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 					continue
 				}
 
-				data, err := client.DownloadPiece(pw)
+				data, release, err := client.DownloadPiece(pw)
 				if err != nil {
 					pq.Return(pw)
 					return
@@ -816,13 +882,16 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 
 				// In endgame, another worker may have finished first
 				if pq.IsDone(pw.Index) {
+					if release != nil {
+						release()
+					}
 					continue
 				}
 
 				pq.Complete(pw.Index)
 
 				select {
-				case resultCh <- PieceResult{Index: pw.Index, Data: data}:
+				case resultCh <- PieceResult{Index: pw.Index, Data: data, Release: release}:
 				case <-ctx.Done():
 					return
 				}
@@ -830,17 +899,19 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		}()
 	}
 
-	// retryPeers goroutine: periodically re-attempt disconnected peers
+	// retryPeers goroutine: re-attempt disconnected peers with exponential backoff
 	retryDone := make(chan struct{})
 	go func() {
 		defer close(retryDone)
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
+		interval := 5 * time.Second
+		const maxInterval = 30 * time.Second
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-timer.C:
 				if pq.Remaining() == 0 {
 					return
 				}
@@ -848,6 +919,12 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				for _, p := range initialPeers {
 					spawnWorker(p)
 				}
+				// Exponential backoff: 5s → 10s → 20s → 30s (capped)
+				interval = interval * 2
+				if interval > maxInterval {
+					interval = maxInterval
+				}
+				timer.Reset(interval)
 			}
 		}
 	}()
