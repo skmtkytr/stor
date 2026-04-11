@@ -1,4 +1,4 @@
-package download
+package storage
 
 import (
 	"crypto/sha1"
@@ -40,7 +40,7 @@ func TestVerifyPiecesAllValid(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bf, count, err := VerifyPieces(path, tf)
+	bf, count, err := VerifyPieces(path, tf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestVerifyPiecesPartial(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bf, count, err := VerifyPieces(path, tf)
+	bf, count, err := VerifyPieces(path, tf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestVerifyPiecesFileNotExist(t *testing.T) {
 	data := []byte("aaaabbbb")
 	tf := buildTestTorrent(4, data)
 
-	bf, count, err := VerifyPieces("/nonexistent/file", tf)
+	bf, count, err := VerifyPieces("/nonexistent/file", tf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestVerifyPiecesTruncatedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bf, count, err := VerifyPieces(path, tf)
+	bf, count, err := VerifyPieces(path, tf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

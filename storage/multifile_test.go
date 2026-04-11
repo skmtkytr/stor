@@ -1,4 +1,4 @@
-package download
+package storage
 
 import (
 	"os"
@@ -60,6 +60,10 @@ func TestMultiFileWriterWriteAt(t *testing.T) {
 	if string(got) != "CCC" {
 		t.Errorf("c.txt: %q", got)
 	}
+
+	if err := mw.Close(); err != nil {
+		t.Fatal("Close:", err)
+	}
 }
 
 func TestMultiFileWriterReadAt(t *testing.T) {
@@ -95,6 +99,65 @@ func TestMultiFileWriterReadAt(t *testing.T) {
 	}
 	if n != 4 || string(buf) != "CDEF" {
 		t.Fatalf("got %q (n=%d), want CDEF", buf, n)
+	}
+}
+
+func TestMultiFileWriterHandleCache(t *testing.T) {
+	dir := t.TempDir()
+
+	tf := &torrent.TorrentFile{
+		Info: torrent.Info{
+			Name:        "testdir",
+			PieceLength: 4,
+			Files: []torrent.File{
+				{Length: 4, Path: []string{"a.dat"}},
+				{Length: 4, Path: []string{"b.dat"}},
+			},
+		},
+	}
+
+	base := filepath.Join(dir, "testdir")
+	mw, err := NewMultiFileWriter(base, tf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = mw.Close() }()
+
+	if err := mw.PreallocateFiles(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Multiple writes should reuse cached handles
+	for i := range 10 {
+		data := []byte{byte(i), byte(i), byte(i), byte(i)}
+		if _, err := mw.WriteAt(data, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Handles should be cached (2 files)
+	mw.mu.Lock()
+	handleCount := len(mw.handles)
+	mw.mu.Unlock()
+	if handleCount != 2 {
+		t.Errorf("expected 2 cached handles, got %d", handleCount)
+	}
+
+	// ReadAt should also use cache
+	buf := make([]byte, 4)
+	if _, err := mw.ReadAt(buf, 4); err != nil {
+		t.Fatal(err)
+	}
+
+	// Close should clear handles
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	mw.mu.Lock()
+	handleCount = len(mw.handles)
+	mw.mu.Unlock()
+	if handleCount != 0 {
+		t.Errorf("expected 0 handles after Close, got %d", handleCount)
 	}
 }
 

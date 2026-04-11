@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/skmtkytr/stor/peer"
+	"github.com/skmtkytr/stor/storage"
 	"github.com/skmtkytr/stor/torrent"
 )
 
@@ -108,13 +109,14 @@ func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {
 }
 
 func (u *Uploader) serveLoop(c *Client) {
-	var r readAtReader
-	if IsMultiFile(u.tf) {
-		mw, err := NewMultiFileWriter(u.filePath, u.tf)
+	var r storage.ReadAtReader
+	if storage.IsMultiFile(u.tf) {
+		mw, err := storage.NewMultiFileWriter(u.filePath, u.tf)
 		if err != nil {
 			slog.Error("upload: open multi-file dir failed", "path", u.filePath, "error", err)
 			return
 		}
+		defer func() { _ = mw.Close() }()
 		r = mw
 	} else {
 		f, err := os.Open(u.filePath)
@@ -127,7 +129,7 @@ func (u *Uploader) serveLoop(c *Client) {
 	}
 
 	pieceLen := int64(u.tf.Info.PieceLength)
-	totalSize := TotalSize(u.tf)
+	totalSize := storage.TotalSize(u.tf)
 
 	for {
 		msg, err := peer.ReadMessage(c.r)

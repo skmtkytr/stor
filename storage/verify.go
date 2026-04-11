@@ -1,4 +1,4 @@
-package download
+package storage
 
 import (
 	"crypto/sha1"
@@ -14,25 +14,24 @@ type ReadAtReader interface {
 	ReadAt([]byte, int64) (int, error)
 }
 
-// For internal use
-type readAtReader = ReadAtReader
-
 // VerifyPieces reads existing file data, hashes each piece, and returns
 // a Bitfield of verified pieces along with the count of valid pieces.
 // Supports both single-file and multi-file torrents.
-func VerifyPieces(path string, tf *torrent.TorrentFile) (peer.Bitfield, int, error) {
+// onProgress is called after each piece is checked (may be nil).
+func VerifyPieces(path string, tf *torrent.TorrentFile, onProgress func(checked, total int)) (peer.Bitfield, int, error) {
 	numPieces := len(tf.Info.PieceHashes)
 	tl := TotalSize(tf)
 	pieceLen := int(tf.Info.PieceLength)
 
 	bf := make(peer.Bitfield, (numPieces+7)/8)
 
-	var r readAtReader
+	var r ReadAtReader
 	if IsMultiFile(tf) {
 		mw, err := NewMultiFileWriter(path, tf)
 		if err != nil {
 			return bf, 0, nil // directory doesn't exist
 		}
+		defer func() { _ = mw.Close() }()
 		r = mw
 	} else {
 		f, err := os.Open(path)
@@ -49,6 +48,9 @@ func VerifyPieces(path string, tf *torrent.TorrentFile) (peer.Bitfield, int, err
 		r = f
 	}
 
+	// Reuse buffer across pieces (all but last are the same size)
+	buf := make([]byte, pieceLen)
+
 	verified := 0
 	for i, expectedHash := range tf.Info.PieceHashes {
 		offset := int64(i) * int64(pieceLen)
@@ -58,16 +60,17 @@ func VerifyPieces(path string, tf *torrent.TorrentFile) (peer.Bitfield, int, err
 			length = remaining
 		}
 
-		buf := make([]byte, length)
-		n, err := r.ReadAt(buf, offset)
-		if err != nil || n != length {
-			continue
+		n, err := r.ReadAt(buf[:length], offset)
+		if err == nil && n == length {
+			hash := sha1.Sum(buf[:length])
+			if hash == expectedHash {
+				bf.SetPiece(i)
+				verified++
+			}
 		}
 
-		hash := sha1.Sum(buf)
-		if hash == expectedHash {
-			bf.SetPiece(i)
-			verified++
+		if onProgress != nil {
+			onProgress(i+1, numPieces)
 		}
 	}
 

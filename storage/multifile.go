@@ -1,19 +1,24 @@
-package download
+package storage
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/skmtkytr/stor/torrent"
 )
 
 // MultiFileWriter handles writing piece data to the correct files
 // in a multi-file torrent. Pieces can span multiple files.
+// File handles are cached to avoid repeated open/close syscalls.
 type MultiFileWriter struct {
 	baseDir string
 	files   []fileEntry
 	total   int64
+
+	mu      sync.Mutex
+	handles map[string]*os.File
 }
 
 type fileEntry struct {
@@ -53,7 +58,27 @@ func NewMultiFileWriter(baseDir string, tf *torrent.TorrentFile) (*MultiFileWrit
 		baseDir: baseDir,
 		files:   entries,
 		total:   offset,
+		handles: make(map[string]*os.File),
 	}, nil
+}
+
+// getHandle returns a cached file handle, opening the file if needed.
+func (mw *MultiFileWriter) getHandle(path string, create bool) (*os.File, error) {
+	mw.mu.Lock()
+	defer mw.mu.Unlock()
+	if f, ok := mw.handles[path]; ok {
+		return f, nil
+	}
+	flags := os.O_RDWR
+	if create {
+		flags |= os.O_CREATE
+	}
+	f, err := os.OpenFile(path, flags, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	mw.handles[path] = f
+	return f, nil
 }
 
 // WriteAt writes data at the given byte offset in the virtual data stream.
@@ -84,13 +109,12 @@ func (mw *MultiFileWriter) WriteAt(data []byte, off int64) (int, error) {
 			canWrite = len(remaining)
 		}
 
-		f, err := os.OpenFile(fe.path, os.O_RDWR|os.O_CREATE, 0o644)
+		f, err := mw.getHandle(fe.path, true)
 		if err != nil {
 			return written, fmt.Errorf("multifile: open %s: %w", fe.path, err)
 		}
 
 		n, err := f.WriteAt(remaining[:canWrite], fileOff)
-		_ = f.Close()
 		if err != nil {
 			return written, fmt.Errorf("multifile: write %s: %w", fe.path, err)
 		}
@@ -128,13 +152,12 @@ func (mw *MultiFileWriter) ReadAt(data []byte, off int64) (int, error) {
 			canRead = len(buf)
 		}
 
-		f, err := os.Open(fe.path)
+		f, err := mw.getHandle(fe.path, false)
 		if err != nil {
 			return read, err
 		}
 
 		n, err := f.ReadAt(buf[:canRead], fileOff)
-		_ = f.Close()
 		if err != nil && n == 0 {
 			return read, err
 		}
@@ -150,25 +173,27 @@ func (mw *MultiFileWriter) ReadAt(data []byte, off int64) (int, error) {
 // PreallocateFiles creates and truncates all files to their expected sizes.
 func (mw *MultiFileWriter) PreallocateFiles() error {
 	for _, fe := range mw.files {
-		f, err := os.OpenFile(fe.path, os.O_RDWR|os.O_CREATE, 0o644)
+		f, err := mw.getHandle(fe.path, true)
 		if err != nil {
 			return err
 		}
 		if err := f.Truncate(fe.length); err != nil {
-			_ = f.Close()
 			return err
 		}
-		_ = f.Close()
 	}
 	return nil
 }
 
-// Close is a no-op (files are opened/closed per operation).
+// Close closes all cached file handles.
 func (mw *MultiFileWriter) Close() error {
-	return nil
-}
-
-// IsMultiFile returns whether the torrent has multiple files.
-func IsMultiFile(tf *torrent.TorrentFile) bool {
-	return len(tf.Info.Files) > 0
+	mw.mu.Lock()
+	defer mw.mu.Unlock()
+	var firstErr error
+	for path, f := range mw.handles {
+		if err := f.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		delete(mw.handles, path)
+	}
+	return firstErr
 }
