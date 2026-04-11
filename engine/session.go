@@ -88,8 +88,13 @@ func (s *Session) Snap() download.ProgressSnap {
 	if p != nil {
 		snap := p.Snap()
 		snap.State = string(state)
-		// Add upload stats if seeding
-		if u != nil {
+		// Clear speeds for inactive states
+		if state == StatePaused || state == StateComplete || state == StateError {
+			snap.DownSpeed = 0
+			snap.UpSpeed = 0
+		}
+		// Add upload stats if uploading
+		if u != nil && state != StatePaused && state != StateComplete && state != StateError {
 			snap.UpSpeed = u.TotalUploadSpeed()
 			snap.ActivePeers += u.PeerCount()
 		}

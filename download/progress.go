@@ -105,7 +105,7 @@ func (p *Progress) Snap() ProgressSnap {
 	}
 
 	var speed int64
-	if elapsed > 0 {
+	if elapsed > 0 && completed < p.totalPieces {
 		speed = int64(float64(downloaded) / elapsed)
 	}
 
