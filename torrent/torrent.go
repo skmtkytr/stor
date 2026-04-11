@@ -14,6 +14,7 @@ type TorrentFile struct {
 	AnnounceList [][]string
 	Info         Info
 	InfoHash     [20]byte // SHA1 of the bencoded info dict
+	WebSeedURLs  []string // BEP 19: HTTP URLs for downloading pieces
 }
 
 // Info represents the "info" dictionary of a torrent.
@@ -23,6 +24,7 @@ type Info struct {
 	PieceHashes [][20]byte // Each piece's SHA1 hash
 	Length      int64      // Single file mode (0 if multi-file)
 	Files       []File     // Multi-file mode (empty if single file)
+	Private     bool       // BEP 27: if true, disable DHT and PEX
 }
 
 // File represents a file entry in a multi-file torrent.
@@ -56,6 +58,11 @@ func Parse(data []byte) (*TorrentFile, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	// BEP 19: url-list (webseed)
+	if v, ok := root["url-list"]; ok {
+		tf.WebSeedURLs = parseURLList(v)
 	}
 
 	// info
@@ -133,6 +140,11 @@ func parseInfo(d map[string]any) (Info, error) {
 		copy(info.PieceHashes[i][:], pieces[i*20:(i+1)*20])
 	}
 
+	// BEP 27: private flag
+	if p, ok := d["private"].(int64); ok && p == 1 {
+		info.Private = true
+	}
+
 	// Single file or multi-file
 	if length, ok := d["length"].(int64); ok {
 		info.Length = length
@@ -207,4 +219,23 @@ func parseAnnounceList(v any) ([][]string, error) {
 		result = append(result, urls)
 	}
 	return result, nil
+}
+
+// parseURLList extracts webseed URLs from url-list (string or list of strings).
+func parseURLList(v any) []string {
+	switch val := v.(type) {
+	case string:
+		if val != "" {
+			return []string{val}
+		}
+	case []any:
+		urls := make([]string, 0, len(val))
+		for _, item := range val {
+			if s, ok := item.(string); ok && s != "" {
+				urls = append(urls, s)
+			}
+		}
+		return urls
+	}
+	return nil
 }

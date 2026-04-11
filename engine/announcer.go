@@ -130,8 +130,8 @@ func (a *Announcer) announce(ctx context.Context, event tracker.Event) time.Dura
 		}(tr)
 	}
 
-	// DHT lookup
-	if a.dht != nil && event != tracker.EventStopped {
+	// DHT lookup — skip for private torrents (BEP 27)
+	if a.dht != nil && event != tracker.EventStopped && !a.tf.Info.Private {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

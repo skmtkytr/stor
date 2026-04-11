@@ -36,6 +36,7 @@ type DownloadConfig struct {
 	DialTimeout int  // peer dial timeout in seconds
 	Encryption  bool // attempt MSE/PE encryption (default: true)
 	EnableUTP   bool // try uTP before TCP for peer connections
+	DisablePEX  bool // BEP 27: do not advertise or use PEX
 }
 
 // DefaultDownloadConfig returns default download config.
@@ -107,7 +108,9 @@ type Client struct {
 	OnRequest func(index, begin, length uint32) []byte
 
 	// Piece buffer pool (set by runWorkers for buffer reuse)
-	piecePool *sync.Pool
+	piecePool  *sync.Pool
+	disablePEX bool // BEP 27: suppress PEX for private torrents
+	fastExt    bool // BEP 6: peer supports fast extension
 }
 
 // Speed returns the current download speed in bytes/sec.
@@ -187,17 +190,17 @@ func NewClientWithTimeout(p tracker.Peer, infoHash, peerID [20]byte, dialTimeout
 // alternative after a short delay. The preferEncrypt hint (shared across
 // workers) is updated based on which method succeeds, so subsequent calls
 // try the winning protocol first.
-func NewClientEncrypted(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, preferEncrypt *atomic.Bool, tryUTP bool) (*Client, error) {
+func NewClientEncrypted(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, preferEncrypt *atomic.Bool, tryUTP bool, noPEX bool) (*Client, error) {
 	preferred := preferEncrypt != nil && preferEncrypt.Load()
 
 	// Try preferred method first
-	c, err := newClientFull(p, infoHash, peerID, dialTimeoutSec, preferred, tryUTP)
+	c, err := newClientFull(p, infoHash, peerID, dialTimeoutSec, preferred, tryUTP, noPEX)
 	if err == nil {
 		return c, nil
 	}
 
 	// Preferred failed — try fallback
-	c, err2 := newClientFull(p, infoHash, peerID, dialTimeoutSec, !preferred, tryUTP)
+	c, err2 := newClientFull(p, infoHash, peerID, dialTimeoutSec, !preferred, tryUTP, noPEX)
 	if err2 == nil {
 		if preferEncrypt != nil {
 			preferEncrypt.Store(!preferred)
@@ -220,10 +223,10 @@ func dialPeer(addr string, timeout time.Duration, tryUTP bool) (net.Conn, error)
 }
 
 func newClient(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, encrypt bool) (*Client, error) {
-	return newClientFull(p, infoHash, peerID, dialTimeoutSec, encrypt, false)
+	return newClientFull(p, infoHash, peerID, dialTimeoutSec, encrypt, false, false)
 }
 
-func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, encrypt bool, tryUTP bool) (*Client, error) {
+func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, encrypt bool, tryUTP bool, noPEX bool) (*Client, error) {
 	rawConn, err := dialPeer(p.String(), time.Duration(dialTimeoutSec)*time.Second, tryUTP)
 	if err != nil {
 		return nil, fmt.Errorf("download: connect to %s failed: %w", p, err)
@@ -244,7 +247,7 @@ func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int
 
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
-	hs := &peer.Handshake{InfoHash: infoHash, PeerID: peerID, Extensions: true}
+	hs := &peer.Handshake{InfoHash: infoHash, PeerID: peerID, Extensions: true, FastExtension: true}
 	if err := peer.WriteHandshake(conn, hs); err != nil {
 		closeOnErr()
 		return nil, fmt.Errorf("download: handshake write failed: %w", err)
@@ -270,13 +273,18 @@ func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int
 		maxPipeline: DefaultMaxPipeline,
 		Addr:        p.String(),
 		speedStart:  time.Now(),
+		disablePEX:  noPEX,
+		fastExt:     resp.FastExtension,
 	}
 
 	// BEP 10: send extension handshake if peer supports extensions
 	if resp.Extensions {
-		const localPexID uint8 = 2
+		m := map[string]int64{}
+		if !c.disablePEX {
+			m["ut_pex"] = int64(2)
+		}
 		extHS := &peer.ExtHandshake{
-			M: map[string]int64{"ut_pex": int64(localPexID)},
+			M: m,
 			V: "stor/0.1",
 		}
 		payload, _ := peer.EncodeExtHandshake(extHS)
@@ -301,12 +309,17 @@ func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int
 		switch msg.ID {
 		case peer.MsgBitfield:
 			c.bitfield = peer.Bitfield(msg.Payload)
+		case peer.MsgHaveAll:
+			// BEP 6: peer has all pieces — set full bitfield later when numPieces is known
+			c.bitfield = nil // sentinel: nil means "have all"
+		case peer.MsgHaveNone:
+			// BEP 6: peer has no pieces
+			c.bitfield = peer.Bitfield{}
 		case peer.MsgExtended:
 			c.handleExtended(msg.Payload)
 		case peer.MsgUnchoke:
 			c.choked = false
 		default:
-			// Got a non-initial message, stop reading initial messages
 			goto doneInit
 		}
 	}
@@ -361,7 +374,11 @@ func (c *Client) Close() error {
 }
 
 // HasPiece returns whether the peer has the given piece.
+// A nil bitfield means "have all" (BEP 6 have-all).
 func (c *Client) HasPiece(index int) bool {
+	if c.bitfield == nil {
+		return true // have-all
+	}
 	return c.bitfield.HasPiece(index)
 }
 
@@ -513,6 +530,9 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 			if err == nil {
 				c.bitfield.SetPiece(int(idx))
 			}
+		case peer.MsgReject:
+			// BEP 6: peer rejected our request
+			return fail(fmt.Errorf("download: peer rejected piece %d", pw.Index))
 		case peer.MsgExtended:
 			c.handleExtended(msg.Payload)
 		}
@@ -662,17 +682,18 @@ func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Pe
 
 // DownloadParams consolidates parameters for a download session.
 type DownloadParams struct {
-	TF        *torrent.TorrentFile
-	PeerID    [20]byte
-	Peers     []tracker.Peer        // initial peers
-	PeerCh    <-chan []tracker.Peer // dynamic peer injection (nil = disabled)
-	PeerSink  chan<- []tracker.Peer // for PEX: discovered peers are sent here (nil = disabled)
-	Path      string
-	Progress  *Progress
-	Cfg       DownloadConfig
-	Have      peer.Bitfield                            // pieces already downloaded (for resume)
-	OnPiece   func(index int)                          // called when a piece is downloaded (for upload during download)
-	OnRequest func(index, begin, length uint32) []byte // serve incoming piece requests
+	TF          *torrent.TorrentFile
+	PeerID      [20]byte
+	Peers       []tracker.Peer        // initial peers
+	PeerCh      <-chan []tracker.Peer // dynamic peer injection (nil = disabled)
+	PeerSink    chan<- []tracker.Peer // for PEX: discovered peers are sent here (nil = disabled)
+	Path        string
+	Progress    *Progress
+	Cfg         DownloadConfig
+	Have        peer.Bitfield                            // pieces already downloaded (for resume)
+	OnPiece     func(index int)                          // called when a piece is downloaded (for upload during download)
+	OnRequest   func(index, begin, length uint32) []byte // serve incoming piece requests
+	WebSeedURLs []string                                 // BEP 19: HTTP URLs for downloading pieces
 }
 
 // DownloadToFileCtx is like DownloadToFile but accepts a context for cancellation.
@@ -757,7 +778,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 	}
 
 	pq := NewPieceQueue(pieces)
-	resultCh := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.PeerSink, p.Progress, p.Cfg, p.OnRequest)
+	resultCh := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.PeerSink, p.Progress, p.Cfg, p.OnRequest, p.TF, p.WebSeedURLs)
 
 	pieceLength := int(p.TF.Info.PieceLength)
 	for completed := 0; completed < remaining; {
@@ -789,7 +810,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 }
 
 // runWorkers launches peer workers with rarest-first piece selection and dynamic peer injection.
-func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peerID [20]byte, pq *PieceQueue, peerCh <-chan []tracker.Peer, peerSink chan<- []tracker.Peer, progress *Progress, cfg DownloadConfig, onRequest func(uint32, uint32, uint32) []byte) <-chan PieceResult {
+func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peerID [20]byte, pq *PieceQueue, peerCh <-chan []tracker.Peer, peerSink chan<- []tracker.Peer, progress *Progress, cfg DownloadConfig, onRequest func(uint32, uint32, uint32) []byte, tf *torrent.TorrentFile, webSeedURLs []string) <-chan PieceResult {
 	resultCh := make(chan PieceResult, 64)
 
 	pm := NewPeerManager(DefaultUnchokeSlots)
@@ -826,9 +847,9 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			var client *Client
 			var err error
 			if cfg.Encryption {
-				client, err = NewClientEncrypted(p, infoHash, peerID, cfg.DialTimeout, &preferEncrypt, cfg.EnableUTP)
+				client, err = NewClientEncrypted(p, infoHash, peerID, cfg.DialTimeout, &preferEncrypt, cfg.EnableUTP, cfg.DisablePEX)
 			} else {
-				client, err = newClientFull(p, infoHash, peerID, cfg.DialTimeout, false, cfg.EnableUTP)
+				client, err = newClientFull(p, infoHash, peerID, cfg.DialTimeout, false, cfg.EnableUTP, cfg.DisablePEX)
 			}
 			if err != nil {
 				return
@@ -954,13 +975,53 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		}()
 	}
 
+	// BEP 19: webseed workers
+	for _, wsURL := range webSeedURLs {
+		activeWorkers.Add(1)
+		go func(baseURL string) {
+			defer activeWorkers.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				pw, ok := pq.Pick(func(int) bool { return true }) // HTTP has all pieces
+				if !ok {
+					select {
+					case <-ctx.Done():
+						return
+					case <-pq.Wait():
+						continue
+					}
+				}
+				if pq.IsDone(pw.Index) {
+					continue
+				}
+				data, err := downloadPieceHTTP(ctx, baseURL, tf, pw)
+				if err != nil {
+					pq.Return(pw)
+					return // HTTP source failed, stop this worker
+				}
+				if pq.IsDone(pw.Index) {
+					continue
+				}
+				pq.Complete(pw.Index)
+				select {
+				case resultCh <- PieceResult{Index: pw.Index, Data: data}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}(wsURL)
+	}
+
 	go func() {
 		if feederDone != nil {
 			<-feederDone
 		}
 		activeWorkers.Wait()
 		close(resultCh)
-		// retryDone will stop on its own via ctx cancellation or pq.Remaining()==0
 	}()
 
 	return resultCh

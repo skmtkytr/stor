@@ -53,8 +53,9 @@ func (u *Uploader) SetPiece(index int) {
 func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {
 	// Complete handshake: send our side
 	ourHS := &peer.Handshake{
-		InfoHash: u.tf.InfoHash,
-		PeerID:   u.peerID,
+		InfoHash:      u.tf.InfoHash,
+		PeerID:        u.peerID,
+		FastExtension: true,
 	}
 	if err := peer.WriteHandshake(conn, ourHS); err != nil {
 		slog.Debug("upload: handshake write failed", "remote", conn.RemoteAddr(), "error", err)
@@ -72,6 +73,7 @@ func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {
 		infoHash: u.tf.InfoHash,
 		Addr:     conn.RemoteAddr().String(),
 		choking:  true, // start by choking them
+		fastExt:  remoteHS.FastExtension,
 	}
 
 	u.pm.Register(client)
@@ -93,10 +95,26 @@ func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {
 		_ = conn.Close()
 	}()
 
-	// Send our bitfield
-	if len(u.bitfield) > 0 {
-		bfMsg := &peer.Message{ID: peer.MsgBitfield, Payload: u.bitfield}
-		if err := bfMsg.Write(w); err != nil {
+	// Send our bitfield (or have-all/have-none for BEP 6)
+	numPieces := len(u.tf.Info.PieceHashes)
+	allHave := true
+	for i := range numPieces {
+		if !u.bitfield.HasPiece(i) {
+			allHave = false
+			break
+		}
+	}
+
+	var initMsg *peer.Message
+	if remoteHS.FastExtension && allHave {
+		initMsg = &peer.Message{ID: peer.MsgHaveAll}
+	} else if remoteHS.FastExtension && numPieces > 0 && !u.bitfield.HasPiece(0) && len(u.bitfield) == 0 {
+		initMsg = &peer.Message{ID: peer.MsgHaveNone}
+	} else if len(u.bitfield) > 0 {
+		initMsg = &peer.Message{ID: peer.MsgBitfield, Payload: u.bitfield}
+	}
+	if initMsg != nil {
+		if err := initMsg.Write(w); err != nil {
 			return
 		}
 		if err := w.Flush(); err != nil {
@@ -150,7 +168,13 @@ func (u *Uploader) serveLoop(c *Client) {
 
 		case peer.MsgRequest:
 			if c.IsChoking() {
-				// We're choking them, ignore request
+				// BEP 6: send reject if peer supports fast extension
+				if c.fastExt {
+					idx, begin, length, _ := peer.ParseRequest(msg.Payload)
+					rejectMsg := peer.NewRejectMessage(idx, begin, length)
+					_ = rejectMsg.Write(c.w)
+					_ = c.w.Flush()
+				}
 				continue
 			}
 

@@ -182,3 +182,83 @@ func TestInfoHashConsistency(t *testing.T) {
 		t.Error("info hash should be deterministic")
 	}
 }
+
+func TestParseWebSeedURLs(t *testing.T) {
+	info := map[string]any{
+		"name":         "test.txt",
+		"piece length": int64(262144),
+		"pieces":       fakePieces(1),
+		"length":       int64(100),
+	}
+
+	// Single URL string
+	data := buildTestTorrent(t, info, map[string]any{
+		"url-list": "http://example.com/test.txt",
+	})
+	tf, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tf.WebSeedURLs) != 1 || tf.WebSeedURLs[0] != "http://example.com/test.txt" {
+		t.Errorf("single url-list: got %v", tf.WebSeedURLs)
+	}
+
+	// List of URLs
+	data = buildTestTorrent(t, info, map[string]any{
+		"url-list": []any{"http://a.com/file", "http://b.com/file"},
+	})
+	tf, err = Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tf.WebSeedURLs) != 2 {
+		t.Errorf("list url-list: got %d URLs, want 2", len(tf.WebSeedURLs))
+	}
+
+	// No url-list
+	data = buildTestTorrent(t, info, nil)
+	tf, err = Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tf.WebSeedURLs) != 0 {
+		t.Errorf("no url-list: got %v", tf.WebSeedURLs)
+	}
+}
+
+func TestParsePrivateTorrent(t *testing.T) {
+	info := map[string]any{
+		"name":         "private.txt",
+		"piece length": int64(262144),
+		"pieces":       fakePieces(1),
+		"length":       int64(100),
+		"private":      int64(1),
+	}
+	data := buildTestTorrent(t, info, nil)
+
+	tf, err := Parse(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !tf.Info.Private {
+		t.Error("expected Private=true for private:1")
+	}
+}
+
+func TestParseNonPrivateTorrent(t *testing.T) {
+	info := map[string]any{
+		"name":         "public.txt",
+		"piece length": int64(262144),
+		"pieces":       fakePieces(1),
+		"length":       int64(100),
+	}
+	data := buildTestTorrent(t, info, nil)
+
+	tf, err := Parse(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tf.Info.Private {
+		t.Error("expected Private=false when private key absent")
+	}
+}

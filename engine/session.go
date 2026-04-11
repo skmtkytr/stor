@@ -332,18 +332,30 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		}
 	}
 
+	// BEP 27: disable PEX for private torrents
+	var peerSink chan<- []tracker.Peer
+	if !s.tf.Info.Private {
+		peerSink = peerCh
+	}
+
+	dlCfg := s.dlCfg
+	if s.tf.Info.Private {
+		dlCfg.DisablePEX = true
+	}
+
 	pieceLen := int64(s.tf.Info.PieceLength)
 	dlErr := download.DownloadWithParams(ctx, download.DownloadParams{
-		TF:       s.tf,
-		PeerID:   s.peerID,
-		Peers:    peers,
-		PeerCh:   peerCh,
-		PeerSink: peerCh,
-		Path:     savePath,
-		Progress: progress,
-		Cfg:      s.dlCfg,
-		Have:     haveBitfield,
-		OnPiece:  func(index int) { up.SetPiece(index) },
+		TF:          s.tf,
+		PeerID:      s.peerID,
+		Peers:       peers,
+		PeerCh:      peerCh,
+		PeerSink:    peerSink,
+		Path:        savePath,
+		Progress:    progress,
+		Cfg:         dlCfg,
+		Have:        haveBitfield,
+		WebSeedURLs: s.tf.WebSeedURLs,
+		OnPiece:     func(index int) { up.SetPiece(index) },
 		OnRequest: func(index, begin, length uint32) []byte {
 			if fileReader == nil || !uploadBF.HasPiece(int(index)) {
 				return nil // don't have this piece yet
@@ -813,18 +825,20 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 		}(tr)
 	}
 
-	// DHT lookup (reuse shared instance)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		dhtPeers := s.dhtLookup(s.tf.InfoHash)
-		if len(dhtPeers) > 0 {
-			slog.Debug("dht peers", "id", s.record.ID, "peers", len(dhtPeers))
-			mu.Lock()
-			allPeers = append(allPeers, dhtPeers...)
-			mu.Unlock()
-		}
-	}()
+	// DHT lookup (reuse shared instance) — skip for private torrents (BEP 27)
+	if !s.tf.Info.Private {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			dhtPeers := s.dhtLookup(s.tf.InfoHash)
+			if len(dhtPeers) > 0 {
+				slog.Debug("dht peers", "id", s.record.ID, "peers", len(dhtPeers))
+				mu.Lock()
+				allPeers = append(allPeers, dhtPeers...)
+				mu.Unlock()
+			}
+		}()
+	}
 
 	wg.Wait()
 
