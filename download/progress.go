@@ -84,11 +84,15 @@ func (p *Progress) SetInitial(completedPieces int, totalBytes int64, pieceLength
 	p.downloaded.Store(estimated)
 }
 
-// Add records a completed piece.
+// Add records a completed piece (piece count + total bytes).
 func (p *Progress) Add(bytes int) {
 	p.completed.Add(1)
 	p.downloaded.Add(int64(bytes))
-	p.speed.add(int64(bytes))
+}
+
+// AddBytes records downloaded bytes for speed tracking (called per block).
+func (p *Progress) AddBytes(n int64) {
+	p.speed.add(n)
 }
 
 // PeerConnect increments the active peer count.

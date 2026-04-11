@@ -44,7 +44,8 @@ func TestProgressSnapSpeedAfterResume(t *testing.T) {
 		t.Errorf("expected 0 speed after resume with no new data, got %d", snap.DownSpeed)
 	}
 
-	// Add new data
+	// Add new data (AddBytes tracks speed, Add tracks piece count)
+	p.AddBytes(256 * 1024)
 	p.Add(256 * 1024)
 	snap = p.Snap()
 	if snap.DownSpeed == 0 {

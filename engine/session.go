@@ -316,22 +316,6 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	slog.Info("download starting", "id", s.record.ID, "name", s.tf.Info.Name,
 		"total_bytes", tl, "pieces", numPieces, "peers", len(peers), "save_path", savePath)
 
-	// Create file reader for upload-while-downloading
-	var fileReader storage.ReadAtReader
-	if storage.IsMultiFile(s.tf) {
-		mw, err := storage.NewMultiFileWriter(savePath, s.tf)
-		if err == nil {
-			defer func() { _ = mw.Close() }()
-			fileReader = mw
-		}
-	} else {
-		f, ferr := os.Open(savePath)
-		if ferr == nil {
-			defer func() { _ = f.Close() }()
-			fileReader = f
-		}
-	}
-
 	// BEP 27: disable PEX for private torrents
 	var peerSink chan<- []tracker.Peer
 	if !s.tf.Info.Private {
@@ -343,7 +327,6 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		dlCfg.DisablePEX = true
 	}
 
-	pieceLen := int64(s.tf.Info.PieceLength)
 	dlErr := download.DownloadWithParams(ctx, download.DownloadParams{
 		TF:          s.tf,
 		PeerID:      s.peerID,
@@ -355,21 +338,10 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		Cfg:         dlCfg,
 		Have:        haveBitfield,
 		WebSeedURLs: s.tf.WebSeedURLs,
+		HaveBF:      uploadBF, // live bitfield for OnRequest (auto-wired in DownloadWithParams)
 		OnPiece: func(index int) {
-			uploadBF.SetPiece(index) // update local bitfield for OnRequest
-			up.SetPiece(index)       // update Uploader bitfield + notify connected peers
-		},
-		OnRequest: func(index, begin, length uint32) []byte {
-			if fileReader == nil || !uploadBF.HasPiece(int(index)) {
-				return nil // don't have this piece yet
-			}
-			block := make([]byte, length)
-			offset := int64(index)*pieceLen + int64(begin)
-			n, err := fileReader.ReadAt(block, offset)
-			if err != nil || n != int(length) {
-				return nil
-			}
-			return block
+			uploadBF.SetPiece(index)
+			up.SetPiece(index)
 		},
 	})
 	if dlErr != nil {

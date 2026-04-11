@@ -110,8 +110,9 @@ type Client struct {
 
 	// Piece buffer pool (set by runWorkers for buffer reuse)
 	piecePool  *sync.Pool
-	disablePEX bool // BEP 27: suppress PEX for private torrents
-	fastExt    bool // BEP 6: peer supports fast extension
+	disablePEX bool      // BEP 27: suppress PEX for private torrents
+	fastExt    bool      // BEP 6: peer supports fast extension
+	progress   *Progress // for block-level speed tracking (nil in legacy mode)
 }
 
 // Speed returns the current download speed in bytes/sec.
@@ -524,8 +525,12 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 				return fail(fmt.Errorf("download: piece %d block out of bounds (begin=%d, len=%d, piece=%d)", pw.Index, begin, len(block), len(buf)))
 			}
 			copy(buf[begin:], block)
-			downloaded += len(block)
-			c.downloaded.Add(int64(len(block)))
+			n := int64(len(block))
+			downloaded += int(n)
+			c.downloaded.Add(n)
+			if c.progress != nil {
+				c.progress.AddBytes(n)
+			}
 			backlog--
 		case peer.MsgChoke:
 			c.choked = true
@@ -535,8 +540,9 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 			if err == nil {
 				c.bitfield.SetPiece(int(idx))
 			}
+		case peer.MsgRequest:
+			c.handleRequest(msg.Payload)
 		case peer.MsgReject:
-			// BEP 6: peer rejected our request
 			return fail(fmt.Errorf("download: peer rejected piece %d", pw.Index))
 		case peer.MsgExtended:
 			c.handleExtended(msg.Payload)
@@ -697,7 +703,8 @@ type DownloadParams struct {
 	Cfg         DownloadConfig
 	Have        peer.Bitfield                            // pieces already downloaded (for resume)
 	OnPiece     func(index int)                          // called when a piece is downloaded (for upload during download)
-	OnRequest   func(index, begin, length uint32) []byte // serve incoming piece requests
+	OnRequest   func(index, begin, length uint32) []byte // serve incoming piece requests (set automatically if nil)
+	HaveBF      peer.Bitfield                            // live bitfield updated by OnPiece (for upload-while-downloading)
 	WebSeedURLs []string                                 // BEP 19: HTTP URLs for downloading pieces
 }
 
@@ -751,6 +758,29 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 		w = f
 	}
 	defer func() { _ = w.Close() }()
+
+	// Auto-wire OnRequest: read from the write target (which is also readable)
+	// so upload-while-downloading works without a separate file reader.
+	if p.OnRequest == nil && p.HaveBF != nil {
+		type readerAt interface {
+			ReadAt([]byte, int64) (int, error)
+		}
+		if r, ok := w.(readerAt); ok {
+			pieceLen := int64(p.TF.Info.PieceLength)
+			p.OnRequest = func(index, begin, length uint32) []byte {
+				if !p.HaveBF.HasPiece(int(index)) {
+					return nil
+				}
+				block := make([]byte, length)
+				offset := int64(index)*pieceLen + int64(begin)
+				n, err := r.ReadAt(block, offset)
+				if err != nil || n != int(length) {
+					return nil
+				}
+				return block
+			}
+		}
+	}
 
 	// Count already-completed pieces and build work queue for remaining
 	alreadyDone := 0
@@ -880,6 +910,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			}
 			client.maxPipeline = cfg.MaxPipeline
 			client.piecePool = piecePool
+			client.progress = progress
 			if peerSink != nil {
 				client.PeerSink = peerSink
 			}
