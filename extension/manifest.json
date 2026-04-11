@@ -5,6 +5,7 @@
   "description": "Send magnet links and .torrent files to your stor daemon.",
   "permissions": [
     "contextMenus",
+    "downloads",
     "storage",
     "webNavigation"
   ],
