@@ -77,6 +77,8 @@ type EngineConfig struct {
 type EngineStats struct {
 	TotalDownSpeed  int64        `json:"total_down_speed"`
 	TotalUpSpeed    int64        `json:"total_up_speed"`
+	TotalDownloaded int64        `json:"total_downloaded"`
+	TotalUploaded   int64        `json:"total_uploaded"`
 	ActiveTorrents  int          `json:"active_torrents"`
 	SeedingTorrents int          `json:"seeding_torrents"`
 	TotalTorrents   int          `json:"total_torrents"`
@@ -446,13 +448,15 @@ func (e *Engine) GetStats() *EngineStats {
 	for _, s := range e.sessions {
 		snap := s.Snap()
 		stats.TotalPeers += int(snap.ActivePeers)
+		stats.TotalDownloaded += snap.Downloaded
+		stats.TotalUploaded += snap.Uploaded
+		stats.TotalUpSpeed += snap.UpSpeed
 		if snap.State == string(StateDownloading) || snap.State == string(StateVerifying) {
 			stats.ActiveTorrents++
 			stats.TotalDownSpeed += snap.DownSpeed
 		}
 		if snap.State == string(StateSeeding) {
 			stats.SeedingTorrents++
-			stats.TotalUpSpeed += snap.UpSpeed
 		}
 	}
 

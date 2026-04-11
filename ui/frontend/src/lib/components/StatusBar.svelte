@@ -33,11 +33,13 @@
 					Free: <span class="text-zinc-300">{formatBytes(s.free_space)}</span>
 				</span>
 			{/if}
-			<span>
+			<span title="Download speed / Total downloaded">
 				DL: <span class="text-zinc-300">{formatSpeed(s.total_down_speed)}</span>
+				<span class="text-zinc-500">({formatBytes(s.total_downloaded)})</span>
 			</span>
-			<span>
+			<span title="Upload speed / Total uploaded">
 				UL: <span class="text-emerald-300">{formatSpeed(s.total_up_speed)}</span>
+				<span class="text-zinc-500">({formatBytes(s.total_uploaded)})</span>
 			</span>
 		</div>
 	{:else}

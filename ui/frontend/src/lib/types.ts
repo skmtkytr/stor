@@ -37,6 +37,7 @@ export interface EngineConfig {
 export interface ProgressSnap {
 	state: string;
 	downloaded: number;
+	uploaded: number;
 	total: number;
 	percent: number;
 	down_speed: number;
@@ -49,6 +50,8 @@ export interface ProgressSnap {
 export interface EngineStats {
 	total_down_speed: number;
 	total_up_speed: number;
+	total_downloaded: number;
+	total_uploaded: number;
 	active_torrents: number;
 	seeding_torrents: number;
 	total_torrents: number;

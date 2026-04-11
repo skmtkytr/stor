@@ -78,6 +78,7 @@ type Progress struct {
 	startTime   time.Time
 	speed       *emaSpeed
 	upSpeed     *emaSpeed // upload speed from outgoing peer connections
+	uploaded    atomic.Int64
 }
 
 // NewProgress creates a new progress tracker.
@@ -101,9 +102,10 @@ func (p *Progress) Close() {
 	}
 }
 
-// AddUploadBytes records uploaded bytes for speed tracking.
+// AddUploadBytes records uploaded bytes for speed + total tracking.
 func (p *Progress) AddUploadBytes(n int64) {
 	p.upSpeed.add(n)
+	p.uploaded.Add(n)
 }
 
 // UploadRate returns the current upload speed from outgoing peer connections.
@@ -170,6 +172,7 @@ func (p *Progress) String() string {
 type ProgressSnap struct {
 	State         string  `json:"state"`
 	Downloaded    int64   `json:"downloaded"`
+	Uploaded      int64   `json:"uploaded"`
 	Total         int64   `json:"total"`
 	Percent       float64 `json:"percent"`
 	DownSpeed     int64   `json:"down_speed"`
@@ -198,6 +201,7 @@ func (p *Progress) Snap() ProgressSnap {
 
 	return ProgressSnap{
 		Downloaded:  downloaded,
+		Uploaded:    p.uploaded.Load(),
 		Total:       p.totalBytes,
 		Percent:     pct,
 		DownSpeed:   speed,
