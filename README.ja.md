@@ -2,11 +2,11 @@
 
 [English](README.md)
 
-Go でフルスクラッチ実装した BitTorrent クライアント。外部のトレントライブラリに依存せず、bencode から uTP まで BEP 仕様に準拠して構築。
+**外部ライブラリゼロ、単一バイナリの BitTorrent クライアント。** デーモン・Web UI・14 の BEP を bencode から uTP までフルスクラッチで Go 実装。
 
 ## 動機
 
-Go の BitTorrent 実装の多くは anacrolix/torrent 等のラッパー。stor はプロトコルを理解するために一から実装し、Deluge + WebUI + ブラウザ拡張という構成を単一バイナリで置き換えることを目指している。
+Go の BitTorrent 実装の多くは anacrolix/torrent 等のラッパー。stor は Deluge + WebUI + ブラウザ拡張を `go build` 一発、9 MB の Docker イメージに置き換える。
 
 ## プロトコル対応状況
 

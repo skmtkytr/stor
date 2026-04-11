@@ -2,11 +2,11 @@
 
 [日本語](README.ja.md)
 
-A BitTorrent client built from the ground up in Go — no third-party torrent libraries. Every layer, from bencoding to uTP, follows the BEP specifications directly.
+**Zero-dependency BitTorrent in a single binary.** Daemon, Web UI, and 14 BEPs — from bencoding to uTP — implemented from scratch in Go with no third-party torrent libraries.
 
 ## Why
 
-Most Go BitTorrent implementations wrap anacrolix/torrent or similar. stor exists to understand the protocol by implementing it, and to ship a self-contained daemon that replaces a Deluge + WebUI + browser extension stack with a single binary.
+Most Go BitTorrent implementations wrap anacrolix/torrent or similar. stor replaces a Deluge + WebUI + browser extension stack with one `go build` and one 9 MB Docker image.
 
 ## Protocol Support
 
