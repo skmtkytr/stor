@@ -49,11 +49,13 @@ ref: https://www.bittorrent.org/beps/bep_0000.html
 - connect → announce の 2段階。connection_id で IP spoofing 防止
 - 多くのトラッカーが UDP を採用しているため必要
 
-### Phase 3: DHT (トラッカーレス)
+### Phase 3: DHT + ピア発見
 
 | BEP | タイトル | 状態 | 対応パッケージ | 実装状況 |
 |-----|---------|------|--------------|---------|
 | [BEP 5](https://www.bittorrent.org/beps/bep_0005.html) | DHT Protocol | Accepted | `dht/` | ✅ 完了 |
+| [BEP 11](https://www.bittorrent.org/beps/bep_0011.html) | Peer Exchange (PEX) | Accepted | `peer/` | ✅ 完了 |
+| [BEP 12](https://www.bittorrent.org/beps/bep_0012.html) | Multitracker Metadata Extension | Accepted | `torrent/` | ✅ 完了 |
 
 **BEP 5 (DHT):**
 - Kademlia ベースの分散ハッシュテーブル
@@ -61,16 +63,39 @@ ref: https://www.bittorrent.org/beps/bep_0000.html
 - 4つのクエリ: `ping`, `find_node`, `get_peers`, `announce_peer`
 - XOR 距離メトリック、K-bucket ルーティングテーブル (K=8)
 
+**BEP 11 (PEX):**
+- BEP 10 の `ut_pex` 拡張として動作
+- Compact peer encoding (6バイト: 4byte IPv4 + 2byte port)
+- Added / Dropped 差分通知
+
+**BEP 12 (Multitracker):**
+- `announce-list` フィールドから複数トラッカーを並列アナウンス
+- tier ベースのフォールバック
+
+### Phase 4: トランスポート
+
+| BEP | タイトル | 状態 | 対応パッケージ | 実装状況 |
+|-----|---------|------|--------------|---------|
+| [BEP 29](https://www.bittorrent.org/beps/bep_0029.html) | uTP (Micro Transport) | Accepted | `utp/` | ✅ 完了 |
+| — | MSE/PE (Protocol Encryption) | — | `mse/` | ✅ 完了 |
+
+**BEP 29 (uTP):**
+- UDP ベースのトランスポート、LEDBAT 輻輳制御
+- net.Conn / net.Listener インターフェース準拠
+- `enable_utp = true` で有効化。TCP へのフォールバック付き
+
+**MSE/PE:**
+- 768-bit DH 鍵交換 + RC4 暗号化
+- Plaintext / RC4 の自動ネゴシエーション
+- 適応的プロトコル選択（成功したプロトコルを学習）
+
 ### 将来的に対応を検討
 
 | BEP | タイトル | 状態 | 用途 |
 |-----|---------|------|------|
 | [BEP 6](https://www.bittorrent.org/beps/bep_0006.html) | Fast Extension | Accepted | have-all/have-none/reject/suggest/allowed-fast |
-| [BEP 11](https://www.bittorrent.org/beps/bep_0011.html) | Peer Exchange (PEX) | Accepted | Peer 同士で peer リストを交換 |
-| [BEP 12](https://www.bittorrent.org/beps/bep_0012.html) | Multitracker Metadata Extension | Accepted | announce-list (複数 tracker) |
 | [BEP 19](https://www.bittorrent.org/beps/bep_0019.html) | WebSeed (GetRight) | Accepted | HTTP/FTP サーバからピース取得 |
 | [BEP 27](https://www.bittorrent.org/beps/bep_0027.html) | Private Torrents | Accepted | DHT/PEX 無効化フラグ |
-| [BEP 29](https://www.bittorrent.org/beps/bep_0029.html) | uTP (Micro Transport) | Accepted | UDP ベースの輻輳制御付きトランスポート |
 | [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) | BitTorrent v2 | Draft | Merkle tree, SHA-256, per-file piece tree |
 
 ## プロトコル主要フォーマット早見表

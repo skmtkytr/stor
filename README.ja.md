@@ -19,17 +19,18 @@ Go の BitTorrent 実装の多くは anacrolix/torrent 等のラッパー。stor
 | 11 | ピア交換 (PEX) | 実装済 |
 | 15 | UDP トラッカープロトコル | 実装済 |
 | 23 | コンパクトピアリスト | 実装済 |
+| 12 | マルチトラッカー拡張 | 実装済 |
 | 29 | uTP (Micro Transport Protocol) | 実装済（LEDBAT 輻輳制御） |
 | — | MSE/PE（プロトコル暗号化） | 実装済（DH + RC4、平文フォールバック） |
 
 ## 主な機能
 
-- **ダウンロード**: rarest-first ピース選択、endgame モード、ピース検証付きレジューム
-- **アップロード**: ダウンロード完了後の自動シード、incoming ピア受付、upload choking
-- **ピア管理**: 動的ピア注入、定期 re-announce、ピア再接続、PEX
-- **暗号化**: MSE/PE（RC4）、自動平文フォールバック
-- **デーモン**: JSON-RPC 2.0 API、永続キュー、チューニング設定
-- **Web UI**: Deluge 風レイアウト、リアルタイム統計、フィルタ/ソート
+- **ダウンロード**: rarest-first ピース選択、endgame モード、ピース検証付きレジューム、マルチファイル対応
+- **アップロード**: ダウンロード完了後の自動シード、incoming ピア受付、BEP 3 チョーキングアルゴリズム
+- **ピア管理**: 動的ピア注入、定期 re-announce、ピア再接続、PEX、マルチトラッカー
+- **トランスポート**: TCP / uTP (LEDBAT)、MSE/PE 暗号化（RC4）、自動平文フォールバック
+- **デーモン**: JSON-RPC 2.0 API、永続キュー、チューニング設定、Web 設定画面
+- **Web UI**: Deluge 風レイアウト、リアルタイム統計、フィルタ/ソート、設定エディタ
 - **Chrome 拡張**: `.torrent` / `magnet:` リンク自動キャプチャ、ポップアップ管理
 - **Docker**: マルチアーキ（amd64/arm64）、約 9 MB distroless イメージ
 
@@ -72,7 +73,9 @@ services:
 ```toml
 port = 9090
 download_dir = "~/Downloads"
+tmp_dir = ""          # DL中の一時フォルダ（空 = download_dir を使用）
 max_active = 5
+log_level = "info"    # debug, info, warn, error
 
 # ピア・トラッカーのチューニング
 max_peers = 100       # トレントあたりの同時接続数
@@ -80,7 +83,10 @@ max_pipeline = 16     # ピアあたりの未応答リクエスト数
 dial_timeout = 3      # 秒
 numwant = 200         # トラッカーへのピア要求数
 dht_alpha = 8         # DHT lookup の並列度
+enable_utp = false    # uTP トランスポート有効化（LEDBAT 輻輳制御）
 ```
+
+ほとんどの設定は Web UI の設定画面または `daemon.setConfig` RPC から実行時に変更可能。
 
 ## Chrome 拡張
 
@@ -98,6 +104,7 @@ cmd/stor/       エントリポイント — デーモン / スタンドアロ�
 daemon/         HTTP サーバー、JSON-RPC 2.0 API、設定管理
 engine/         トレントライフサイクル、キュースケジューリング、マグネット並列解決
 download/       ピース I/O、rarest-first、endgame、ピアマネージャー、チョーキング
+storage/        マルチファイル書き込み、ピース検証、ファイルハンドルキャッシュ
 peer/           ワイヤープロトコル、BEP 10/11 拡張、PEX
 tracker/        HTTP / UDP アナウンスクライアント
 dht/            Kademlia ルーティングテーブル、反復探索、get_peers
