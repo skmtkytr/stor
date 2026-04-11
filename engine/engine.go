@@ -99,6 +99,9 @@ type Engine struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 
+	// Global dial semaphore shared across all torrents
+	dialSem chan struct{}
+
 	// Periodic save
 	saveTicker *time.Ticker
 	saveStop   chan struct{}
@@ -146,11 +149,16 @@ func New(cfg Config) (*Engine, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Global dial semaphore: limits total concurrent outgoing dials across all torrents
+	const maxGlobalDials = 50
+	dialSem := make(chan struct{}, maxGlobalDials)
+
 	e := &Engine{
 		cfg:      cfg,
 		peerID:   peerID,
 		store:    store,
 		sessions: make(map[string]*Session),
+		dialSem:  dialSem,
 		ctx:      ctx,
 		cancel:   cancel,
 	}
@@ -710,6 +718,7 @@ func (e *Engine) downloadConfig() download.DownloadConfig {
 		DialTimeout: e.cfg.DialTimeout,
 		Encryption:  true, // always try MSE/PE in production
 		EnableUTP:   e.cfg.EnableUTP,
+		DialSem:     e.dialSem, // shared across all torrents
 	}
 }
 

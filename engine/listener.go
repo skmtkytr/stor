@@ -11,6 +11,8 @@ import (
 	"github.com/skmtkytr/stor/utp"
 )
 
+const maxIncomingConns = 200 // global limit on concurrent incoming peer connections
+
 // PeerListener accepts incoming TCP (and optionally uTP) connections
 // from peers and routes them to the appropriate session by info hash.
 type PeerListener struct {
@@ -19,6 +21,7 @@ type PeerListener struct {
 	mu       sync.RWMutex
 	handlers map[[20]byte]IncomingPeerHandler
 	closed   chan struct{}
+	sem      chan struct{} // limits concurrent incoming connections
 }
 
 // IncomingPeerHandler handles an incoming peer connection for a specific torrent.
@@ -36,6 +39,7 @@ func NewPeerListener(addr string) (*PeerListener, error) {
 		tcpLn:    ln,
 		handlers: make(map[[20]byte]IncomingPeerHandler),
 		closed:   make(chan struct{}),
+		sem:      make(chan struct{}, maxIncomingConns),
 	}, nil
 }
 
@@ -55,6 +59,7 @@ func NewPeerListenerWithUTP(addr string) (*PeerListener, error) {
 		utpLn:    utpLn,
 		handlers: make(map[[20]byte]IncomingPeerHandler),
 		closed:   make(chan struct{}),
+		sem:      make(chan struct{}, maxIncomingConns),
 	}, nil
 }
 
@@ -114,6 +119,14 @@ func (pl *PeerListener) Close() error {
 }
 
 func (pl *PeerListener) handleConn(conn net.Conn) {
+	// Limit concurrent incoming connections to avoid NAT session exhaustion
+	select {
+	case pl.sem <- struct{}{}:
+		defer func() { <-pl.sem }()
+	default:
+		_ = conn.Close()
+		return
+	}
 	defer func() { _ = conn.Close() }()
 
 	// Read the incoming handshake to get info hash

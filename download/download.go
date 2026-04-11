@@ -31,12 +31,13 @@ const (
 
 // DownloadConfig holds tunable parameters for the download engine.
 type DownloadConfig struct {
-	MaxPeers    int  // max concurrent peer connections
-	MaxPipeline int  // outstanding requests per peer
-	DialTimeout int  // peer dial timeout in seconds
-	Encryption  bool // attempt MSE/PE encryption (default: true)
-	EnableUTP   bool // try uTP before TCP for peer connections
-	DisablePEX  bool // BEP 27: do not advertise or use PEX
+	MaxPeers    int           // max concurrent peer connections
+	MaxPipeline int           // outstanding requests per peer
+	DialTimeout int           // peer dial timeout in seconds
+	Encryption  bool          // attempt MSE/PE encryption (default: true)
+	EnableUTP   bool          // try uTP before TCP for peer connections
+	DisablePEX  bool          // BEP 27: do not advertise or use PEX
+	DialSem     chan struct{} // shared global dial semaphore (nil = create per-torrent)
 }
 
 // DefaultDownloadConfig returns default download config.
@@ -824,13 +825,15 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 	piecePool := newPiecePool(pq.maxPieceLen())
 
 	sem := make(chan struct{}, cfg.MaxPeers)
-	// Limit concurrent dial attempts to avoid NAT session exhaustion.
-	// sem limits established connections; dialSem limits in-flight dials.
-	maxDials := cfg.MaxPeers / 4
-	if maxDials < 10 {
-		maxDials = 10
+	// Use shared global dial semaphore if provided, otherwise create per-torrent.
+	dialSem := cfg.DialSem
+	if dialSem == nil {
+		maxDials := cfg.MaxPeers / 4
+		if maxDials < 10 {
+			maxDials = 10
+		}
+		dialSem = make(chan struct{}, maxDials)
 	}
-	dialSem := make(chan struct{}, maxDials)
 	seen := &sync.Map{}
 	var preferEncrypt atomic.Bool
 

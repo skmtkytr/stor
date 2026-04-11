@@ -217,6 +217,7 @@ func DialTimeout(addr string, timeout time.Duration) (net.Conn, error) {
 		}
 	}
 	_ = udpConn.SetReadDeadline(time.Time{})
+	c.ownsUDP = true // this connection owns the UDP socket
 
 	// Start read loop for this connection
 	go c.clientReadLoop(udpConn)

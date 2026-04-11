@@ -25,6 +25,7 @@ type Conn struct {
 	closed   bool
 	closeCh  chan struct{}
 	deadline time.Time
+	ownsUDP  bool // true for outgoing (client) connections that own the UDP socket
 }
 
 // newConn creates a uTP connection.
@@ -154,6 +155,11 @@ func (c *Conn) Close() error {
 	}
 	c.mu.Unlock()
 	_, _ = c.udpConn.WriteToUDP(pkt.Marshal(), c.remote)
+	// Close the underlying UDP socket for outgoing connections (we own it).
+	// Server-side connections share the listener's socket and must not close it.
+	if c.ownsUDP {
+		_ = c.udpConn.Close()
+	}
 	return nil
 }
 
