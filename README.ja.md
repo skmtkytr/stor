@@ -24,6 +24,7 @@ Go の BitTorrent 実装の多くは anacrolix/torrent 等のラッパー。stor
 | 19 | WebSeed (GetRight) | 実装済（HTTP Range、マルチファイル対応） |
 | 27 | Private Torrents | 実装済（DHT/PEX 自動無効化） |
 | 29 | uTP (Micro Transport Protocol) | 実装済（LEDBAT 輻輳制御） |
+| 52 | BitTorrent v2 | 部分対応（hybrid パース + v1 ダウンロード） |
 | — | MSE/PE（プロトコル暗号化） | 実装済（DH + RC4、平文フォールバック） |
 
 ## 主な機能

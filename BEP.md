@@ -111,11 +111,21 @@ ref: https://www.bittorrent.org/beps/bep_0000.html
 - info dict の `private: 1` フラグをパース
 - private 時は DHT / PEX を自動無効化、トラッカーのみ使用
 
-### 将来的に対応を検討
+### Phase 6: BitTorrent v2
 
-| BEP | タイトル | 状態 | 用途 |
-|-----|---------|------|------|
-| [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) | BitTorrent v2 | Draft | Merkle tree, SHA-256, per-file piece tree |
+| BEP | タイトル | 状態 | 対応パッケージ | 実装状況 |
+|-----|---------|------|--------------|---------|
+| [BEP 52](https://www.bittorrent.org/beps/bep_0052.html) | BitTorrent v2 | Draft | `torrent/`, `magnet/` | ⚡ Partial |
+
+**BEP 52 (BitTorrent v2) — 現在の対応範囲:**
+- ✅ hybrid torrent (v1 + v2) のパースと v1 経路でのダウンロード
+- ✅ `meta version: 2` 検出、`file tree` の raw 保持
+- ✅ SHA-256 による InfoHashV2 計算
+- ✅ magnet URI の `urn:btmh:1220<hex>` パース (hybrid)
+- ❌ v2-only torrent のダウンロード（明示的エラー）
+- ❌ SHA-256 ピースハッシュでの検証
+- ❌ per-file Merkle tree
+- ❌ 32byte InfoHash のプロトコル層使用
 
 ## プロトコル主要フォーマット早見表
 

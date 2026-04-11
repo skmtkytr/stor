@@ -24,6 +24,7 @@ Most Go BitTorrent implementations wrap anacrolix/torrent or similar. stor exist
 | 19 | WebSeed (GetRight) | Implemented (HTTP Range, multi-file) |
 | 27 | Private Torrents | Implemented (DHT/PEX auto-disable) |
 | 29 | uTP (Micro Transport Protocol) | Implemented (LEDBAT congestion control) |
+| 52 | BitTorrent v2 | Partial (hybrid parse + v1 download) |
 | — | MSE/PE (Protocol Encryption) | Implemented (DH + RC4, plaintext fallback) |
 
 ## Features
