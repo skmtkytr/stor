@@ -154,29 +154,44 @@ chrome.downloads.onCreated.addListener(async (item) => {
 });
 
 // --- Magnet link interception ---
-// webNavigation.onBeforeNavigate detects magnet: navigations but cannot cancel them.
-// We use tabs.update to redirect the tab away from the magnet: URL, preventing
-// the browser from passing it to the OS protocol handler (xdg-open etc.).
+// Track tab URLs so we can restore them when a magnet: navigation is intercepted.
+// This is more reliable than goBack() which depends on history.
+const tabUrls = new Map();
 
+chrome.tabs.onUpdated.addListener((tabId, _change, tab) => {
+  if (tab.url && !tab.url.startsWith("magnet:")) {
+    tabUrls.set(tabId, tab.url);
+  }
+});
+chrome.tabs.onRemoved.addListener((tabId) => tabUrls.delete(tabId));
+
+// Cache config for synchronous access in the navigation handler.
+let cachedHandleMagnets = true;
+async function refreshMagnetConfig() {
+  const cfg = await getConfig();
+  cachedHandleMagnets = cfg.handleMagnets;
+}
+refreshMagnetConfig();
+chrome.storage.onChanged.addListener(() => refreshMagnetConfig());
+
+// onBeforeNavigate fires for magnet: URLs but cannot cancel them.
+// We immediately redirect the tab to prevent the browser from passing
+// the URL to xdg-open (Linux) or other OS protocol handlers.
 chrome.webNavigation.onBeforeNavigate.addListener(
-  async (details) => {
+  (details) => {
     if (!details.url.startsWith("magnet:")) return;
-    const cfg = await getConfig();
-    if (!cfg.handleMagnets) return;
+    if (!cachedHandleMagnets) return;
 
     addTorrentUrl(details.url);
 
-    // Redirect the tab to prevent the browser from handing off to OS
-    // For main frame navigations, go back or close the blank tab
     if (details.frameId === 0) {
-      try {
-        // Navigate back to stop the magnet: protocol handler
-        chrome.tabs.goBack(details.tabId).catch(() => {
-          // If no history (new tab opened for magnet), close it
-          chrome.tabs.remove(details.tabId).catch(() => {});
-        });
-      } catch {
-        // Ignore errors (tab may already be gone)
+      const prevUrl = tabUrls.get(details.tabId);
+      if (prevUrl) {
+        // Restore the tab to its previous URL
+        chrome.tabs.update(details.tabId, { url: prevUrl }).catch(() => {});
+      } else {
+        // New tab with no history — close it
+        chrome.tabs.remove(details.tabId).catch(() => {});
       }
     }
   },
