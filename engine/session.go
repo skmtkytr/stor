@@ -240,6 +240,9 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	if s.tmpDir != "" {
 		dlDir = s.tmpDir
 	}
+	if err := os.MkdirAll(dlDir, 0o755); err != nil {
+		return fmt.Errorf("session: create download dir: %w", err)
+	}
 	savePath := filepath.Join(dlDir, s.tf.Info.Name)
 
 	// Resume: verify existing pieces
