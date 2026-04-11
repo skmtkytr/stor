@@ -361,7 +361,9 @@ func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
 		h.cfg.EnableUTP = *p.EnableUTP
 	}
 
-	_ = h.cfg.Save()
+	if err := h.cfg.Save(); err != nil {
+		slog.Warn("config save failed", "error", err)
+	}
 	return struct{}{}, nil
 }
 

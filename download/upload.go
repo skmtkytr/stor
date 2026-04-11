@@ -168,12 +168,12 @@ func (u *Uploader) serveLoop(c *Client) {
 
 		case peer.MsgRequest:
 			if c.IsChoking() {
-				// BEP 6: send reject if peer supports fast extension
 				if c.fastExt {
-					idx, begin, length, _ := peer.ParseRequest(msg.Payload)
-					rejectMsg := peer.NewRejectMessage(idx, begin, length)
-					_ = rejectMsg.Write(c.w)
-					_ = c.w.Flush()
+					if idx, begin, length, err := peer.ParseRequest(msg.Payload); err == nil {
+						rejectMsg := peer.NewRejectMessage(idx, begin, length)
+						_ = rejectMsg.Write(c.w)
+						_ = c.w.Flush()
+					}
 				}
 				continue
 			}

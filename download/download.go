@@ -914,6 +914,9 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				select {
 				case resultCh <- PieceResult{Index: pw.Index, Data: data, Release: release}:
 				case <-ctx.Done():
+					if release != nil {
+						release()
+					}
 					return
 				}
 			}

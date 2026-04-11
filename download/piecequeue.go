@@ -2,6 +2,7 @@ package download
 
 import (
 	"math/rand/v2"
+	"slices"
 	"sync"
 
 	"github.com/skmtkytr/stor/peer"
@@ -85,27 +86,17 @@ func (pq *PieceQueue) Pick(hasPiece func(int) bool) (PieceWork, bool) {
 		}
 	}
 
-	// Walk buckets from lowest availability upward.
-	// Find minimum availability first, then scan upward.
-	minAvail := int(^uint(0) >> 1)
-	maxAvail := 0
+	// Collect non-empty bucket levels and sort ascending.
+	avails := make([]int, 0, len(pq.buckets))
 	for a, b := range pq.buckets {
-		if len(b) == 0 {
-			continue
-		}
-		if a < minAvail {
-			minAvail = a
-		}
-		if a > maxAvail {
-			maxAvail = a
+		if len(b) > 0 {
+			avails = append(avails, a)
 		}
 	}
+	slices.Sort(avails)
 
-	for avail := minAvail; avail <= maxAvail; avail++ {
+	for _, avail := range avails {
 		bucket := pq.buckets[avail]
-		if len(bucket) == 0 {
-			continue
-		}
 		// Count eligible pieces and pick one randomly using reservoir sampling
 		var chosen int
 		count := 0
@@ -189,10 +180,11 @@ func (pq *PieceQueue) IsDone(index int) bool {
 }
 
 // AddPeerBitfield updates availability for all pieces a peer has.
+// A nil bitfield means "have all" (BEP 6 have-all).
 func (pq *PieceQueue) AddPeerBitfield(bf peer.Bitfield) {
 	pq.mu.Lock()
 	for idx := range pq.pieces {
-		if bf.HasPiece(idx) {
+		if bf == nil || bf.HasPiece(idx) {
 			old := pq.availability[idx]
 			pq.availability[idx]++
 			pq.moveBucket(idx, old, old+1)
@@ -203,10 +195,11 @@ func (pq *PieceQueue) AddPeerBitfield(bf peer.Bitfield) {
 }
 
 // RemovePeerBitfield decrements availability for pieces a peer had.
+// A nil bitfield means "have all" (BEP 6 have-all).
 func (pq *PieceQueue) RemovePeerBitfield(bf peer.Bitfield) {
 	pq.mu.Lock()
 	for idx := range pq.pieces {
-		if bf.HasPiece(idx) {
+		if bf == nil || bf.HasPiece(idx) {
 			old := pq.availability[idx]
 			pq.availability[idx]--
 			pq.moveBucket(idx, old, old-1)
