@@ -144,3 +144,15 @@ func (pm *PeerManager) PeerCount() int {
 	defer pm.mu.Unlock()
 	return len(pm.peers)
 }
+
+// BroadcastHave sends MsgHave to all connected peers for a completed piece.
+func (pm *PeerManager) BroadcastHave(index int) {
+	pm.mu.Lock()
+	peers := make([]*Client, len(pm.peers))
+	copy(peers, pm.peers)
+	pm.mu.Unlock()
+
+	for _, c := range peers {
+		_ = c.SendHave(index)
+	}
+}

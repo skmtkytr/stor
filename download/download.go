@@ -86,6 +86,7 @@ type Client struct {
 	conn           net.Conn
 	r              *bufio.Reader
 	w              *bufio.Writer
+	wmu            sync.Mutex // protects w from concurrent writes (BroadcastHave vs DownloadPiece)
 	peerID         [20]byte
 	infoHash       [20]byte
 	bitfield       peer.Bitfield
@@ -147,6 +148,8 @@ func (c *Client) SendChoke() error {
 	if c.choking {
 		return nil
 	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
 	msg := &peer.Message{ID: peer.MsgChoke}
 	if err := msg.Write(c.w); err != nil {
 		return err
@@ -163,6 +166,8 @@ func (c *Client) SendUnchoke() error {
 	if !c.choking {
 		return nil
 	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
 	msg := &peer.Message{ID: peer.MsgUnchoke}
 	if err := msg.Write(c.w); err != nil {
 		return err
@@ -385,10 +390,48 @@ func (c *Client) HasPiece(index int) bool {
 	return c.bitfield.HasPiece(index)
 }
 
+// SendBitfield sends our bitfield to the peer so they know what pieces
+// we have and can request them from us.
+func (c *Client) SendBitfield(bf peer.Bitfield) error {
+	if len(bf) == 0 {
+		return nil
+	}
+	hasAny := false
+	for _, b := range bf {
+		if b != 0 {
+			hasAny = true
+			break
+		}
+	}
+	if !hasAny {
+		return nil
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	msg := &peer.Message{ID: peer.MsgBitfield, Payload: bf}
+	if err := msg.Write(c.w); err != nil {
+		return err
+	}
+	return c.w.Flush()
+}
+
+// SendHave sends a have message for a single piece. Thread-safe.
+func (c *Client) SendHave(index int) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	msg := peer.NewHaveMessage(uint32(index))
+	if err := msg.Write(c.w); err != nil {
+		return err
+	}
+	return c.w.Flush()
+}
+
 func (c *Client) sendInterested() error {
 	if c.sentInterested {
 		return nil
 	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
 	msg := &peer.Message{ID: peer.MsgInterested}
 	if err := msg.Write(c.w); err != nil {
 		return err
@@ -442,8 +485,10 @@ func (c *Client) handleRequest(payload []byte) {
 		return
 	}
 	msg := peer.NewPieceMessage(index, begin, block)
+	c.wmu.Lock()
 	_ = msg.Write(c.w)
 	_ = c.w.Flush()
+	c.wmu.Unlock()
 	c.uploaded.Add(int64(len(block)))
 }
 
@@ -485,6 +530,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 
 	for downloaded < pw.Length {
 		flushed := false
+		c.wmu.Lock()
 		for backlog < c.maxPipeline && requested < pw.Length {
 			blockSize := BlockSize
 			if requested+blockSize > pw.Length {
@@ -492,6 +538,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 			}
 			req := peer.NewRequestMessage(uint32(pw.Index), uint32(requested), uint32(blockSize))
 			if err := req.Write(c.w); err != nil {
+				c.wmu.Unlock()
 				return fail(err)
 			}
 			requested += blockSize
@@ -500,9 +547,11 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 		}
 		if !flushed {
 			if err := c.w.Flush(); err != nil {
+				c.wmu.Unlock()
 				return fail(err)
 			}
 		}
+		c.wmu.Unlock()
 
 		msg, err := peer.ReadMessage(c.r)
 		if err != nil {
@@ -813,7 +862,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 	}
 
 	pq := NewPieceQueue(pieces)
-	resultCh := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.PeerSink, p.Progress, p.Cfg, p.OnRequest, p.TF, p.WebSeedURLs)
+	resultCh, pm := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.PeerSink, p.Progress, p.Cfg, p.OnRequest, p.HaveBF, p.TF, p.WebSeedURLs)
 
 	pieceLength := int(p.TF.Info.PieceLength)
 	for completed := 0; completed < remaining; {
@@ -834,6 +883,8 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 			}
 			p.Progress.Add(len(res.Data))
 			res.Free()
+			// Notify all connected peers that we have this piece
+			pm.BroadcastHave(res.Index)
 			if p.OnPiece != nil {
 				p.OnPiece(res.Index)
 			}
@@ -845,7 +896,8 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 }
 
 // runWorkers launches peer workers with rarest-first piece selection and dynamic peer injection.
-func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peerID [20]byte, pq *PieceQueue, peerCh <-chan []tracker.Peer, peerSink chan<- []tracker.Peer, progress *Progress, cfg DownloadConfig, onRequest func(uint32, uint32, uint32) []byte, tf *torrent.TorrentFile, webSeedURLs []string) <-chan PieceResult {
+// Returns result channel and PeerManager (for MsgHave broadcasting).
+func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peerID [20]byte, pq *PieceQueue, peerCh <-chan []tracker.Peer, peerSink chan<- []tracker.Peer, progress *Progress, cfg DownloadConfig, onRequest func(uint32, uint32, uint32) []byte, haveBF peer.Bitfield, tf *torrent.TorrentFile, webSeedURLs []string) (<-chan PieceResult, *PeerManager) {
 	resultCh := make(chan PieceResult, 64)
 
 	pm := NewPeerManager(DefaultUnchokeSlots)
@@ -918,6 +970,11 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				client.OnRequest = onRequest
 			}
 			defer func() { _ = client.Close() }()
+
+			// Tell the peer what pieces we have so they can request from us
+			if haveBF != nil {
+				_ = client.SendBitfield(haveBF)
+			}
 
 			pq.AddPeerBitfield(client.bitfield)
 			defer pq.RemovePeerBitfield(client.bitfield)
@@ -1083,7 +1140,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		close(resultCh)
 	}()
 
-	return resultCh
+	return resultCh, pm
 }
 
 func deduplicatePeers(peers []tracker.Peer) []tracker.Peer {
