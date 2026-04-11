@@ -9,9 +9,14 @@ import (
 	"github.com/skmtkytr/stor/torrent"
 )
 
+// readAtReader abstracts single-file and multi-file read targets.
+type readAtReader interface {
+	ReadAt([]byte, int64) (int, error)
+}
+
 // VerifyPieces reads existing file data, hashes each piece, and returns
 // a Bitfield of verified pieces along with the count of valid pieces.
-// If the file doesn't exist or is too small, returns an empty bitfield.
+// Supports both single-file and multi-file torrents.
 func VerifyPieces(path string, tf *torrent.TorrentFile) (peer.Bitfield, int, error) {
 	numPieces := len(tf.Info.PieceHashes)
 	tl := TotalSize(tf)
@@ -19,15 +24,26 @@ func VerifyPieces(path string, tf *torrent.TorrentFile) (peer.Bitfield, int, err
 
 	bf := make(peer.Bitfield, (numPieces+7)/8)
 
-	f, err := os.Open(path)
-	if err != nil {
-		return bf, 0, nil // file doesn't exist, all pieces missing
-	}
-	defer func() { _ = f.Close() }()
+	var r readAtReader
+	if IsMultiFile(tf) {
+		mw, err := NewMultiFileWriter(path, tf)
+		if err != nil {
+			return bf, 0, nil // directory doesn't exist
+		}
+		r = mw
+	} else {
+		f, err := os.Open(path)
+		if err != nil {
+			return bf, 0, nil // file doesn't exist
+		}
+		defer func() { _ = f.Close() }()
 
-	info, err := f.Stat()
-	if err != nil {
-		return bf, 0, fmt.Errorf("verify: stat failed: %w", err)
+		info, err := f.Stat()
+		if err != nil {
+			return bf, 0, fmt.Errorf("verify: stat failed: %w", err)
+		}
+		_ = info // size checked per-piece via ReadAt errors
+		r = f
 	}
 
 	verified := 0
@@ -39,13 +55,8 @@ func VerifyPieces(path string, tf *torrent.TorrentFile) (peer.Bitfield, int, err
 			length = remaining
 		}
 
-		// Skip if file is too small for this piece
-		if offset+int64(length) > info.Size() {
-			break
-		}
-
 		buf := make([]byte, length)
-		n, err := f.ReadAt(buf, offset)
+		n, err := r.ReadAt(buf, offset)
 		if err != nil || n != length {
 			continue
 		}

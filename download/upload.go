@@ -108,12 +108,23 @@ func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {
 }
 
 func (u *Uploader) serveLoop(c *Client) {
-	f, err := os.Open(u.filePath)
-	if err != nil {
-		slog.Error("upload: open file failed", "path", u.filePath, "error", err)
-		return
+	var r readAtReader
+	if IsMultiFile(u.tf) {
+		mw, err := NewMultiFileWriter(u.filePath, u.tf)
+		if err != nil {
+			slog.Error("upload: open multi-file dir failed", "path", u.filePath, "error", err)
+			return
+		}
+		r = mw
+	} else {
+		f, err := os.Open(u.filePath)
+		if err != nil {
+			slog.Error("upload: open file failed", "path", u.filePath, "error", err)
+			return
+		}
+		defer func() { _ = f.Close() }()
+		r = f
 	}
-	defer func() { _ = f.Close() }()
 
 	pieceLen := int64(u.tf.Info.PieceLength)
 	totalSize := TotalSize(u.tf)
@@ -161,7 +172,7 @@ func (u *Uploader) serveLoop(c *Client) {
 			}
 
 			block := make([]byte, length)
-			n, err := f.ReadAt(block, offset)
+			n, err := r.ReadAt(block, offset)
 			if err != nil || n != int(length) {
 				slog.Debug("upload: read failed", "addr", c.Addr, "error", err)
 				return

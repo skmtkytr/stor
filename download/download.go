@@ -605,6 +605,12 @@ func DownloadToFileCtxWithConfig(ctx context.Context, tf *torrent.TorrentFile, p
 	})
 }
 
+// writeAtCloser abstracts single-file and multi-file write targets.
+type writeAtCloser interface {
+	WriteAt([]byte, int64) (int, error)
+	Close() error
+}
+
 // DownloadWithParams runs a download session with full control over parameters.
 // Supports dynamic peer injection via PeerCh and resume via Have bitfield.
 func DownloadWithParams(ctx context.Context, p DownloadParams) error {
@@ -612,16 +618,29 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 	numPieces := len(p.TF.Info.PieceHashes)
 	peers := deduplicatePeers(p.Peers)
 
-	// Open file for resume (preserve existing data)
-	f, err := os.OpenFile(p.Path, os.O_RDWR|os.O_CREATE, 0o644)
-	if err != nil {
-		return err
+	// Open write target: single file or multi-file directory
+	var w writeAtCloser
+	if IsMultiFile(p.TF) {
+		mw, err := NewMultiFileWriter(p.Path, p.TF)
+		if err != nil {
+			return err
+		}
+		if err := mw.PreallocateFiles(); err != nil {
+			return fmt.Errorf("download: preallocate failed: %w", err)
+		}
+		w = mw
+	} else {
+		f, err := os.OpenFile(p.Path, os.O_RDWR|os.O_CREATE, 0o644)
+		if err != nil {
+			return err
+		}
+		if err := f.Truncate(tl); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("download: truncate failed: %w", err)
+		}
+		w = f
 	}
-	defer func() { _ = f.Close() }()
-
-	if err := f.Truncate(tl); err != nil {
-		return fmt.Errorf("download: truncate failed: %w", err)
-	}
+	defer func() { _ = w.Close() }()
 
 	// Count already-completed pieces and build work queue for remaining
 	alreadyDone := 0
@@ -669,7 +688,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 				return nil
 			}
 			offset := int64(res.Index) * int64(pieceLength)
-			if _, err := f.WriteAt(res.Data, offset); err != nil {
+			if _, err := w.WriteAt(res.Data, offset); err != nil {
 				return fmt.Errorf("download: write piece %d failed: %w", res.Index, err)
 			}
 			p.Progress.Add(len(res.Data))
