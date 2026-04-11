@@ -2,6 +2,7 @@ package torrent
 
 import (
 	"crypto/sha1"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
@@ -13,7 +14,9 @@ type TorrentFile struct {
 	Announce     string
 	AnnounceList [][]string
 	Info         Info
-	InfoHash     [20]byte // SHA1 of the bencoded info dict
+	InfoHash     [20]byte // SHA1 of the bencoded info dict (v1)
+	InfoHashV2   [32]byte // BEP 52: SHA256 of the bencoded info dict (v2/hybrid, zero if v1-only)
+	MetaVersion  int      // 0 = v1 only, 2 = v2 or hybrid
 	WebSeedURLs  []string // BEP 19: HTTP URLs for downloading pieces
 }
 
@@ -21,10 +24,11 @@ type TorrentFile struct {
 type Info struct {
 	Name        string
 	PieceLength int64
-	PieceHashes [][20]byte // Each piece's SHA1 hash
-	Length      int64      // Single file mode (0 if multi-file)
-	Files       []File     // Multi-file mode (empty if single file)
-	Private     bool       // BEP 27: if true, disable DHT and PEX
+	PieceHashes [][20]byte     // Each piece's SHA1 hash
+	Length      int64          // Single file mode (0 if multi-file)
+	Files       []File         // Multi-file mode (empty if single file)
+	Private     bool           // BEP 27: if true, disable DHT and PEX
+	FileTree    map[string]any // BEP 52: raw v2 file tree (nil if v1-only)
 }
 
 // File represents a file entry in a multi-file torrent.
@@ -82,9 +86,19 @@ func Parse(data []byte) (*TorrentFile, error) {
 	}
 	tf.InfoHash = sha1.Sum(infoBencoded)
 
+	// BEP 52: detect v2/hybrid torrents
+	if mv, ok := infoDict["meta version"].(int64); ok && mv == 2 {
+		tf.MetaVersion = 2
+		tf.InfoHashV2 = sha256.Sum256(infoBencoded)
+	}
+
 	// Parse info fields
 	tf.Info, err = parseInfo(infoDict)
 	if err != nil {
+		// BEP 52: v2-only torrents have no "pieces" key — provide a clear error
+		if tf.MetaVersion == 2 {
+			return nil, fmt.Errorf("torrent: v2-only torrents not yet supported (no v1 piece hashes)")
+		}
 		return nil, err
 	}
 
@@ -154,6 +168,11 @@ func parseInfo(d map[string]any) (Info, error) {
 			return info, err
 		}
 		info.Files = files
+	}
+
+	// BEP 52: store raw file tree for future v2 support
+	if ft, ok := d["file tree"].(map[string]any); ok {
+		info.FileTree = ft
 	}
 
 	return info, nil

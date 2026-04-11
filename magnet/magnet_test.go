@@ -81,6 +81,37 @@ func TestParseMagnetInvalidHashLength(t *testing.T) {
 	}
 }
 
+func TestParseMagnetHybridV2(t *testing.T) {
+	// Hybrid magnet with both urn:btih: and urn:btmh:
+	v1Hash := "d69f91e6b2ae4c542468d1073a71d4ea13879a7f"
+	v2Hash := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	uri := "magnet:?xt=urn:btih:" + v1Hash + "&xt=urn:btmh:1220" + v2Hash + "&dn=Hybrid"
+
+	m, err := Parse(uri)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hex.EncodeToString(m.InfoHash[:]) != v1Hash {
+		t.Errorf("v1 hash: got %x", m.InfoHash)
+	}
+	if !m.HasV2 {
+		t.Error("expected HasV2=true")
+	}
+	if hex.EncodeToString(m.InfoHashV2[:]) != v2Hash {
+		t.Errorf("v2 hash: got %x", m.InfoHashV2)
+	}
+}
+
+func TestParseMagnetV2OnlyErrors(t *testing.T) {
+	v2Hash := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	uri := "magnet:?xt=urn:btmh:1220" + v2Hash + "&dn=V2Only"
+
+	_, err := Parse(uri)
+	if err == nil {
+		t.Fatal("expected error for v2-only magnet")
+	}
+}
+
 func TestParseMagnetBase32Hash(t *testing.T) {
 	// Base32-encoded info hash (32 chars)
 	// "d69f91e6b2ae4c542468d1073a71d4ea13879a7f" in base32 is:

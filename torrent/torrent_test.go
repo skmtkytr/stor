@@ -226,6 +226,73 @@ func TestParseWebSeedURLs(t *testing.T) {
 	}
 }
 
+func TestParseHybridTorrent(t *testing.T) {
+	// Hybrid torrent has both v1 pieces and v2 file tree
+	info := map[string]any{
+		"name":         "hybrid.txt",
+		"piece length": int64(262144),
+		"pieces":       fakePieces(2),
+		"length":       int64(524288),
+		"meta version": int64(2),
+		"file tree": map[string]any{
+			"hybrid.txt": map[string]any{
+				"": map[string]any{
+					"length":      int64(524288),
+					"pieces root": "0123456789abcdef0123456789abcdef",
+				},
+			},
+		},
+	}
+	data := buildTestTorrent(t, info, nil)
+
+	tf, err := Parse(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tf.MetaVersion != 2 {
+		t.Errorf("MetaVersion: got %d, want 2", tf.MetaVersion)
+	}
+	// v1 fields should still be parsed
+	if len(tf.Info.PieceHashes) != 2 {
+		t.Errorf("PieceHashes: got %d, want 2", len(tf.Info.PieceHashes))
+	}
+	// InfoHashV2 should be non-zero
+	var zero [32]byte
+	if tf.InfoHashV2 == zero {
+		t.Error("InfoHashV2 should be non-zero for hybrid torrent")
+	}
+	// FileTree should be stored
+	if tf.Info.FileTree == nil {
+		t.Error("FileTree should be stored for hybrid torrent")
+	}
+}
+
+func TestParseV2OnlyTorrentErrors(t *testing.T) {
+	// v2-only torrent has file tree but no pieces key
+	info := map[string]any{
+		"name":         "v2only.txt",
+		"piece length": int64(262144),
+		"meta version": int64(2),
+		"file tree": map[string]any{
+			"v2only.txt": map[string]any{
+				"": map[string]any{
+					"length":      int64(100),
+					"pieces root": "0123456789abcdef0123456789abcdef",
+				},
+			},
+		},
+	}
+	data := buildTestTorrent(t, info, nil)
+
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error for v2-only torrent")
+	}
+	if !strings.Contains(err.Error(), "v2-only") {
+		t.Errorf("error should mention v2-only, got: %v", err)
+	}
+}
+
 func TestParsePrivateTorrent(t *testing.T) {
 	info := map[string]any{
 		"name":         "private.txt",
