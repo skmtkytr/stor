@@ -518,6 +518,9 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 			if int(idx) != pw.Index {
 				continue
 			}
+			if int(begin)+len(block) > len(buf) {
+				return fail(fmt.Errorf("download: piece %d block out of bounds (begin=%d, len=%d, piece=%d)", pw.Index, begin, len(block), len(buf)))
+			}
 			copy(buf[begin:], block)
 			downloaded += len(block)
 			c.downloaded += int64(len(block))
@@ -1023,6 +1026,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		if feederDone != nil {
 			<-feederDone
 		}
+		<-retryDone // wait for retry goroutine to stop spawning workers
 		activeWorkers.Wait()
 		close(resultCh)
 	}()

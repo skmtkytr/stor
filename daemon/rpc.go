@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/skmtkytr/stor/engine"
@@ -33,6 +34,7 @@ type rpcErr struct {
 
 // RPCHandler handles JSON-RPC 2.0 requests.
 type RPCHandler struct {
+	mu     sync.Mutex // protects cfg from concurrent HTTP handlers
 	engine *engine.Engine
 	cfg    *Config
 }
@@ -290,7 +292,9 @@ func (h *RPCHandler) torrentQueueMove(params json.RawMessage, direction string) 
 
 func (h *RPCHandler) daemonStats() (any, *rpcErr) {
 	stats := h.engine.GetStats()
+	h.mu.Lock()
 	stats.Config.LogLevel = h.cfg.LogLevel
+	h.mu.Unlock()
 	return stats, nil
 }
 
@@ -302,8 +306,10 @@ func (h *RPCHandler) daemonSetMaxActive(params json.RawMessage) (any, *rpcErr) {
 		return nil, &rpcErr{Code: -32602, Message: "invalid params: max_active must be >= 1"}
 	}
 	h.engine.SetMaxActive(p.MaxActive)
+	h.mu.Lock()
 	h.cfg.MaxActive = p.MaxActive
 	_ = h.cfg.Save()
+	h.mu.Unlock()
 	return map[string]int{"max_active": p.MaxActive}, nil
 }
 
@@ -324,46 +330,67 @@ func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
 		return nil, &rpcErr{Code: -32602, Message: "invalid params"}
 	}
 
+	// Engine setters are thread-safe; lock only for h.cfg mutations.
 	if p.DownloadDir != nil {
 		h.engine.SetDownloadDir(*p.DownloadDir)
-		h.cfg.DownloadDir = *p.DownloadDir
 	}
 	if p.TmpDir != nil {
 		h.engine.SetTmpDir(*p.TmpDir)
-		h.cfg.TmpDir = *p.TmpDir
 	}
 	if p.MaxActive != nil && *p.MaxActive >= 1 {
 		h.engine.SetMaxActive(*p.MaxActive)
-		h.cfg.MaxActive = *p.MaxActive
 	}
 	if p.MaxPeers != nil && *p.MaxPeers >= 1 {
 		h.engine.SetMaxPeers(*p.MaxPeers)
-		h.cfg.MaxPeers = *p.MaxPeers
 	}
 	if p.MaxPipeline != nil && *p.MaxPipeline >= 1 {
 		h.engine.SetMaxPipeline(*p.MaxPipeline)
-		h.cfg.MaxPipeline = *p.MaxPipeline
 	}
 	if p.DialTimeout != nil && *p.DialTimeout >= 1 {
 		h.engine.SetDialTimeout(*p.DialTimeout)
-		h.cfg.DialTimeout = *p.DialTimeout
 	}
 	if p.NumWant != nil && *p.NumWant >= 1 {
 		h.engine.SetNumWant(*p.NumWant)
+	}
+	if p.EnableUTP != nil {
+		h.engine.SetEnableUTP(*p.EnableUTP)
+	}
+	if p.LogLevel != nil {
+		slog.SetLogLoggerLevel(ParseLogLevel(*p.LogLevel))
+	}
+
+	h.mu.Lock()
+	if p.DownloadDir != nil {
+		h.cfg.DownloadDir = *p.DownloadDir
+	}
+	if p.TmpDir != nil {
+		h.cfg.TmpDir = *p.TmpDir
+	}
+	if p.MaxActive != nil && *p.MaxActive >= 1 {
+		h.cfg.MaxActive = *p.MaxActive
+	}
+	if p.MaxPeers != nil && *p.MaxPeers >= 1 {
+		h.cfg.MaxPeers = *p.MaxPeers
+	}
+	if p.MaxPipeline != nil && *p.MaxPipeline >= 1 {
+		h.cfg.MaxPipeline = *p.MaxPipeline
+	}
+	if p.DialTimeout != nil && *p.DialTimeout >= 1 {
+		h.cfg.DialTimeout = *p.DialTimeout
+	}
+	if p.NumWant != nil && *p.NumWant >= 1 {
 		h.cfg.NumWant = *p.NumWant
 	}
 	if p.LogLevel != nil {
 		h.cfg.LogLevel = *p.LogLevel
-		slog.SetLogLoggerLevel(ParseLogLevel(*p.LogLevel))
 	}
 	if p.EnableUTP != nil {
-		h.engine.SetEnableUTP(*p.EnableUTP)
 		h.cfg.EnableUTP = *p.EnableUTP
 	}
-
 	if err := h.cfg.Save(); err != nil {
 		slog.Warn("config save failed", "error", err)
 	}
+	h.mu.Unlock()
 	return struct{}{}, nil
 }
 
