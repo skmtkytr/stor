@@ -14,6 +14,7 @@ import (
 
 	"github.com/skmtkytr/stor/dht"
 	"github.com/skmtkytr/stor/download"
+	"github.com/skmtkytr/stor/storage"
 	"github.com/skmtkytr/stor/torrent"
 )
 
@@ -36,6 +37,9 @@ type Config struct {
 	// DHT tuning
 	DHTAlpha int // DHT lookup concurrency (default: 8)
 
+	// Transport
+	EnableUTP bool // enable uTP transport (try uTP before TCP)
+
 	// Testing flags
 	DisableDHT      bool // skip DHT startup
 	DisableListener bool // skip peer TCP listener
@@ -56,17 +60,31 @@ type TorrentInfo struct {
 	Error         string                `json:"error,omitempty"`
 }
 
+// EngineConfig is the subset of Config exposed to API clients.
+type EngineConfig struct {
+	DownloadDir string `json:"download_dir"`
+	TmpDir      string `json:"tmp_dir"`
+	MaxActive   int    `json:"max_active"`
+	MaxPeers    int    `json:"max_peers"`
+	MaxPipeline int    `json:"max_pipeline"`
+	DialTimeout int    `json:"dial_timeout"`
+	NumWant     int    `json:"numwant"`
+	LogLevel    string `json:"log_level"`
+	EnableUTP   bool   `json:"enable_utp"`
+}
+
 // EngineStats is global daemon stats.
 type EngineStats struct {
-	TotalDownSpeed  int64 `json:"total_down_speed"`
-	TotalUpSpeed    int64 `json:"total_up_speed"`
-	ActiveTorrents  int   `json:"active_torrents"`
-	SeedingTorrents int   `json:"seeding_torrents"`
-	TotalTorrents   int   `json:"total_torrents"`
-	MaxActive       int   `json:"max_active"`
-	TotalPeers      int   `json:"total_peers"`
-	DHTNodes        int   `json:"dht_nodes"`
-	FreeSpace       int64 `json:"free_space"`
+	TotalDownSpeed  int64        `json:"total_down_speed"`
+	TotalUpSpeed    int64        `json:"total_up_speed"`
+	ActiveTorrents  int          `json:"active_torrents"`
+	SeedingTorrents int          `json:"seeding_torrents"`
+	TotalTorrents   int          `json:"total_torrents"`
+	MaxActive       int          `json:"max_active"`
+	TotalPeers      int          `json:"total_peers"`
+	DHTNodes        int          `json:"dht_nodes"`
+	FreeSpace       int64        `json:"free_space"`
+	Config          EngineConfig `json:"config"`
 }
 
 // Engine manages all torrent sessions.
@@ -163,15 +181,22 @@ func (e *Engine) Start() error {
 		}
 	}
 
-	// Start TCP listener for incoming peer connections
+	// Start peer listener for incoming connections (TCP, and optionally uTP)
 	if !e.cfg.DisableListener {
-		pl, err := NewPeerListener(fmt.Sprintf(":%d", e.cfg.ListenPort))
+		addr := fmt.Sprintf(":%d", e.cfg.ListenPort)
+		var pl *PeerListener
+		var err error
+		if e.cfg.EnableUTP {
+			pl, err = NewPeerListenerWithUTP(addr)
+		} else {
+			pl, err = NewPeerListener(addr)
+		}
 		if err != nil {
 			slog.Warn("peer listener failed to start", "error", err)
 		} else {
 			e.listener = pl
 			go pl.Run()
-			slog.Info("peer listener started", "addr", pl.Addr())
+			slog.Info("peer listener started", "addr", pl.Addr(), "utp", e.cfg.EnableUTP)
 		}
 	}
 
@@ -184,7 +209,7 @@ func (e *Engine) Start() error {
 		e.sessions[r.ID] = s
 
 		// Auto-resume active torrents (downloading, metadata, queued, or seeding)
-		if r.State == StateDownloading || r.State == StateMetadata || r.State == StateAdding || r.State == StateSeeding {
+		if r.State == StateDownloading || r.State == StateMetadata || r.State == StateVerifying || r.State == StateAdding || r.State == StateSeeding {
 			slog.Info("resuming torrent", "id", r.ID, "name", r.Name, "state", r.State)
 			if e.activeCount() < e.cfg.MaxActive {
 				s.Start(e.ctx, e.onSessionDone)
@@ -262,7 +287,7 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 		if tf, parseErr := torrent.Parse(data); parseErr == nil {
 			record.Name = tf.Info.Name
 			record.TorrentData = data
-			record.TotalBytes = download.TotalSize(tf)
+			record.TotalBytes = storage.TotalSize(tf)
 		}
 	}
 
@@ -413,7 +438,7 @@ func (e *Engine) GetStats() *EngineStats {
 	for _, s := range e.sessions {
 		snap := s.Snap()
 		stats.TotalPeers += int(snap.ActivePeers)
-		if snap.State == string(StateDownloading) {
+		if snap.State == string(StateDownloading) || snap.State == string(StateVerifying) {
 			stats.ActiveTorrents++
 			stats.TotalDownSpeed += snap.DownSpeed
 		}
@@ -428,6 +453,18 @@ func (e *Engine) GetStats() *EngineStats {
 	}
 
 	stats.FreeSpace = diskFreeSpace(e.cfg.DownloadDir)
+
+	stats.Config = EngineConfig{
+		DownloadDir: e.cfg.DownloadDir,
+		TmpDir:      e.cfg.TmpDir,
+		MaxActive:   e.cfg.MaxActive,
+		MaxPeers:    e.cfg.MaxPeers,
+		MaxPipeline: e.cfg.MaxPipeline,
+		DialTimeout: e.cfg.DialTimeout,
+		NumWant:     e.cfg.NumWant,
+		LogLevel:    "", // filled by daemon layer
+		EnableUTP:   e.cfg.EnableUTP,
+	}
 
 	return stats
 }
@@ -599,6 +636,55 @@ func (e *Engine) MaxActive() int {
 	return e.cfg.MaxActive
 }
 
+// SetDownloadDir changes the download directory for new torrents.
+func (e *Engine) SetDownloadDir(dir string) {
+	e.mu.Lock()
+	e.cfg.DownloadDir = dir
+	e.mu.Unlock()
+}
+
+// SetTmpDir changes the temp directory for in-progress downloads.
+func (e *Engine) SetTmpDir(dir string) {
+	e.mu.Lock()
+	e.cfg.TmpDir = dir
+	e.mu.Unlock()
+}
+
+// SetMaxPeers changes the max peers per torrent (applies to new sessions).
+func (e *Engine) SetMaxPeers(n int) {
+	e.mu.Lock()
+	e.cfg.MaxPeers = n
+	e.mu.Unlock()
+}
+
+// SetMaxPipeline changes the pipeline depth (applies to new sessions).
+func (e *Engine) SetMaxPipeline(n int) {
+	e.mu.Lock()
+	e.cfg.MaxPipeline = n
+	e.mu.Unlock()
+}
+
+// SetDialTimeout changes the peer dial timeout (applies to new sessions).
+func (e *Engine) SetDialTimeout(n int) {
+	e.mu.Lock()
+	e.cfg.DialTimeout = n
+	e.mu.Unlock()
+}
+
+// SetNumWant changes the number of peers requested from trackers.
+func (e *Engine) SetNumWant(n int) {
+	e.mu.Lock()
+	e.cfg.NumWant = n
+	e.mu.Unlock()
+}
+
+// SetEnableUTP enables or disables uTP transport.
+func (e *Engine) SetEnableUTP(b bool) {
+	e.mu.Lock()
+	e.cfg.EnableUTP = b
+	e.mu.Unlock()
+}
+
 func (e *Engine) sessionToInfo(s *Session) *TorrentInfo {
 	r := s.Record()
 	snap := s.Snap()
@@ -623,6 +709,7 @@ func (e *Engine) downloadConfig() download.DownloadConfig {
 		MaxPipeline: e.cfg.MaxPipeline,
 		DialTimeout: e.cfg.DialTimeout,
 		Encryption:  true, // always try MSE/PE in production
+		EnableUTP:   e.cfg.EnableUTP,
 	}
 }
 
@@ -630,7 +717,7 @@ func (e *Engine) activeCount() int {
 	count := 0
 	for _, s := range e.sessions {
 		r := s.Record()
-		if r.State == StateDownloading || r.State == StateMetadata {
+		if r.State == StateDownloading || r.State == StateMetadata || r.State == StateVerifying {
 			count++
 		}
 	}

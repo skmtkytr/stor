@@ -18,6 +18,7 @@ import (
 	"github.com/skmtkytr/stor/download"
 	"github.com/skmtkytr/stor/magnet"
 	"github.com/skmtkytr/stor/peer"
+	"github.com/skmtkytr/stor/storage"
 	"github.com/skmtkytr/stor/torrent"
 	"github.com/skmtkytr/stor/tracker"
 )
@@ -232,7 +233,7 @@ func (s *Session) phaseResolve(ctx context.Context) error {
 
 // phaseDownload downloads pieces while serving already-downloaded pieces to other peers.
 func (s *Session) phaseDownload(ctx context.Context) error {
-	tl := download.TotalSize(s.tf)
+	tl := storage.TotalSize(s.tf)
 	numPieces := len(s.tf.Info.PieceHashes)
 
 	// Resolve paths
@@ -246,8 +247,14 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	savePath := filepath.Join(dlDir, s.tf.Info.Name)
 
 	// Resume: verify existing pieces
+	s.mu.Lock()
+	s.record.State = StateVerifying
+	s.mu.Unlock()
+
 	var haveBitfield peer.Bitfield
-	bf, verified, _ := download.VerifyPieces(savePath, s.tf)
+	bf, verified, _ := storage.VerifyPieces(savePath, s.tf, func(checked, total int) {
+		slog.Debug("verifying pieces", "id", s.record.ID, "checked", checked, "total", total)
+	})
 	if verified > 0 {
 		haveBitfield = bf
 		s.mu.Lock()
@@ -255,6 +262,10 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		s.mu.Unlock()
 		slog.Info("resume: verified pieces", "id", s.record.ID, "verified", verified, "total", numPieces)
 	}
+
+	s.mu.Lock()
+	s.record.State = StateDownloading
+	s.mu.Unlock()
 
 	// Progress
 	progress := download.NewProgress(numPieces, tl)
@@ -306,10 +317,13 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		"total_bytes", tl, "pieces", numPieces, "peers", len(peers), "save_path", savePath)
 
 	// Create file reader for upload-while-downloading
-	var fileReader download.ReadAtReader
-	if download.IsMultiFile(s.tf) {
-		mw, _ := download.NewMultiFileWriter(savePath, s.tf)
-		fileReader = mw
+	var fileReader storage.ReadAtReader
+	if storage.IsMultiFile(s.tf) {
+		mw, err := storage.NewMultiFileWriter(savePath, s.tf)
+		if err == nil {
+			defer func() { _ = mw.Close() }()
+			fileReader = mw
+		}
 	} else {
 		f, ferr := os.Open(savePath)
 		if ferr == nil {
@@ -391,7 +405,7 @@ func (s *Session) phaseSeedDirect(ctx context.Context, savePath string) error {
 	}
 
 	// Set up progress for stats
-	tl := download.TotalSize(s.tf)
+	tl := storage.TotalSize(s.tf)
 	progress := download.NewProgress(numPieces, tl)
 	progress.SetInitial(numPieces, tl, int64(s.tf.Info.PieceLength))
 	s.mu.Lock()
@@ -777,7 +791,7 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 		wg.Add(1)
 		go func(tr string) {
 			defer wg.Done()
-			tl := download.TotalSize(s.tf)
+			tl := storage.TotalSize(s.tf)
 			req := tracker.AnnounceRequest{
 				AnnounceURL: tr,
 				InfoHash:    s.tf.InfoHash,

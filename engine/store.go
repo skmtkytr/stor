@@ -14,6 +14,7 @@ type State string
 const (
 	StateAdding      State = "adding"
 	StateMetadata    State = "metadata"
+	StateVerifying   State = "verifying"
 	StateDownloading State = "downloading"
 	StateSeeding     State = "seeding"
 	StateComplete    State = "complete"
