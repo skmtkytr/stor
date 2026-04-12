@@ -182,8 +182,29 @@ func TestDaemonCORS(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Errorf("preflight: got %d, want 204", w.Code)
 	}
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
+	origin := w.Header().Get("Access-Control-Allow-Origin")
+	if origin == "" {
 		t.Error("missing CORS origin header")
+	}
+	// Should reflect the request origin, not wildcard "*"
+	if origin == "*" {
+		t.Error("CORS should not use wildcard '*', should reflect request origin")
+	}
+	if origin != "chrome-extension://abc123" {
+		t.Errorf("CORS origin: got %q, want %q", origin, "chrome-extension://abc123")
+	}
+}
+
+func TestDaemonCORSNoOrigin(t *testing.T) {
+	d, _ := newTestDaemon(t)
+
+	// Request without Origin header should not get CORS headers
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	w := httptest.NewRecorder()
+	d.server.Handler.ServeHTTP(w, req)
+
+	if w.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("should not set CORS origin when no Origin header in request")
 	}
 }
 
@@ -359,6 +380,25 @@ func TestRPCTorrentQueueOperations(t *testing.T) {
 		w := doRPC(t, d, cfg.APIKey, op, map[string]string{"id": ids[0]})
 		if w.Code != http.StatusOK {
 			t.Errorf("%s: %d", op, w.Code)
+		}
+	}
+}
+
+func TestRPCTorrentAddURLRejectsPrivateIP(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+	for _, u := range []string{
+		"http://127.0.0.1/evil.torrent",
+		"http://192.168.1.1/evil.torrent",
+		"http://10.0.0.1/evil.torrent",
+		"http://localhost/evil.torrent",
+	} {
+		w := doRPC(t, d, cfg.APIKey, "torrent.addURL", map[string]string{"url": u})
+		var resp struct {
+			Error *struct{ Message string } `json:"error"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		if resp.Error == nil {
+			t.Errorf("expected SSRF rejection for %s", u)
 		}
 	}
 }

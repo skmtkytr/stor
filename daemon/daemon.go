@@ -173,7 +173,7 @@ func (d *Daemon) authMiddleware(next http.Handler) http.Handler {
 		token := strings.TrimSpace(auth[7:])
 		if subtle.ConstantTimeCompare([]byte(token), []byte(d.cfg.APIKey)) != 1 {
 			slog.Warn("auth failed: invalid key", "path", r.URL.Path, "remote", r.RemoteAddr)
-			http.Error(w, fmt.Sprintf("unauthorized: invalid key (got %d chars, want %d)", len(token), len(d.cfg.APIKey)), http.StatusUnauthorized)
+			http.Error(w, "unauthorized: invalid key", http.StatusUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -181,11 +181,16 @@ func (d *Daemon) authMiddleware(next http.Handler) http.Handler {
 }
 
 // corsMiddleware allows cross-origin requests (Chrome extension + remote browser).
+// Reflects the request Origin instead of using wildcard to prevent CSRF.
 func (d *Daemon) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Vary", "Origin")
+		}
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
