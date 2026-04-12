@@ -14,18 +14,20 @@ Go の BitTorrent 実装の多くは anacrolix/torrent 等のラッパー。stor
 |-----|------|------|
 | 3 | BitTorrent プロトコル | 実装済（チョーキング、rarest-first、endgame） |
 | 5 | DHT プロトコル | 実装済（共有インスタンス、alpha 設定可） |
+| 6 | Fast Extension | 実装済（have-all、have-none、reject） |
 | 9 | メタデータ交換拡張 | 実装済 |
 | 10 | 拡張プロトコル | 実装済 |
 | 11 | ピア交換 (PEX) | 実装済 |
-| 15 | UDP トラッカープロトコル | 実装済 |
-| 23 | コンパクトピアリスト | 実装済 |
-| 6 | Fast Extension | 実装済（have-all、have-none、reject） |
 | 12 | マルチトラッカー拡張 | 実装済 |
+| 15 | UDP トラッカープロトコル | 実装済 |
 | 19 | WebSeed (GetRight) | 実装済（HTTP Range、マルチファイル対応） |
+| 23 | コンパクトピアリスト | 実装済 |
 | 27 | Private Torrents | 実装済（DHT/PEX 自動無効化） |
 | 29 | uTP (Micro Transport Protocol) | 実装済（LEDBAT 輻輳制御） |
 | 52 | BitTorrent v2 | 部分対応（hybrid パース + v1 ダウンロード） |
-| — | MSE/PE（プロトコル暗号化） | 実装済（DH + RC4、平文フォールバック） |
+| — | MSE/PE（プロトコル暗号化） | 実装済（768-bit DH + RC4、平文フォールバック） |
+
+詳細は [BEP.md](BEP.md) を参照。
 
 ## 主な機能
 
@@ -92,6 +94,55 @@ enable_utp = false    # uTP トランスポート有効化（LEDBAT 輻輳制御
 
 ほとんどの設定は Web UI の設定画面または `daemon.setConfig` RPC から実行時に変更可能。
 
+## API
+
+デーモンは `POST /api/rpc` で JSON-RPC 2.0 エンドポイントを公開。認証は `Authorization: Bearer <api_key>` ヘッダー。
+
+| メソッド | 説明 |
+|---------|------|
+| `torrent.add` | magnet URI または .torrent ファイルパスでトレント追加 |
+| `torrent.addFile` | Base64 エンコードされた .torrent データで追加 |
+| `torrent.addURL` | HTTP URL でトレント追加（SSRF 対策済） |
+| `torrent.remove` | ID でトレント削除 |
+| `torrent.pause` | トレント一時停止 |
+| `torrent.resume` | 一時停止したトレントを再開 |
+| `torrent.get` | ID でトレント詳細取得 |
+| `torrent.list` | 全トレントの一覧と統計 |
+| `torrent.queueTop` | キュー先頭に移動 |
+| `torrent.queueUp` | キュー位置を1つ上へ |
+| `torrent.queueDown` | キュー位置を1つ下へ |
+| `torrent.queueBottom` | キュー末尾に移動 |
+| `daemon.stats` | グローバル統計（速度、ピア数、DHT サイズ） |
+| `daemon.setMaxActive` | 最大同時ダウンロード数の変更 |
+| `daemon.setConfig` | 実行時設定の更新 |
+| `daemon.version` | バージョン文字列を返す |
+
+追加の REST エンドポイント:
+
+| エンドポイント | 説明 |
+|--------------|------|
+| `POST /api/add` | フォームベースの追加（Chrome 拡張用） |
+| `GET /api/torrents` | トレント一覧（ポーリング用） |
+| `GET /` | Web UI |
+
+## セキュリティ
+
+stor は悪意あるピア・トラッカー・トレントに対する多層防御を実装:
+
+| レイヤー | 保護内容 |
+|---------|---------|
+| **入力パース** | bencode 制限: 文字列 64MB、コレクション 100万件、累積 200万件、深さ 100 |
+| **メタデータ** | メタデータサイズ上限 32MB、SHA1 info hash 検証 |
+| **トラッカー** | レスポンス 10MB 制限、ピア数 1万件上限、DNS ピニング（リバインド防止） |
+| **ピア** | bitfield サイズ検証、ブロック境界チェック、ピースハッシュ検証 |
+| **アップロード** | ブロック 32KiB 上限、ピース index 検証、オフセット境界チェック |
+| **ネットワーク** | トラッカー/DHT 結果のプライベート IP フィルタリング（ループバック/RFC1918/リンクローカル） |
+| **DHT** | ノード 1K / ピア 5K のルックアップ制限、トークンベース announce、pending TTL |
+| **トランスポート** | uTP 接続制限 (4096)、incoming ピア制限 (200)、ダイヤルセマフォ (50) |
+| **ファイルシステム** | パストラバーサル防止、シンボリックリンク解決、トレント名サニタイズ |
+| **デーモン** | API キー認証、リクエストサイズ制限、PID ファイル管理、CORS オリジン反映 |
+| **暗号化** | 768-bit DH 鍵交換、RC4 + 1024 バイトキーストリーム破棄 |
+
 ## Chrome 拡張
 
 `chrome://extensions` で `extension/` を読み込む。
@@ -109,13 +160,13 @@ daemon/         HTTP サーバー、JSON-RPC 2.0 API、設定管理
 engine/         トレントライフサイクル、キュースケジューリング、マグネット並列解決
 download/       ピース I/O、rarest-first、endgame、ピアマネージャー、チョーキング
 storage/        マルチファイル書き込み、ピース検証、ファイルハンドルキャッシュ
-peer/           ワイヤープロトコル、BEP 10/11 拡張、PEX
-tracker/        HTTP / UDP アナウンスクライアント
+peer/           ワイヤープロトコル、BEP 6/10/11 拡張、PEX
+tracker/        HTTP / UDP アナウンスクライアント（DNS ピニング対応）
 dht/            Kademlia ルーティングテーブル、反復探索、get_peers
 magnet/         マグネット URI パース、BEP 9 メタデータ取得
-torrent/        .torrent ファイルパーサー
-bencode/        bencode コーデック
-mse/            Message Stream Encryption（DH + RC4）
+torrent/        .torrent ファイルパーサー（v1 + hybrid v2）
+bencode/        bencode コーデック（DoS 耐性強化済）
+mse/            Message Stream Encryption（768-bit DH + RC4）
 utp/            Micro Transport Protocol（LEDBAT 輻輳制御）
 ui/             SvelteKit SPA（ビルド時にバイナリへ埋め込み）
 extension/      Chrome 拡張（Manifest V3）

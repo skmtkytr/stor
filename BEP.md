@@ -85,9 +85,10 @@ ref: https://www.bittorrent.org/beps/bep_0000.html
 - `enable_utp = true` で有効化。TCP へのフォールバック付き
 
 **MSE/PE:**
-- 768-bit DH 鍵交換 + RC4 暗号化
+- 768-bit DH 鍵交換（秘密鍵も 768-bit）+ RC4 暗号化
 - Plaintext / RC4 の自動ネゴシエーション
 - 適応的プロトコル選択（成功したプロトコルを学習）
+- RC4 キーストリームの先頭 1024 バイトを破棄（標準準拠）
 
 ### Phase 5: 互換性拡張
 
@@ -126,6 +127,33 @@ ref: https://www.bittorrent.org/beps/bep_0000.html
 - ❌ SHA-256 ピースハッシュでの検証
 - ❌ per-file Merkle tree
 - ❌ 32byte InfoHash のプロトコル層使用
+
+## セキュリティ制限値一覧
+
+悪意ある入力によるリソース枯渇・メモリ消費を防ぐために適用される定数値。
+
+| カテゴリ | 定数 | 値 | パッケージ |
+|---------|------|-----|-----------|
+| Bencode パース | `MaxStringLength` | 64 MB | `bencode/` |
+| Bencode パース | `MaxCollectionSize` | 1,000,000 | `bencode/` |
+| Bencode パース | `MaxTotalItems` | 2,000,000 | `bencode/` |
+| Bencode パース | `MaxDecodeDepth` | 100 | `bencode/` |
+| メタデータ | `MaxMetadataSize` | 32 MB | `magnet/` |
+| トラッカー | `MaxTrackerResponseSize` | 10 MB | `tracker/` |
+| トラッカー | `MaxPeersPerResponse` | 10,000 | `tracker/` |
+| PEX | `maxPEXPeers` | 10,000 | `peer/` |
+| DHT | `MaxLookupNodes` | 1,000 | `dht/` |
+| DHT | `MaxLookupPeers` | 5,000 | `dht/` |
+| DHT | `PendingTTL` | 15 秒 | `dht/` |
+| uTP | `maxConns` | 4,096 | `utp/` |
+| エンジン | `MaxSessions` | 10,000 | `engine/` |
+| エンジン | `maxIncomingConns` | 200 | `engine/` |
+
+ネットワーク保護:
+- **プライベート IP フィルタリング**: トラッカー/DHT から返されるピアアドレスからループバック、RFC 1918、リンクローカルアドレスを除外
+- **DNS ピニング**: HTTP トラッカーリクエストでホスト名を事前解決し、解決済み IP に直接接続（DNS リバインド SSRF 防止）
+- **bitfield サイズ検証**: ピアから受信した bitfield が `(numPieces+7)/8` と一致するか検証
+- **アップロードリクエスト検証**: index < numPieces、length <= 32KiB、offset + length <= totalSize
 
 ## プロトコル主要フォーマット早見表
 

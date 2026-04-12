@@ -14,18 +14,20 @@ Most Go BitTorrent implementations wrap anacrolix/torrent or similar. stor repla
 |-----|------|--------|
 | 3 | The BitTorrent Protocol | Implemented (choking, rarest-first, endgame) |
 | 5 | DHT Protocol | Implemented (shared instance, configurable alpha) |
+| 6 | Fast Extension | Implemented (have-all, have-none, reject) |
 | 9 | Extension for Peers to Send Metadata Files | Implemented |
 | 10 | Extension Protocol | Implemented |
 | 11 | Peer Exchange (PEX) | Implemented |
-| 15 | UDP Tracker Protocol | Implemented |
-| 23 | Tracker Returns Compact Peer Lists | Implemented |
-| 6 | Fast Extension | Implemented (have-all, have-none, reject) |
 | 12 | Multitracker Metadata Extension | Implemented |
+| 15 | UDP Tracker Protocol | Implemented |
 | 19 | WebSeed (GetRight) | Implemented (HTTP Range, multi-file) |
+| 23 | Tracker Returns Compact Peer Lists | Implemented |
 | 27 | Private Torrents | Implemented (DHT/PEX auto-disable) |
 | 29 | uTP (Micro Transport Protocol) | Implemented (LEDBAT congestion control) |
 | 52 | BitTorrent v2 | Partial (hybrid parse + v1 download) |
-| — | MSE/PE (Protocol Encryption) | Implemented (DH + RC4, plaintext fallback) |
+| — | MSE/PE (Protocol Encryption) | Implemented (768-bit DH + RC4, plaintext fallback) |
+
+See [BEP.md](BEP.md) for detailed implementation notes and protocol format references.
 
 ## Features
 
@@ -92,6 +94,55 @@ enable_utp = false    # enable uTP transport (LEDBAT congestion control)
 
 Most settings can be changed at runtime via the Web UI settings page or the `daemon.setConfig` RPC method.
 
+## API
+
+The daemon exposes a JSON-RPC 2.0 endpoint at `POST /api/rpc`. Authentication uses `Authorization: Bearer <api_key>`.
+
+| Method | Description |
+|--------|-------------|
+| `torrent.add` | Add torrent by magnet URI or .torrent file path |
+| `torrent.addFile` | Add torrent from base64-encoded .torrent data |
+| `torrent.addURL` | Add torrent from HTTP URL (SSRF-protected) |
+| `torrent.remove` | Remove a torrent by ID |
+| `torrent.pause` | Pause a torrent |
+| `torrent.resume` | Resume a paused torrent |
+| `torrent.get` | Get torrent details by ID |
+| `torrent.list` | List all torrents with stats |
+| `torrent.queueTop` | Move torrent to top of queue |
+| `torrent.queueUp` | Move torrent up one position |
+| `torrent.queueDown` | Move torrent down one position |
+| `torrent.queueBottom` | Move torrent to bottom of queue |
+| `daemon.stats` | Global stats (speeds, peer count, DHT size) |
+| `daemon.setMaxActive` | Change max concurrent downloads |
+| `daemon.setConfig` | Update runtime configuration |
+| `daemon.version` | Return version string |
+
+Additional REST endpoints:
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/add` | Form-based add (for Chrome extension) |
+| `GET /api/torrents` | Torrent list (polling) |
+| `GET /` | Web UI |
+
+## Security
+
+stor applies defense-in-depth against malicious peers, trackers, and torrents:
+
+| Layer | Protection |
+|-------|------------|
+| **Input parsing** | Bencode limits: 64 MB strings, 1M items/collection, 2M total items, depth 100 |
+| **Metadata** | 32 MB max metadata size, SHA1 info hash verification |
+| **Tracker** | 10 MB response limit, 10K peers/response cap, DNS pinning (anti-rebinding) |
+| **Peers** | Bitfield size validation, block bounds checking, piece hash verification |
+| **Upload** | 32 KiB max block size, piece index validation, offset bounds checking |
+| **Network** | Private IP filtering (loopback/RFC 1918/link-local) on tracker and DHT results |
+| **DHT** | 1K node / 5K peer lookup limits, token-based announce, pending transaction TTL |
+| **Transport** | uTP connection limit (4096), incoming peer limit (200), dial semaphore (50) |
+| **Filesystem** | Path traversal prevention, symlink resolution, torrent name sanitization |
+| **Daemon** | API key auth, request size limits, PID file management, CORS origin reflection |
+| **Encryption** | 768-bit DH key exchange, RC4 with 1024-byte keystream discard |
+
 ## Chrome Extension
 
 Load `extension/` as an unpacked extension. Features:
@@ -109,13 +160,13 @@ daemon/         HTTP server, JSON-RPC 2.0 API, configuration
 engine/         Torrent lifecycle, queue scheduling, parallel magnet resolution
 download/       Piece-level I/O, rarest-first, endgame, peer manager, choking
 storage/        Multi-file writer, piece verification, file handle caching
-peer/           Wire protocol, BEP 10/11 extensions, PEX
-tracker/        HTTP and UDP announce clients
+peer/           Wire protocol, BEP 6/10/11 extensions, PEX
+tracker/        HTTP and UDP announce clients (DNS-pinned)
 dht/            Kademlia routing table, iterative lookup, get_peers
 magnet/         Magnet URI parsing, BEP 9 metadata fetch
-torrent/        .torrent file parser
-bencode/        Bencoding codec
-mse/            Message Stream Encryption (DH + RC4)
+torrent/        .torrent file parser (v1 + hybrid v2)
+bencode/        Bencoding codec (DoS-hardened)
+mse/            Message Stream Encryption (768-bit DH + RC4)
 utp/            Micro Transport Protocol (LEDBAT congestion control)
 ui/             SvelteKit SPA, embedded in the binary at build time
 extension/      Chrome extension, Manifest V3
