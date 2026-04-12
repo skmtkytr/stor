@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -29,8 +30,8 @@ type DHT struct {
 	table *RoutingTable
 	alpha int // lookup concurrency
 
-	// Pending transactions: txnID → response channel
-	pending sync.Map // string → chan *KRPCMessage
+	// Pending transactions: txnID → pendingEntry
+	pending sync.Map // string → *pendingEntry
 
 	// Token management for announce_peer verification
 	tokenSecret    [20]byte
@@ -39,6 +40,18 @@ type DHT struct {
 
 	closed chan struct{}
 }
+
+// pendingEntry tracks a pending KRPC transaction.
+type pendingEntry struct {
+	ch      chan *KRPCMessage
+	created time.Time
+}
+
+// PendingCleanupInterval is how often stale pending transactions are cleaned.
+const PendingCleanupInterval = 30 * time.Second
+
+// PendingTTL is how long a pending transaction is kept before cleanup.
+const PendingTTL = 15 * time.Second
 
 // Option configures a DHT node.
 type Option func(*DHT)
@@ -87,6 +100,7 @@ func New(listenAddr string, opts ...Option) (*DHT, error) {
 
 	go d.readLoop()
 	go d.tokenRotateLoop()
+	go d.pendingCleanupLoop()
 
 	return d, nil
 }
@@ -131,13 +145,14 @@ func (d *DHT) Bootstrap(addrs []string) error {
 }
 
 // GetPeers finds peers for the given info hash using iterative DHT lookup.
+// Private/loopback/link-local addresses are filtered from results.
 func (d *DHT) GetPeers(infoHash [20]byte) ([]string, error) {
 	target := IDFromInfoHash(infoHash)
 	peers, err := d.iterativeLookup(target, true)
 	if err != nil {
 		return nil, err
 	}
-	return peers, nil
+	return FilterPrivatePeers(peers), nil
 }
 
 // readLoop reads incoming UDP packets and dispatches them.
@@ -174,10 +189,10 @@ func (d *DHT) readLoop() {
 
 // handleResponse routes a response to the waiting goroutine.
 func (d *DHT) handleResponse(msg *KRPCMessage) {
-	if ch, ok := d.pending.LoadAndDelete(msg.T); ok {
-		if typed, ok := ch.(chan *KRPCMessage); ok {
+	if val, ok := d.pending.LoadAndDelete(msg.T); ok {
+		if entry, ok := val.(*pendingEntry); ok {
 			select {
-			case typed <- msg:
+			case entry.ch <- msg:
 			default:
 			}
 		}
@@ -203,10 +218,16 @@ func (d *DHT) handleQuery(msg *KRPCMessage, addr *net.UDPAddr) {
 	}
 }
 
+func (d *DHT) sendUDP(data []byte, addr *net.UDPAddr) {
+	if _, err := d.conn.WriteToUDP(data, addr); err != nil {
+		slog.Debug("dht: UDP write failed", "addr", addr, "error", err)
+	}
+}
+
 func (d *DHT) respondPing(txnID string, addr *net.UDPAddr) {
 	resp := NewResponse(txnID, map[string]any{"id": string(d.id[:])})
 	data, _ := EncodeKRPC(resp)
-	_, _ = d.conn.WriteToUDP(data, addr)
+	d.sendUDP(data, addr)
 }
 
 func (d *DHT) respondFindNode(msg *KRPCMessage, addr *net.UDPAddr) {
@@ -227,7 +248,7 @@ func (d *DHT) respondFindNode(msg *KRPCMessage, addr *net.UDPAddr) {
 		"nodes": string(MarshalCompactNodeInfo(nodes)),
 	})
 	data, _ := EncodeKRPC(resp)
-	_, _ = d.conn.WriteToUDP(data, addr)
+	d.sendUDP(data, addr)
 }
 
 func (d *DHT) respondGetPeers(msg *KRPCMessage, addr *net.UDPAddr) {
@@ -251,7 +272,7 @@ func (d *DHT) respondGetPeers(msg *KRPCMessage, addr *net.UDPAddr) {
 		"nodes": string(MarshalCompactNodeInfo(nodes)),
 	})
 	data, _ := EncodeKRPC(resp)
-	_, _ = d.conn.WriteToUDP(data, addr)
+	d.sendUDP(data, addr)
 }
 
 func (d *DHT) respondAnnouncePeer(msg *KRPCMessage, addr *net.UDPAddr) {
@@ -262,13 +283,13 @@ func (d *DHT) respondAnnouncePeer(msg *KRPCMessage, addr *net.UDPAddr) {
 	}
 	resp := NewResponse(msg.T, map[string]any{"id": string(d.id[:])})
 	data, _ := EncodeKRPC(resp)
-	_, _ = d.conn.WriteToUDP(data, addr)
+	d.sendUDP(data, addr)
 }
 
 // sendQuery sends a KRPC query and returns a channel for the response.
 func (d *DHT) sendQuery(addr *net.UDPAddr, msg *KRPCMessage) chan *KRPCMessage {
 	ch := make(chan *KRPCMessage, 1)
-	d.pending.Store(msg.T, ch)
+	d.pending.Store(msg.T, &pendingEntry{ch: ch, created: time.Now()})
 
 	data, err := EncodeKRPC(msg)
 	if err != nil {
@@ -276,7 +297,9 @@ func (d *DHT) sendQuery(addr *net.UDPAddr, msg *KRPCMessage) chan *KRPCMessage {
 		return ch
 	}
 
-	_, _ = d.conn.WriteToUDP(data, addr)
+	if _, err := d.conn.WriteToUDP(data, addr); err != nil {
+		slog.Debug("dht: UDP write failed", "addr", addr, "error", err)
+	}
 	return ch
 }
 
@@ -497,4 +520,54 @@ func (d *DHT) rotateToken() {
 	var secret [20]byte
 	_, _ = rand.Read(secret[:])
 	d.tokenSecret = secret
+}
+
+// pendingCleanupLoop periodically removes stale pending transactions.
+func (d *DHT) pendingCleanupLoop() {
+	ticker := time.NewTicker(PendingCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			d.cleanStalePending(PendingTTL)
+		case <-d.closed:
+			return
+		}
+	}
+}
+
+// cleanStalePending removes pending transactions older than ttl.
+func (d *DHT) cleanStalePending(ttl time.Duration) {
+	cutoff := time.Now().Add(-ttl)
+	d.pending.Range(func(key, value any) bool {
+		if entry, ok := value.(*pendingEntry); ok {
+			if entry.created.Before(cutoff) {
+				d.pending.Delete(key)
+			}
+		} else {
+			// Remove invalid entries
+			d.pending.Delete(key)
+		}
+		return true
+	})
+}
+
+// FilterPrivatePeers removes peers with private/loopback/link-local addresses.
+func FilterPrivatePeers(peers []string) []string {
+	result := make([]string, 0, len(peers))
+	for _, p := range peers {
+		host, _, err := net.SplitHostPort(p)
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			continue
+		}
+		result = append(result, p)
+	}
+	return result
 }
