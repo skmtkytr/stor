@@ -5,12 +5,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
 	"github.com/skmtkytr/stor/engine"
 )
+
+// validTorrentURL checks that a URL uses http/https and doesn't point to
+// private/internal addresses (SSRF prevention).
+func validTorrentURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return true // non-IP hostname, allow
+	}
+	return !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast()
+}
 
 // JSON-RPC 2.0 types.
 type rpcRequest struct {
@@ -166,6 +189,10 @@ func (h *RPCHandler) torrentAddURL(params json.RawMessage) (any, *rpcErr) {
 	}
 	if err := json.Unmarshal(params, &p); err != nil || p.URL == "" {
 		return nil, &rpcErr{Code: -32602, Message: "invalid params: url required"}
+	}
+
+	if !validTorrentURL(p.URL) {
+		return nil, &rpcErr{Code: -32602, Message: "invalid URL: private/internal addresses not allowed"}
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
