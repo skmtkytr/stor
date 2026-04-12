@@ -191,6 +191,9 @@ type Bitfield []byte
 
 // HasPiece returns true if the bitfield indicates the peer has the given piece.
 func (bf Bitfield) HasPiece(index int) bool {
+	if index < 0 {
+		return false
+	}
 	byteIndex := index / 8
 	offset := index % 8
 	if byteIndex >= len(bf) {
@@ -200,11 +203,16 @@ func (bf Bitfield) HasPiece(index int) bool {
 }
 
 // SetPiece sets the bit for the given piece index.
-func (bf Bitfield) SetPiece(index int) {
+// Returns false if the index is out of range.
+func (bf Bitfield) SetPiece(index int) bool {
+	if index < 0 {
+		return false
+	}
 	byteIndex := index / 8
 	offset := index % 8
 	if byteIndex >= len(bf) {
-		return
+		return false
 	}
 	bf[byteIndex] |= 1 << (7 - offset)
+	return true
 }

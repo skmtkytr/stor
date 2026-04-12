@@ -208,3 +208,36 @@ func TestParseHaveInvalid(t *testing.T) {
 		t.Fatal("expected error for invalid payload")
 	}
 }
+
+func TestBitfieldSetPieceOutOfRange(t *testing.T) {
+	bf := Bitfield(make([]byte, 2)) // 16 pieces
+
+	// SetPiece with out-of-range index should return false
+	if bf.SetPiece(16) {
+		t.Error("SetPiece(16) should return false for 16-piece bitfield")
+	}
+	if bf.SetPiece(100) {
+		t.Error("SetPiece(100) should return false for 16-piece bitfield")
+	}
+	if bf.SetPiece(-1) {
+		t.Error("SetPiece(-1) should return false for negative index")
+	}
+
+	// Valid index should return true
+	if !bf.SetPiece(0) {
+		t.Error("SetPiece(0) should return true")
+	}
+	if !bf.HasPiece(0) {
+		t.Error("piece 0 should be set after SetPiece")
+	}
+}
+
+func TestBitfieldHasPieceNegativeIndex(t *testing.T) {
+	bf := Bitfield(make([]byte, 2))
+	bf.SetPiece(0)
+
+	// Negative index should return false, not panic
+	if bf.HasPiece(-1) {
+		t.Error("HasPiece(-1) should return false")
+	}
+}
