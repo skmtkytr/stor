@@ -2,10 +2,14 @@ package peer
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 
 	"github.com/skmtkytr/stor/bencode"
 )
+
+// maxPEXPeers is the maximum number of peers in a single PEX message.
+const maxPEXPeers = 10000
 
 // PEXMessage represents a ut_pex message (BEP 11).
 type PEXMessage struct {
@@ -80,6 +84,9 @@ func DecodePEX(data []byte) (*PEXMessage, error) {
 	if added, ok := d["added"].(string); ok && len(added)%6 == 0 {
 		flags, _ := d["added.f"].(string)
 		n := len(added) / 6
+		if n > maxPEXPeers {
+			return nil, fmt.Errorf("peer: PEX added too many peers: %d", n)
+		}
 		for i := range n {
 			off := i * 6
 			ip := make(net.IP, 4)
@@ -95,6 +102,9 @@ func DecodePEX(data []byte) (*PEXMessage, error) {
 
 	if dropped, ok := d["dropped"].(string); ok && len(dropped)%6 == 0 {
 		n := len(dropped) / 6
+		if n > maxPEXPeers {
+			return nil, fmt.Errorf("peer: PEX dropped too many peers: %d", n)
+		}
 		for i := range n {
 			off := i * 6
 			ip := make(net.IP, 4)

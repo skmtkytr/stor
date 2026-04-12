@@ -3,6 +3,8 @@ package peer
 import (
 	"net"
 	"testing"
+
+	"github.com/skmtkytr/stor/bencode"
 )
 
 func TestPEXRoundTrip(t *testing.T) {
@@ -47,6 +49,27 @@ func TestPEXRoundTrip(t *testing.T) {
 	}
 	if !got.Dropped[0].IP.Equal(net.IPv4(192, 168, 1, 1)) || got.Dropped[0].Port != 8080 {
 		t.Errorf("dropped[0] = %s:%d", got.Dropped[0].IP, got.Dropped[0].Port)
+	}
+}
+
+func TestPEXTooManyPeers(t *testing.T) {
+	// Build a PEX "added" field with 20000 peers (exceeds limit)
+	n := 20000
+	compact := make([]byte, n*6)
+	for i := range n {
+		compact[i*6] = byte(i >> 8)
+		compact[i*6+1] = byte(i)
+		compact[i*6+2] = 1
+		compact[i*6+3] = 1
+		compact[i*6+4] = 0x1A
+		compact[i*6+5] = 0xE1
+	}
+	d := map[string]any{"added": string(compact)}
+	data, _ := bencode.Encode(d)
+
+	_, err := DecodePEX(data)
+	if err == nil {
+		t.Fatal("expected error for too many PEX peers")
 	}
 }
 
