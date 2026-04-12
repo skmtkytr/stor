@@ -48,12 +48,6 @@ See [BEP.md](BEP.md) for detailed implementation notes and protocol format refer
 
 ## Installation
 
-### Homebrew (macOS/Linux)
-
-```sh
-brew install skmtkytr/tap/stor
-```
-
 ### Go
 
 ```sh
