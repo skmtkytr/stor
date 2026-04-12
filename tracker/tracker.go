@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -71,13 +72,47 @@ func Announce(req AnnounceRequest) (*AnnounceResponse, error) {
 }
 
 // AnnounceHTTP sends an HTTP announce request and returns the response.
+// Uses DNS pinning to prevent DNS rebinding SSRF attacks.
 func AnnounceHTTP(req AnnounceRequest) (*AnnounceResponse, error) {
+	return announceHTTP(req, nil)
+}
+
+// announceHTTP is the internal implementation. If client is nil, a DNS-pinning
+// client is created that validates the tracker host is not private.
+func announceHTTP(req AnnounceRequest, client *http.Client) (*AnnounceResponse, error) {
 	u, err := buildAnnounceURL(req)
 	if err != nil {
 		return nil, err
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	if client == nil {
+		// DNS pinning: resolve hostname, validate IP, connect to resolved IP directly.
+		host := u.Hostname()
+		resolvedIP, resolveErr := resolveAndValidateTrackerHost(host)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("tracker: %w", resolveErr)
+		}
+
+		port := u.Port()
+		if port == "" {
+			if u.Scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+		}
+		pinnedAddr := net.JoinHostPort(resolvedIP, port)
+
+		client = &http.Client{
+			Timeout: 15 * time.Second,
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+					return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, pinnedAddr)
+				},
+			},
+		}
+	}
+
 	resp, err := client.Get(u.String())
 	if err != nil {
 		return nil, fmt.Errorf("tracker: HTTP request failed: %w", err)
@@ -184,6 +219,55 @@ func parseCompactPeers(data string) ([]Peer, error) {
 		peers[i] = Peer{IP: ip, Port: port}
 	}
 	return peers, nil
+}
+
+// resolveAndValidateTrackerHost resolves a hostname and validates it is not
+// a private/loopback/link-local address. This prevents DNS rebinding SSRF.
+func resolveAndValidateTrackerHost(host string) (string, error) {
+	if host == "localhost" {
+		return "", fmt.Errorf("host %q is localhost", host)
+	}
+
+	// If already an IP, validate directly
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return "", fmt.Errorf("host %s is a private/reserved address", host)
+		}
+		return ip.String(), nil
+	}
+
+	// Resolve hostname
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", host, err)
+	}
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return "", fmt.Errorf("host %s resolves to private address %s", host, addr)
+		}
+		return ip.String(), nil
+	}
+	return "", fmt.Errorf("host %s has no valid public addresses", host)
+}
+
+// FilterPrivatePeers removes peers with private/loopback/link-local addresses.
+// This prevents SSRF and internal network scanning from malicious tracker responses.
+func FilterPrivatePeers(peers []Peer) []Peer {
+	result := make([]Peer, 0, len(peers))
+	for _, p := range peers {
+		if p.IP == nil {
+			continue
+		}
+		if p.IP.IsLoopback() || p.IP.IsPrivate() || p.IP.IsLinkLocalUnicast() || p.IP.IsLinkLocalMulticast() || p.IP.IsUnspecified() {
+			continue
+		}
+		result = append(result, p)
+	}
+	return result
 }
 
 // parseDictPeers parses the legacy (non-compact) peer list.

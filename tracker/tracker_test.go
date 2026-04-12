@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/skmtkytr/stor/bencode"
 )
@@ -113,7 +114,9 @@ func TestAnnounceHTTP(t *testing.T) {
 		Event:       EventStarted,
 	}
 
-	result, err := Announce(req)
+	// Use announceHTTP with explicit client to bypass DNS pinning in test
+	// (httptest server runs on 127.0.0.1 which would be rejected by DNS validation)
+	result, err := announceHTTP(req, &http.Client{Timeout: 15 * time.Second})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,7 +153,8 @@ func TestAnnounceHTTPTrackerError(t *testing.T) {
 		Left:        1000,
 	}
 
-	_, err := Announce(req)
+	// Use announceHTTP with explicit client to test tracker error response
+	_, err := announceHTTP(req, &http.Client{Timeout: 15 * time.Second})
 	if err == nil {
 		t.Fatal("expected error for tracker failure response")
 	}
@@ -207,7 +211,9 @@ func TestAnnounceHTTPLargeResponse(t *testing.T) {
 		Left:        1000,
 	}
 
-	_, err := Announce(req)
+	// Use announceHTTP with explicit client to test response size limit
+	// (bypasses DNS pinning which would reject localhost)
+	_, err := announceHTTP(req, &http.Client{Timeout: 15 * time.Second})
 	// With MaxTrackerResponseSize limit, the response should be truncated
 	// and fail to parse, preventing DoS from oversized responses.
 	if err == nil {
@@ -242,7 +248,8 @@ func TestAnnounceHTTPDictPeers(t *testing.T) {
 		Left:        500,
 	}
 
-	result, err := Announce(req)
+	// Use announceHTTP with explicit client to bypass DNS pinning in test
+	result, err := announceHTTP(req, &http.Client{Timeout: 15 * time.Second})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

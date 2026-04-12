@@ -210,8 +210,8 @@ func HandshakeOutgoing(conn net.Conn, infoHash [20]byte, preferred CryptoMethod)
 // --- helpers ---
 
 func generateDHKeyPair() (*big.Int, *big.Int) {
-	// Private key: random 160-bit number
-	privBytes := make([]byte, 20)
+	// Private key: random 768-bit number (matches DH prime size)
+	privBytes := make([]byte, 96)
 	_, _ = rand.Read(privBytes)
 	priv := new(big.Int).SetBytes(privBytes)
 
