@@ -46,7 +46,9 @@ func (u *Uploader) Run(ctx context.Context) {
 // peers via MsgHave so they know they can request it.
 func (u *Uploader) SetPiece(index int) {
 	u.mu.Lock()
-	u.bitfield.SetPiece(index)
+	if u.bitfield != nil {
+		u.bitfield.SetPiece(index)
+	}
 	clients := make([]*Client, len(u.clients))
 	copy(clients, u.clients)
 	u.mu.Unlock()
@@ -203,12 +205,17 @@ func (u *Uploader) serveLoop(c *Client) {
 			}
 
 			// Validate request
+			numPieces := uint32(len(u.tf.Info.PieceHashes))
+			if index >= numPieces {
+				slog.Debug("upload: invalid piece index", "addr", c.Addr, "index", index, "numPieces", numPieces)
+				return
+			}
 			if length > 32*1024 { // max 32KiB per block
 				slog.Debug("upload: request too large", "addr", c.Addr, "length", length)
 				return
 			}
 
-			// Read piece data from disk — guard against integer overflow
+			// Read piece data from disk — safe: index < numPieces prevents overflow
 			offset := int64(index)*pieceLen + int64(begin)
 			if offset < 0 || offset+int64(length) > totalSize {
 				slog.Debug("upload: request out of bounds", "addr", c.Addr)

@@ -159,6 +159,20 @@ func TestUploadRequestOverflowIndex(t *testing.T) {
 	}
 }
 
+func TestUploaderSetPieceNilBitfield(t *testing.T) {
+	// nil bitfield (have-all) should not panic when SetPiece is called.
+	tf := &torrent.TorrentFile{
+		Info: torrent.Info{
+			Name: "test", PieceLength: 256, Length: 512,
+			PieceHashes: [][20]byte{{}, {}},
+		},
+	}
+	u := NewUploader(tf, "/nonexistent", [20]byte{}, nil)
+	// Must not panic
+	u.SetPiece(0)
+	u.SetPiece(1)
+}
+
 func TestUploaderServePiece(t *testing.T) {
 	// Create test data: 2 pieces of 256 bytes
 	data := make([]byte, 512)
