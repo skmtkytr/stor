@@ -198,13 +198,34 @@ func TestDaemonCORS(t *testing.T) {
 func TestDaemonCORSNoOrigin(t *testing.T) {
 	d, _ := newTestDaemon(t)
 
-	// Request without Origin header should not get CORS headers
+	// GET without Origin header should not get CORS headers
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	w := httptest.NewRecorder()
 	d.server.Handler.ServeHTTP(w, req)
 
 	if w.Header().Get("Access-Control-Allow-Origin") != "" {
-		t.Error("should not set CORS origin when no Origin header in request")
+		t.Error("should not set CORS origin when no Origin header in GET request")
+	}
+}
+
+func TestDaemonCORSPrivateNetworkAccess(t *testing.T) {
+	d, _ := newTestDaemon(t)
+
+	// Chrome PNA preflight for .local domains
+	req := httptest.NewRequest(http.MethodOptions, "/_app/immutable/chunks/test.js", http.NoBody)
+	req.Header.Set("Origin", "http://ugnas01.local:9090")
+	req.Header.Set("Access-Control-Request-Private-Network", "true")
+	w := httptest.NewRecorder()
+	d.server.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("PNA preflight: got %d, want 204", w.Code)
+	}
+	if w.Header().Get("Access-Control-Allow-Private-Network") != "true" {
+		t.Error("missing Access-Control-Allow-Private-Network header")
+	}
+	if w.Header().Get("Access-Control-Allow-Origin") == "" {
+		t.Error("missing Access-Control-Allow-Origin header")
 	}
 }
 

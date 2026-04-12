@@ -182,6 +182,7 @@ func (d *Daemon) authMiddleware(next http.Handler) http.Handler {
 
 // corsMiddleware allows cross-origin requests (Chrome extension + remote browser).
 // Reflects the request Origin instead of using wildcard to prevent CSRF.
+// Also handles Chrome's Private Network Access (PNA) preflight for .local domains.
 func (d *Daemon) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -189,10 +190,16 @@ func (d *Daemon) corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Private-Network", "true")
 			w.Header().Set("Vary", "Origin")
 		}
 
 		if r.Method == http.MethodOptions {
+			// PNA preflight from same-origin on .local — respond even without Origin
+			if origin == "" && r.Header.Get("Access-Control-Request-Private-Network") == "true" {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Private-Network", "true")
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
