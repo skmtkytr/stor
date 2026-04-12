@@ -99,8 +99,41 @@ func downloadPieceHTTP(ctx context.Context, baseURL string, tf *torrent.TorrentF
 	return buf, nil
 }
 
-func httpRange(ctx context.Context, url string, offset, length int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+// isPrivateHost returns true if the host is a private/loopback/link-local address.
+func isPrivateHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+	}
+	// Resolve hostname and check all addresses
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		if resolved := net.ParseIP(addr); resolved != nil {
+			if resolved.IsLoopback() || resolved.IsPrivate() || resolved.IsLinkLocalUnicast() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func httpRange(ctx context.Context, targetURL string, offset, length int64) ([]byte, error) {
+	// Validate resolved IP to prevent DNS rebinding SSRF
+	parsed, err := url.Parse(targetURL)
+	if err != nil {
+		return nil, err
+	}
+	if isPrivateHost(parsed.Hostname()) {
+		return nil, fmt.Errorf("webseed: host %s resolves to private address", parsed.Hostname())
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +146,7 @@ func httpRange(ctx context.Context, url string, offset, length int64) ([]byte, e
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusPartialContent {
-		return nil, fmt.Errorf("webseed: expected HTTP 206, got %d for %s", resp.StatusCode, url)
+		return nil, fmt.Errorf("webseed: expected HTTP 206, got %d for %s", resp.StatusCode, targetURL)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, length))

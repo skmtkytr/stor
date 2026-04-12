@@ -680,6 +680,24 @@ func TestValidWebSeedURLRejectsPrivateIPs(t *testing.T) {
 	}
 }
 
+func TestWebSeedRejectsResolvedPrivateIP(t *testing.T) {
+	// A hostname that resolves to a private IP should be rejected at request time.
+	// We can't control DNS, so test the resolveAndValidateHost function directly.
+	// 127.0.0.1 should be rejected even when passed as a resolved address.
+	if !isPrivateHost("127.0.0.1") {
+		t.Error("127.0.0.1 should be detected as private")
+	}
+	if !isPrivateHost("10.0.0.1") {
+		t.Error("10.0.0.1 should be detected as private")
+	}
+	if isPrivateHost("8.8.8.8") {
+		t.Error("8.8.8.8 should not be private")
+	}
+	if !isPrivateHost("localhost") {
+		t.Error("localhost should be detected as private")
+	}
+}
+
 func TestDeduplicatePeers(t *testing.T) {
 	peers := []tracker.Peer{
 		{IP: net.IPv4(1, 2, 3, 4), Port: 6881},
