@@ -109,18 +109,23 @@ func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {
 
 	// Send our bitfield (or have-all/have-none for BEP 6)
 	numPieces := len(u.tf.Info.PieceHashes)
-	allHave := true
-	for i := range numPieces {
-		if !u.bitfield.HasPiece(i) {
-			allHave = false
-			break
+
+	// nil bitfield means "have all" (BEP 6 convention)
+	allHave := u.bitfield == nil
+	if !allHave {
+		allHave = true
+		for i := range numPieces {
+			if !u.bitfield.HasPiece(i) {
+				allHave = false
+				break
+			}
 		}
 	}
 
 	var initMsg *peer.Message
 	if remoteHS.FastExtension && allHave {
 		initMsg = &peer.Message{ID: peer.MsgHaveAll}
-	} else if remoteHS.FastExtension && numPieces > 0 && !u.bitfield.HasPiece(0) && len(u.bitfield) == 0 {
+	} else if remoteHS.FastExtension && u.bitfield != nil && len(u.bitfield) == 0 {
 		initMsg = &peer.Message{ID: peer.MsgHaveNone}
 	} else if len(u.bitfield) > 0 {
 		initMsg = &peer.Message{ID: peer.MsgBitfield, Payload: u.bitfield}

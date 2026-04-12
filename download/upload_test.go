@@ -13,6 +13,65 @@ import (
 	"github.com/skmtkytr/stor/torrent"
 )
 
+func TestUploaderNilBitfieldMeansHaveAll(t *testing.T) {
+	// nil bitfield means "have all" (BEP 6 convention used in Client.HasPiece).
+	// Uploader should treat nil bitfield the same way.
+	data := make([]byte, 512)
+	h0 := sha1.Sum(data[:256])
+	h1 := sha1.Sum(data[256:])
+	tf := &torrent.TorrentFile{
+		Info: torrent.Info{
+			Name: "test", PieceLength: 256, Length: 512,
+			PieceHashes: [][20]byte{h0, h1},
+		},
+	}
+	tf.InfoHash = sha1.Sum([]byte("nil-bf-test"))
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "test")
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// nil bitfield = have all
+	u := NewUploader(tf, filePath, [20]byte{}, nil)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		hs, _ := peer.ReadHandshake(conn)
+		u.HandleIncoming(conn, hs)
+	}()
+
+	conn, _ := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	defer func() { _ = conn.Close() }()
+
+	_ = peer.WriteHandshake(conn, &peer.Handshake{
+		InfoHash: tf.InfoHash, PeerID: [20]byte{9}, FastExtension: true,
+	})
+	_, _ = peer.ReadHandshake(conn)
+
+	cr := bufio.NewReaderSize(conn, 64*1024)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	msg, err := peer.ReadMessage(cr)
+	if err != nil {
+		t.Fatalf("read init message: %v", err)
+	}
+
+	// With nil bitfield + FastExtension, should send HaveAll (MsgHaveAll=14)
+	if msg.ID != peer.MsgHaveAll {
+		t.Errorf("expected MsgHaveAll (14), got %d", msg.ID)
+	}
+}
+
 func TestUploadRequestOverflowIndex(t *testing.T) {
 	// A request with index=MaxUint32/2 and large pieceLen could cause
 	// integer overflow in offset calculation. The uploader should reject it.
