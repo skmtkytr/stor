@@ -224,6 +224,15 @@ func TestEngineMaxActive(t *testing.T) {
 	}
 }
 
+func TestEngineMaxSessionsConstant(t *testing.T) {
+	if MaxSessions < 100 {
+		t.Errorf("MaxSessions too small: %d", MaxSessions)
+	}
+	if MaxSessions > 100000 {
+		t.Errorf("MaxSessions too large: %d", MaxSessions)
+	}
+}
+
 func TestEngineStats(t *testing.T) {
 	eng := newTestEngine(t)
 

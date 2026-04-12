@@ -18,6 +18,9 @@ import (
 	"github.com/skmtkytr/stor/torrent"
 )
 
+// MaxSessions is the maximum number of torrents the engine will track.
+const MaxSessions = 10000
+
 // Config holds engine configuration.
 type Config struct {
 	DownloadDir string
@@ -282,6 +285,10 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 		return id, nil // already exists
 	}
 
+	if len(e.sessions) >= MaxSessions {
+		return "", fmt.Errorf("engine: session limit reached (%d)", MaxSessions)
+	}
+
 	slog.Info("adding torrent", "id", id, "source", source)
 
 	record := &TorrentRecord{
@@ -320,13 +327,20 @@ func (e *Engine) AddTorrentFile(data []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	tmpName := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return "", err
 	}
 	_ = tmp.Close()
 
-	return e.AddTorrent(tmp.Name())
+	id, err := e.AddTorrent(tmpName)
+	if err != nil {
+		_ = os.Remove(tmpName)
+		return "", err
+	}
+	return id, nil
 }
 
 // RemoveTorrent removes a torrent. If deleteFiles is true, also deletes downloaded data.
