@@ -161,6 +161,40 @@ func TestMultiFileWriterHandleCache(t *testing.T) {
 	}
 }
 
+func TestMultiFileWriterWriteAfterClose(t *testing.T) {
+	dir := t.TempDir()
+
+	tf := &torrent.TorrentFile{
+		Info: torrent.Info{
+			Name:        "testdir",
+			PieceLength: 4,
+			Files: []torrent.File{
+				{Length: 8, Path: []string{"a.dat"}},
+			},
+		},
+	}
+
+	base := filepath.Join(dir, "testdir")
+	mw, err := NewMultiFileWriter(base, tf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.PreallocateFiles(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Close the writer
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// WriteAt after Close should return an error, not panic or write to a closed fd
+	_, err = mw.WriteAt([]byte("test"), 0)
+	if err == nil {
+		t.Fatal("expected error when writing after Close")
+	}
+}
+
 func TestMultiFileWriterPieceSpan(t *testing.T) {
 	dir := t.TempDir()
 

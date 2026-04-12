@@ -18,8 +18,9 @@ type MultiFileWriter struct {
 	files   []fileEntry
 	total   int64
 
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	handles map[string]*os.File
+	closed  bool
 }
 
 type fileEntry struct {
@@ -70,12 +71,31 @@ func NewMultiFileWriter(baseDir string, tf *torrent.TorrentFile) (*MultiFileWrit
 }
 
 // getHandle returns a cached file handle, opening the file if needed.
+// Caller must hold at least mw.mu.RLock.
 func (mw *MultiFileWriter) getHandle(path string, create bool) (*os.File, error) {
-	mw.mu.Lock()
-	defer mw.mu.Unlock()
 	if f, ok := mw.handles[path]; ok {
 		return f, nil
 	}
+
+	// Need write lock to insert a new handle — upgrade from RLock.
+	// Caller must re-acquire as write lock externally if needed.
+	// For simplicity, this method uses the full lock internally.
+	mw.mu.RUnlock()
+	mw.mu.Lock()
+	defer func() {
+		mw.mu.Unlock()
+		mw.mu.RLock()
+	}()
+
+	if mw.closed {
+		return nil, fmt.Errorf("multifile: writer is closed")
+	}
+
+	// Double-check after re-acquiring write lock.
+	if f, ok := mw.handles[path]; ok {
+		return f, nil
+	}
+
 	flags := os.O_RDWR
 	if create {
 		flags |= os.O_CREATE
@@ -91,6 +111,13 @@ func (mw *MultiFileWriter) getHandle(path string, create bool) (*os.File, error)
 // WriteAt writes data at the given byte offset in the virtual data stream.
 // The data may span multiple files.
 func (mw *MultiFileWriter) WriteAt(data []byte, off int64) (int, error) {
+	mw.mu.RLock()
+	defer mw.mu.RUnlock()
+
+	if mw.closed {
+		return 0, fmt.Errorf("multifile: writer is closed")
+	}
+
 	written := 0
 	remaining := data
 
@@ -136,6 +163,13 @@ func (mw *MultiFileWriter) WriteAt(data []byte, off int64) (int, error) {
 
 // ReadAt reads data at the given byte offset from the virtual data stream.
 func (mw *MultiFileWriter) ReadAt(data []byte, off int64) (int, error) {
+	mw.mu.RLock()
+	defer mw.mu.RUnlock()
+
+	if mw.closed {
+		return 0, fmt.Errorf("multifile: writer is closed")
+	}
+
 	read := 0
 	buf := data
 
@@ -179,6 +213,9 @@ func (mw *MultiFileWriter) ReadAt(data []byte, off int64) (int, error) {
 
 // PreallocateFiles creates and truncates all files to their expected sizes.
 func (mw *MultiFileWriter) PreallocateFiles() error {
+	mw.mu.RLock()
+	defer mw.mu.RUnlock()
+
 	for _, fe := range mw.files {
 		f, err := mw.getHandle(fe.path, true)
 		if err != nil {
@@ -191,10 +228,12 @@ func (mw *MultiFileWriter) PreallocateFiles() error {
 	return nil
 }
 
-// Close closes all cached file handles.
+// Close closes all cached file handles. Concurrent WriteAt/ReadAt calls
+// will block until Close completes, and subsequent calls will return an error.
 func (mw *MultiFileWriter) Close() error {
 	mw.mu.Lock()
 	defer mw.mu.Unlock()
+	mw.closed = true
 	var firstErr error
 	for path, f := range mw.handles {
 		if err := f.Close(); err != nil && firstErr == nil {
