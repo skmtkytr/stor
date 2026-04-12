@@ -203,9 +203,9 @@ func (u *Uploader) serveLoop(c *Client) {
 				return
 			}
 
-			// Read piece data from disk
+			// Read piece data from disk — guard against integer overflow
 			offset := int64(index)*pieceLen + int64(begin)
-			if offset+int64(length) > totalSize {
+			if offset < 0 || offset+int64(length) > totalSize {
 				slog.Debug("upload: request out of bounds", "addr", c.Addr)
 				return
 			}

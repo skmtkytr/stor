@@ -13,6 +13,93 @@ import (
 	"github.com/skmtkytr/stor/torrent"
 )
 
+func TestUploadRequestOverflowIndex(t *testing.T) {
+	// A request with index=MaxUint32/2 and large pieceLen could cause
+	// integer overflow in offset calculation. The uploader should reject it.
+	data := make([]byte, 512)
+	h0 := sha1.Sum(data[:256])
+	h1 := sha1.Sum(data[256:])
+
+	tf := &torrent.TorrentFile{
+		Info: torrent.Info{
+			Name: "test", PieceLength: 256, Length: 512,
+			PieceHashes: [][20]byte{h0, h1},
+		},
+	}
+	tf.InfoHash = sha1.Sum([]byte("overflow-test"))
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "test")
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bf := make(peer.Bitfield, 1)
+	bf.SetPiece(0)
+	bf.SetPiece(1)
+
+	u := NewUploader(tf, filePath, [20]byte{}, bf)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		hs, _ := peer.ReadHandshake(conn)
+		u.HandleIncoming(conn, hs)
+	}()
+
+	conn, err := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = peer.WriteHandshake(conn, &peer.Handshake{InfoHash: tf.InfoHash, PeerID: [20]byte{9}})
+	_, _ = peer.ReadHandshake(conn)
+
+	cr := bufio.NewReaderSize(conn, 64*1024)
+
+	// Read bitfield
+	msg, _ := peer.ReadMessage(cr)
+	if msg == nil || msg.ID != peer.MsgBitfield {
+		t.Fatal("expected bitfield")
+	}
+
+	// Send interested to get unchoked
+	_ = (&peer.Message{ID: peer.MsgInterested}).Write(conn)
+
+	// Read unchoke
+	for {
+		msg, err := peer.ReadMessage(cr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg != nil && msg.ID == peer.MsgUnchoke {
+			break
+		}
+	}
+
+	// Send request with overflowing index (2^31 * 256 > int64 max)
+	req := peer.NewRequestMessage(0x7FFFFFFF, 0, 128)
+	_ = req.Write(conn)
+
+	// The server should disconnect (request out of bounds)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, err = peer.ReadMessage(cr)
+	if err == nil {
+		t.Fatal("expected connection to close after overflow request")
+	}
+}
+
 func TestUploaderServePiece(t *testing.T) {
 	// Create test data: 2 pieces of 256 bytes
 	data := make([]byte, 512)
