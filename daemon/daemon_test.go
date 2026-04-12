@@ -511,6 +511,31 @@ func TestRPCSetConfigRejectsTraversalPaths(t *testing.T) {
 	}
 }
 
+func TestRPCSetConfigRejectsSymlinkTraversal(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+
+	// Create a symlink pointing to /
+	dir := t.TempDir()
+	link := filepath.Join(dir, "evil_link")
+	if err := os.Symlink("/", link); err != nil {
+		t.Skip("cannot create symlinks:", err)
+	}
+
+	w := doRPC(t, d, cfg.APIKey, "daemon.setConfig", map[string]any{
+		"download_dir": link,
+	})
+	var resp struct {
+		Error *struct {
+			Code    int
+			Message string
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error == nil {
+		t.Error("expected error for symlink pointing to /")
+	}
+}
+
 func TestRPCSetConfigAcceptsValidPaths(t *testing.T) {
 	d, cfg := newTestDaemon(t)
 

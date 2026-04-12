@@ -450,11 +450,17 @@ func validateDirPath(path string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("must be absolute path")
 	}
-	// Reject if path contains ".." components (before or after cleaning)
+	// Reject if path contains ".." components
 	normalized := strings.ReplaceAll(path, "\\", "/")
 	for _, part := range strings.Split(normalized, "/") {
 		if part == ".." {
 			return fmt.Errorf("path contains traversal")
+		}
+	}
+	// If the path exists, resolve symlinks and re-validate the real path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		if resolved != filepath.Clean(path) {
+			return fmt.Errorf("path contains symlink (resolves to %s)", resolved)
 		}
 	}
 	return nil
