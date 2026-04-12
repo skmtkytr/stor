@@ -15,6 +15,9 @@ import (
 	"github.com/skmtkytr/stor/bencode"
 )
 
+// MaxTrackerResponseSize is the maximum HTTP response body size (10 MB).
+const MaxTrackerResponseSize = 10 * 1024 * 1024
+
 // Event represents the tracker announce event.
 type Event string
 
@@ -77,9 +80,13 @@ func AnnounceHTTP(req AnnounceRequest) (*AnnounceResponse, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxTrackerResponseSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("tracker: failed to read response: %w", err)
+	}
+
+	if int64(len(body)) > MaxTrackerResponseSize {
+		return nil, fmt.Errorf("tracker: response too large: %d bytes (limit %d)", len(body), MaxTrackerResponseSize)
 	}
 
 	return parseAnnounceResponse(body)

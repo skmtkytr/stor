@@ -156,6 +156,43 @@ func TestAnnounceHTTPTrackerError(t *testing.T) {
 	}
 }
 
+func TestAnnounceHTTPLargeResponse(t *testing.T) {
+	// Build a valid bencode response with a large peers string (>10MB).
+	// Without a response size limit, this would be read fully and parsed.
+	// With the limit, ReadAll only reads MaxTrackerResponseSize bytes,
+	// truncating the bencode and causing a decode error.
+	peerCount := (11 * 1024 * 1024) / 6
+	bigPeers := make([]byte, peerCount*6) // ~11MB of "compact peers" (multiple of 6)
+	for i := range bigPeers {
+		bigPeers[i] = byte(i % 256)
+	}
+	resp := map[string]any{
+		"interval": int64(1800),
+		"peers":    string(bigPeers),
+	}
+	respData, _ := bencode.Encode(resp)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(respData)
+	}))
+	defer server.Close()
+
+	req := AnnounceRequest{
+		AnnounceURL: server.URL + "/announce",
+		InfoHash:    [20]byte{0x01},
+		PeerID:      [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'},
+		Port:        6881,
+		Left:        1000,
+	}
+
+	_, err := Announce(req)
+	// With MaxTrackerResponseSize limit, the response should be truncated
+	// and fail to parse, preventing DoS from oversized responses.
+	if err == nil {
+		t.Fatal("expected error for oversized tracker response (should be limited to MaxTrackerResponseSize)")
+	}
+}
+
 func TestAnnounceHTTPDictPeers(t *testing.T) {
 	// Non-compact (legacy) peer list format
 	resp := map[string]any{
