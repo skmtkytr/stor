@@ -82,6 +82,7 @@ func New(listenAddr string, opts ...Option) (*DHT, error) {
 	d.rotateToken()
 
 	go d.readLoop()
+	go d.tokenRotateLoop()
 
 	return d, nil
 }
@@ -453,6 +454,20 @@ func (d *DHT) validateToken(addr *net.UDPAddr, token string) bool {
 		}
 	}
 	return false
+}
+
+// tokenRotateLoop rotates the token secret every 5 minutes (BEP 5).
+func (d *DHT) tokenRotateLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			d.rotateToken()
+		case <-d.closed:
+			return
+		}
+	}
 }
 
 func (d *DHT) rotateToken() {

@@ -248,6 +248,36 @@ func TestDHTBootstrapAndLookup(t *testing.T) {
 	}
 }
 
+func TestTokenRotation(t *testing.T) {
+	d, err := New("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	addr := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 1), Port: 6881}
+	token1 := d.makeToken(addr)
+
+	// Force rotation
+	d.rotateToken()
+	token2 := d.makeToken(addr)
+
+	if token1 == token2 {
+		t.Error("token should change after rotation")
+	}
+
+	// Old token should still be valid (tokenSecretOld)
+	if !d.validateToken(addr, token1) {
+		t.Error("old token should still be valid after one rotation")
+	}
+
+	// Rotate again — token1 should now be invalid
+	d.rotateToken()
+	if d.validateToken(addr, token1) {
+		t.Error("token should be invalid after two rotations")
+	}
+}
+
 func TestTokenValidation(t *testing.T) {
 	d, err := New("127.0.0.1:0")
 	if err != nil {
