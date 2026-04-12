@@ -84,6 +84,7 @@ func (s *Session) Snap() download.ProgressSnap {
 	p := s.progress
 	u := s.uploader
 	state := s.record.State
+	totalBytes := s.record.TotalBytes
 	s.mu.RUnlock()
 
 	if p != nil {
@@ -109,8 +110,8 @@ func (s *Session) Snap() download.ProgressSnap {
 	if u != nil {
 		return download.ProgressSnap{
 			State:       string(state),
-			Total:       s.record.TotalBytes,
-			Downloaded:  s.record.TotalBytes,
+			Total:       totalBytes,
+			Downloaded:  totalBytes,
 			Percent:     100,
 			UpSpeed:     u.TotalUploadSpeed(),
 			ActivePeers: u.PeerCount(),
@@ -119,7 +120,7 @@ func (s *Session) Snap() download.ProgressSnap {
 
 	return download.ProgressSnap{
 		State: string(state),
-		Total: s.record.TotalBytes,
+		Total: totalBytes,
 	}
 }
 
@@ -179,8 +180,11 @@ func (s *Session) run(ctx context.Context) error {
 	}
 
 	// If already completed (resumed seeding), skip download
-	if s.record.State == StateSeeding || s.record.State == StateComplete {
-		savePath := s.record.SavePath
+	s.mu.RLock()
+	state := s.record.State
+	savePath := s.record.SavePath
+	s.mu.RUnlock()
+	if state == StateSeeding || state == StateComplete {
 		if savePath == "" {
 			savePath = filepath.Join(s.downloadDir, s.tf.Info.Name)
 		}
@@ -211,6 +215,12 @@ func (s *Session) phaseResolve(ctx context.Context) error {
 			return err
 		}
 		slog.Info("metadata resolved", "id", s.record.ID, "name", s.tf.Info.Name, "pieces", len(s.tf.Info.PieceHashes))
+	}
+
+	// Validate torrent name to prevent path traversal attacks.
+	// This must happen before any filesystem operations.
+	if err := sanitizeTorrentName(s.tf.Info.Name); err != nil {
+		return fmt.Errorf("session: %w", err)
 	}
 
 	// If resuming as seeder, don't change state or look for peers
@@ -500,15 +510,17 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("session: parse stored torrent: %w", err)
 		}
+		s.mu.Lock()
 		s.tf = tf
+		s.mu.Unlock()
 		return nil
 	}
 
 	// Try parsing source as a .torrent file path
 	if data, err := os.ReadFile(s.record.Source); err == nil {
 		if tf, err := torrent.Parse(data); err == nil {
-			s.tf = tf
 			s.mu.Lock()
+			s.tf = tf
 			s.record.TorrentData = data
 			s.record.Name = tf.Info.Name
 			s.mu.Unlock()
@@ -687,8 +699,8 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 		return fmt.Errorf("session: encode torrent data: %w", err)
 	}
 
-	s.tf = tf
 	s.mu.Lock()
+	s.tf = tf
 	s.record.TorrentData = torrentData
 	s.record.Name = tf.Info.Name
 	s.mu.Unlock()
