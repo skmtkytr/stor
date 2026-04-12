@@ -256,3 +256,21 @@ func TestAnnounceHTTPDictPeers(t *testing.T) {
 		t.Errorf("peer port: got %d", result.Peers[0].Port)
 	}
 }
+
+func TestParseCompactPeersLimit(t *testing.T) {
+	// Verify that parseCompactPeers enforces MaxPeersPerResponse.
+	// Create data for MaxPeersPerResponse+100 peers.
+	numPeers := MaxPeersPerResponse + 100
+	data := make([]byte, numPeers*6)
+	for i := range numPeers {
+		binary.BigEndian.PutUint32(data[i*6:], uint32(i+1))
+		binary.BigEndian.PutUint16(data[i*6+4:], 6881)
+	}
+	peers, err := parseCompactPeers(string(data))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(peers) > MaxPeersPerResponse {
+		t.Errorf("peers: got %d, want at most %d", len(peers), MaxPeersPerResponse)
+	}
+}

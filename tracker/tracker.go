@@ -18,6 +18,10 @@ import (
 // MaxTrackerResponseSize is the maximum HTTP response body size (10 MB).
 const MaxTrackerResponseSize = 10 * 1024 * 1024
 
+// MaxPeersPerResponse is the maximum number of peers accepted from a single
+// tracker response to prevent memory exhaustion from malicious trackers.
+const MaxPeersPerResponse = 10000
+
 // Event represents the tracker announce event.
 type Event string
 
@@ -168,6 +172,9 @@ func parseCompactPeers(data string) ([]Peer, error) {
 	}
 
 	numPeers := len(data) / 6
+	if numPeers > MaxPeersPerResponse {
+		numPeers = MaxPeersPerResponse
+	}
 	peers := make([]Peer, numPeers)
 	for i := range numPeers {
 		offset := i * 6
@@ -181,8 +188,15 @@ func parseCompactPeers(data string) ([]Peer, error) {
 
 // parseDictPeers parses the legacy (non-compact) peer list.
 func parseDictPeers(list []any) ([]Peer, error) {
-	peers := make([]Peer, 0, len(list))
+	cap := len(list)
+	if cap > MaxPeersPerResponse {
+		cap = MaxPeersPerResponse
+	}
+	peers := make([]Peer, 0, cap)
 	for _, item := range list {
+		if len(peers) >= MaxPeersPerResponse {
+			break
+		}
 		d, ok := item.(map[string]any)
 		if !ok {
 			return nil, errors.New("tracker: peer entry is not a dict")
