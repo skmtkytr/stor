@@ -839,6 +839,9 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 
 	wg.Wait()
 
+	// Filter private/loopback/link-local addresses to prevent SSRF
+	allPeers = tracker.FilterPrivatePeers(allPeers)
+
 	if len(allPeers) == 0 {
 		slog.Warn("no peers found", "id", s.record.ID)
 		return nil, fmt.Errorf("session: no peers found")

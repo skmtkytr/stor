@@ -114,6 +114,8 @@ type Client struct {
 	// Upload while downloading: callback to serve incoming requests
 	OnRequest func(index, begin, length uint32) []byte
 
+	numPieces int // total piece count; used to validate incoming requests (0 = skip validation)
+
 	// Piece buffer pool (set by runWorkers for buffer reuse)
 	piecePool  *sync.Pool
 	disablePEX bool      // BEP 27: suppress PEX for private torrents
@@ -397,6 +399,20 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
+// ValidateBitfield checks that the peer's bitfield is the expected size for numPieces.
+// Returns an error if the bitfield is oversized (potential DoS).
+// nil (have-all) and empty (have-none) bitfields are always valid.
+func (c *Client) ValidateBitfield(numPieces int) error {
+	if c.bitfield == nil || len(c.bitfield) == 0 {
+		return nil // have-all or have-none sentinels
+	}
+	expected := (numPieces + 7) / 8
+	if len(c.bitfield) != expected {
+		return fmt.Errorf("download: bitfield size %d doesn't match expected %d for %d pieces", len(c.bitfield), expected, numPieces)
+	}
+	return nil
+}
+
 // HasPiece returns whether the peer has the given piece.
 // A nil bitfield means "have all" (BEP 6 have-all).
 func (c *Client) HasPiece(index int) bool {
@@ -506,6 +522,10 @@ func (c *Client) handleRequest(payload []byte) {
 	}
 	index, begin, length, err := peer.ParseRequest(payload)
 	if err != nil || length > 32*1024 {
+		return
+	}
+	// Validate index against known piece count (if set)
+	if c.numPieces > 0 && int(index) >= c.numPieces {
 		return
 	}
 	block := c.OnRequest(index, begin, length)
@@ -1011,9 +1031,16 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			}
+			numPieces := len(tf.Info.PieceHashes)
+			// Validate bitfield size to reject DoS-sized bitfields
+			if err := client.ValidateBitfield(numPieces); err != nil {
+				_ = client.Close()
+				return
+			}
 			client.maxPipeline = cfg.MaxPipeline
 			client.piecePool = piecePool
 			client.progress = progress
+			client.numPieces = numPieces
 			if peerSink != nil {
 				client.PeerSink = peerSink
 			}
