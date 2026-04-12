@@ -171,9 +171,11 @@ func (d *DHT) readLoop() {
 // handleResponse routes a response to the waiting goroutine.
 func (d *DHT) handleResponse(msg *KRPCMessage) {
 	if ch, ok := d.pending.LoadAndDelete(msg.T); ok {
-		select {
-		case ch.(chan *KRPCMessage) <- msg:
-		default:
+		if typed, ok := ch.(chan *KRPCMessage); ok {
+			select {
+			case typed <- msg:
+			default:
+			}
 		}
 	}
 }
@@ -322,6 +324,11 @@ func (d *DHT) iterativeLookup(target ID, getPeers bool) ([]string, error) {
 	deadline := time.Now().Add(LookupTimeout)
 
 	for round := 0; round < 10; round++ {
+		select {
+		case <-d.closed:
+			return allPeers, nil
+		default:
+		}
 		if time.Now().After(deadline) {
 			break
 		}

@@ -248,6 +248,23 @@ func TestDHTBootstrapAndLookup(t *testing.T) {
 	}
 }
 
+func TestHandleResponseInvalidPendingType(t *testing.T) {
+	d, err := New("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+
+	// Store a non-channel value in pending — should not panic
+	d.pending.Store("bad-txn", "not-a-channel")
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("handleResponse panicked on invalid pending type: %v", r)
+		}
+	}()
+	d.handleResponse(&KRPCMessage{T: "bad-txn", Y: MsgResponse})
+}
+
 func TestTokenRotation(t *testing.T) {
 	d, err := New("127.0.0.1:0")
 	if err != nil {
