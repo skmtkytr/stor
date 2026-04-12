@@ -473,6 +473,78 @@ func TestDownloadPieceWrongIndex(t *testing.T) {
 	}
 }
 
+func TestDownloadPieceLargeBeginRejected(t *testing.T) {
+	// A malicious peer sends a piece with begin=0xFFFFFFFF which could
+	// cause int(begin)+len(block) to overflow on 32-bit and bypass bounds check.
+	infoHash := [20]byte{0xAC}
+	peerID := [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'}
+
+	pieceData := make([]byte, BlockSize)
+	for i := range pieceData {
+		pieceData[i] = byte(i % 256)
+	}
+	pieceHash := sha1.Sum(pieceData)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		hs, _ := peer.ReadHandshake(conn)
+		if hs.InfoHash != infoHash {
+			return
+		}
+		_ = peer.WriteHandshake(conn, &peer.Handshake{
+			InfoHash: infoHash,
+			PeerID:   [20]byte{'-', 'F', 'K', '0', '0', '0', '1', '-'},
+		})
+
+		bf := make([]byte, 1)
+		bf[0] = 0xFF
+		_ = (&peer.Message{ID: peer.MsgBitfield, Payload: bf}).Write(conn)
+		_ = (&peer.Message{ID: peer.MsgUnchoke}).Write(conn)
+
+		for {
+			msg, err := peer.ReadMessage(conn)
+			if err != nil {
+				return
+			}
+			if msg == nil {
+				continue
+			}
+			if msg.ID == peer.MsgRequest {
+				// Respond with a valid index but malicious begin=0xFFFFFFFF
+				block := make([]byte, 16)
+				pieceMsg := peer.NewPieceMessage(0, 0xFFFFFFFF, block)
+				_ = pieceMsg.Write(conn)
+			}
+		}
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	p := tracker.Peer{IP: net.IPv4(127, 0, 0, 1), Port: uint16(addr.Port)}
+
+	client, err := NewClient(p, infoHash, peerID)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	pw := PieceWork{Index: 0, Hash: pieceHash, Length: len(pieceData)}
+	_, _, err = client.DownloadPiece(pw)
+	if err == nil {
+		t.Fatal("expected error when peer sends piece with huge begin value")
+	}
+}
+
 func TestDownloadPieceHashMismatch(t *testing.T) {
 	infoHash := [20]byte{0xBB}
 	peerID := [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'}
@@ -680,6 +752,24 @@ func TestValidWebSeedURLRejectsPrivateIPs(t *testing.T) {
 	}
 }
 
+func TestResolveAndValidateHost(t *testing.T) {
+	// Private IPs should be rejected
+	for _, host := range []string{"127.0.0.1", "10.0.0.1", "192.168.1.1", "localhost"} {
+		_, err := resolveAndValidateHost(host)
+		if err == nil {
+			t.Errorf("resolveAndValidateHost(%q) should fail", host)
+		}
+	}
+	// Public IP should pass
+	ip, err := resolveAndValidateHost("8.8.8.8")
+	if err != nil {
+		t.Errorf("resolveAndValidateHost(8.8.8.8) failed: %v", err)
+	}
+	if ip != "8.8.8.8" {
+		t.Errorf("got %q, want 8.8.8.8", ip)
+	}
+}
+
 func TestWebSeedRejectsResolvedPrivateIP(t *testing.T) {
 	// A hostname that resolves to a private IP should be rejected at request time.
 	// We can't control DNS, so test the resolveAndValidateHost function directly.
@@ -696,6 +786,85 @@ func TestWebSeedRejectsResolvedPrivateIP(t *testing.T) {
 	if !isPrivateHost("localhost") {
 		t.Error("localhost should be detected as private")
 	}
+}
+
+func TestBuildWorkQueueLargeTorrent(t *testing.T) {
+	// Simulate a torrent with total size > 2^31 bytes (3 GiB) to catch integer overflow.
+	// pieceLength = 1 GiB, 3 pieces, last piece = 1 GiB.
+	pieceLen := int64(1 << 30) // 1 GiB
+	totalLen := int64(3) * pieceLen
+	numPieces := 3
+
+	hashes := make([][20]byte, numPieces)
+	tf := &torrent.TorrentFile{
+		Info: torrent.Info{
+			PieceLength: pieceLen,
+			PieceHashes: hashes,
+			Length:      totalLen,
+		},
+	}
+
+	workCh := buildWorkQueue(tf, totalLen)
+	close(workCh)
+
+	for pw := range workCh {
+		if pw.Length <= 0 {
+			t.Fatalf("piece %d has invalid length %d", pw.Index, pw.Length)
+		}
+		if pw.Length > int(pieceLen) {
+			t.Fatalf("piece %d length %d exceeds piece length %d", pw.Index, pw.Length, pieceLen)
+		}
+	}
+}
+
+func TestBuildWorkQueueLastPieceShorter(t *testing.T) {
+	// 3 pieces of 256 bytes, total = 700 bytes (last piece = 188 bytes)
+	pieceLen := int64(256)
+	totalLen := int64(700)
+	numPieces := 3
+
+	hashes := make([][20]byte, numPieces)
+	tf := &torrent.TorrentFile{
+		Info: torrent.Info{
+			PieceLength: pieceLen,
+			PieceHashes: hashes,
+			Length:      totalLen,
+		},
+	}
+
+	workCh := buildWorkQueue(tf, totalLen)
+	close(workCh)
+
+	var pieces []PieceWork
+	for pw := range workCh {
+		pieces = append(pieces, pw)
+	}
+
+	if len(pieces) != 3 {
+		t.Fatalf("expected 3 pieces, got %d", len(pieces))
+	}
+	if pieces[0].Length != 256 {
+		t.Errorf("piece 0: got %d, want 256", pieces[0].Length)
+	}
+	if pieces[1].Length != 256 {
+		t.Errorf("piece 1: got %d, want 256", pieces[1].Length)
+	}
+	if pieces[2].Length != 188 {
+		t.Errorf("piece 2: got %d, want 188", pieces[2].Length)
+	}
+}
+
+func TestClientHavePieceNilBitfield(t *testing.T) {
+	// nil bitfield means "have all" (BEP 6 convention).
+	// SetPiece on nil bitfield should not panic.
+	c := &Client{
+		bitfield: nil, // have-all sentinel
+	}
+	if !c.HasPiece(0) {
+		t.Error("nil bitfield should report having all pieces")
+	}
+	// This must not panic
+	c.safeBitfieldSet(5)
 }
 
 func TestDeduplicatePeers(t *testing.T) {

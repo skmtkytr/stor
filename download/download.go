@@ -406,6 +406,14 @@ func (c *Client) HasPiece(index int) bool {
 	return c.bitfield.HasPiece(index)
 }
 
+// safeBitfieldSet sets a piece in the bitfield if it is non-nil.
+// nil bitfield means "have all", so setting individual pieces is a no-op.
+func (c *Client) safeBitfieldSet(index int) {
+	if c.bitfield != nil {
+		c.bitfield.SetPiece(index)
+	}
+}
+
 // SendBitfield sends our bitfield to the peer so they know what pieces
 // we have and can request them from us.
 func (c *Client) SendBitfield(bf peer.Bitfield) error {
@@ -476,7 +484,7 @@ func (c *Client) waitForUnchoke() error {
 		case peer.MsgHave:
 			idx, err := peer.ParseHave(msg.Payload)
 			if err == nil {
-				c.bitfield.SetPiece(int(idx))
+				c.safeBitfieldSet(int(idx))
 			}
 		case peer.MsgInterested:
 			_ = c.SendUnchoke()
@@ -605,7 +613,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 				continue
 			}
 			noProgressCount = 0
-			if int(begin)+len(block) > len(buf) {
+			if int64(begin)+int64(len(block)) > int64(len(buf)) {
 				return fail(fmt.Errorf("download: piece %d block out of bounds (begin=%d, len=%d, piece=%d)", pw.Index, begin, len(block), len(buf)))
 			}
 			copy(buf[begin:], block)
@@ -624,7 +632,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 		case peer.MsgHave:
 			idx, err := peer.ParseHave(msg.Payload)
 			if err == nil {
-				c.bitfield.SetPiece(int(idx))
+				c.safeBitfieldSet(int(idx))
 			}
 		case peer.MsgInterested:
 			// Peer wants our data — immediately unchoke them
@@ -701,12 +709,12 @@ func buildWorkQueue(tf *torrent.TorrentFile, totalLength int64) chan PieceWork {
 	numPieces := len(tf.Info.PieceHashes)
 	workCh := make(chan PieceWork, numPieces)
 	for i, hash := range tf.Info.PieceHashes {
-		length := int(tf.Info.PieceLength)
-		remaining := int(totalLength) - i*int(tf.Info.PieceLength)
+		length := tf.Info.PieceLength
+		remaining := totalLength - int64(i)*tf.Info.PieceLength
 		if remaining < length {
 			length = remaining
 		}
-		workCh <- PieceWork{Index: i, Hash: hash, Length: length}
+		workCh <- PieceWork{Index: i, Hash: hash, Length: int(length)}
 	}
 	return workCh
 }
@@ -762,11 +770,11 @@ func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Pe
 	progress := NewProgress(numPieces, tl)
 	resultCh := startWorkers(peers, tf.InfoHash, peerID, workCh, progress)
 
-	pieceLength := int(tf.Info.PieceLength)
+	pieceLength := tf.Info.PieceLength
 	for completed := 0; completed < numPieces; {
 		select {
 		case res := <-resultCh:
-			offset := int64(res.Index) * int64(pieceLength)
+			offset := int64(res.Index) * pieceLength
 			if _, err := f.WriteAt(res.Data, offset); err != nil {
 				return fmt.Errorf("download: write piece %d failed: %w", res.Index, err)
 			}
@@ -889,12 +897,12 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 		if p.Have != nil && p.Have.HasPiece(i) {
 			continue
 		}
-		length := int(p.TF.Info.PieceLength)
-		rem := int(tl) - i*int(p.TF.Info.PieceLength)
+		length := p.TF.Info.PieceLength
+		rem := tl - int64(i)*p.TF.Info.PieceLength
 		if rem < length {
 			length = rem
 		}
-		pieces = append(pieces, PieceWork{Index: i, Hash: hash, Length: length})
+		pieces = append(pieces, PieceWork{Index: i, Hash: hash, Length: int(length)})
 	}
 	remaining := len(pieces)
 
@@ -906,7 +914,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 	pq := NewPieceQueue(pieces)
 	resultCh, pm := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.PeerSink, p.Progress, p.Cfg, p.OnRequest, p.HaveBF, p.TF, p.WebSeedURLs)
 
-	pieceLength := int(p.TF.Info.PieceLength)
+	pieceLength := p.TF.Info.PieceLength
 	for completed := 0; completed < remaining; {
 		select {
 		case <-ctx.Done():
@@ -918,7 +926,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 				}
 				return nil
 			}
-			offset := int64(res.Index) * int64(pieceLength)
+			offset := int64(res.Index) * pieceLength
 			if _, err := w.WriteAt(res.Data, offset); err != nil {
 				res.Free()
 				return fmt.Errorf("download: write piece %d failed: %w", res.Index, err)
