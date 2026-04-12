@@ -1,0 +1,1 @@
+import{I as e,M as t,Q as n,S as r,g as i,m as a,x as o,z as s}from"../chunks/Cmodp_pt.js";import"../chunks/DEDqjojZ.js";var c=n({prerender:()=>!0,ssr:()=>!1});function l(n,c){var l=r();a(`12qhfyh`,n=>{t(()=>{e.title=`stor`})}),i(s(l),()=>c.children),o(n,l)}export{l as component,c as universal};
