@@ -85,11 +85,19 @@ func (s *Store) Save() error {
 	s.mu.RLock()
 	records := make([]*TorrentRecord, 0, len(s.records))
 	for _, r := range s.records {
-		records = append(records, r)
+		cp := *r // deep copy the record value
+		if r.TorrentData != nil {
+			cp.TorrentData = make([]byte, len(r.TorrentData))
+			copy(cp.TorrentData, r.TorrentData)
+		}
+		if r.Bitfield != nil {
+			cp.Bitfield = make([]byte, len(r.Bitfield))
+			copy(cp.Bitfield, r.Bitfield)
+		}
+		records = append(records, &cp)
 	}
-	s.mu.RUnlock()
-
 	data, err := json.MarshalIndent(records, "", "  ")
+	s.mu.RUnlock()
 	if err != nil {
 		return fmt.Errorf("store: marshal failed: %w", err)
 	}
@@ -135,12 +143,16 @@ func (s *Store) Put(r *TorrentRecord) {
 	s.mu.Unlock()
 }
 
-// Get returns a record by ID.
+// Get returns a copy of the record by ID.
 func (s *Store) Get(id string) (*TorrentRecord, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	r, ok := s.records[id]
-	return r, ok
+	if !ok {
+		return nil, false
+	}
+	cp := *r
+	return &cp, true
 }
 
 // Delete removes a record by ID.

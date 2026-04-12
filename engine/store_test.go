@@ -107,6 +107,43 @@ func TestStoreAtomicWrite(t *testing.T) {
 	}
 }
 
+func TestStoreSaveConsistentSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	s := NewStore(path)
+
+	s.Put(&TorrentRecord{ID: "snap", Name: "original", State: StateDownloading})
+
+	// Modify the record concurrently during Save
+	// Save should capture a snapshot, not be affected by later mutations
+	done := make(chan error)
+	go func() {
+		done <- s.Save()
+	}()
+
+	// Mutate record while Save may be running
+	r, _ := s.Get("snap")
+	r.Name = "mutated"
+	r.State = StateComplete
+
+	if err := <-done; err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Load and verify the saved state is consistent
+	s2 := NewStore(path)
+	if err := s2.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	r2, _ := s2.Get("snap")
+
+	// The name should be either "original" or "mutated" but not a mix
+	// With deep copy fix, it should always be "original"
+	if r2.Name != "original" {
+		t.Errorf("expected snapshot to preserve 'original', got %q", r2.Name)
+	}
+}
+
 func TestStoreAll(t *testing.T) {
 	s := NewStore("")
 	s.Put(&TorrentRecord{ID: "1"})
