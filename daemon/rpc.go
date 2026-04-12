@@ -438,7 +438,7 @@ func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
 }
 
 func (h *RPCHandler) daemonVersion() (any, *rpcErr) {
-	return map[string]string{"version": "0.1.0"}, nil
+	return map[string]string{"version": Version}, nil
 }
 
 // validateDirPath checks that a directory path is absolute, canonical,

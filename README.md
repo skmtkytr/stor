@@ -46,10 +46,34 @@ See [BEP.md](BEP.md) for detailed implementation notes and protocol format refer
 - **Chrome Extension**: intercepts `.torrent`/`magnet:` links, popup management
 - **Docker**: multi-arch (amd64/arm64), ~9 MB distroless image
 
-## Getting Started
+## Installation
+
+### Homebrew (macOS/Linux)
+
+```sh
+brew install skmtkytr/tap/stor
+```
+
+### Go
+
+```sh
+go install github.com/skmtkytr/stor/cmd/stor@latest
+```
+
+### GitHub Releases
+
+Download a pre-built binary from the [Releases](https://github.com/skmtkytr/stor/releases/latest) page.
+
+### Build from Source
 
 ```sh
 make && ./stor daemon
+```
+
+## Getting Started
+
+```sh
+stor daemon
 ```
 
 On first launch, a config file is created at `~/.config/stor/config.toml` with a generated API key. The web UI is served at `http://localhost:9090`.
@@ -176,16 +200,6 @@ mse/            Message Stream Encryption (768-bit DH + RC4)
 utp/            Micro Transport Protocol (LEDBAT congestion control)
 ui/             SvelteKit SPA, embedded in the binary at build time
 extension/      Chrome extension, Manifest V3
-```
-
-## Building from Source
-
-Requires Go 1.26+ and Bun.
-
-```sh
-make            # fmt → vet → lint → test → build
-make test       # tests only
-make build      # binary only (includes UI build)
 ```
 
 ## License

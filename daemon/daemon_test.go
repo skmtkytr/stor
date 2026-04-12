@@ -540,6 +540,12 @@ func TestRPCSetConfigAcceptsValidPaths(t *testing.T) {
 	d, cfg := newTestDaemon(t)
 
 	dir := t.TempDir()
+	// Resolve symlinks so the path matches what validateDirPath expects
+	// (e.g., macOS /var → /private/var).
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	w := doRPC(t, d, cfg.APIKey, "daemon.setConfig", map[string]any{
 		"download_dir": dir,
 	})
