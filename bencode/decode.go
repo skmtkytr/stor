@@ -11,10 +11,17 @@ var (
 	ErrInvalidFormat = errors.New("bencode: invalid format")
 )
 
+// Decoding limits to prevent DoS from malicious input.
+const (
+	MaxStringLength   = 64 * 1024 * 1024 // 64 MB
+	MaxCollectionSize = 1_000_000        // max items in a list or dict
+	MaxDecodeDepth    = 100              // max nesting depth
+)
+
 // Decode decodes a bencoded byte slice into a Go value.
 // Returns one of: string, int64, []any, map[string]any.
 func Decode(data []byte) (any, error) {
-	val, _, err := decodeValue(data)
+	val, _, err := decodeValue(data, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -23,24 +30,27 @@ func Decode(data []byte) (any, error) {
 
 // DecodeBytes is like Decode but also returns the number of bytes consumed.
 func DecodeBytes(data []byte) (any, int, error) {
-	val, rest, err := decodeValue(data)
+	val, rest, err := decodeValue(data, 0)
 	if err != nil {
 		return nil, 0, err
 	}
 	return val, len(data) - len(rest), nil
 }
 
-func decodeValue(data []byte) (any, []byte, error) {
+func decodeValue(data []byte, depth int) (any, []byte, error) {
 	if len(data) == 0 {
 		return nil, nil, ErrUnexpectedEnd
+	}
+	if depth > MaxDecodeDepth {
+		return nil, nil, fmt.Errorf("%w: nesting depth exceeds %d", ErrInvalidFormat, MaxDecodeDepth)
 	}
 	switch {
 	case data[0] == 'i':
 		return decodeInt(data)
 	case data[0] == 'l':
-		return decodeList(data)
+		return decodeList(data, depth)
 	case data[0] == 'd':
-		return decodeDict(data)
+		return decodeDict(data, depth)
 	case data[0] >= '0' && data[0] <= '9':
 		return decodeString(data)
 	default:
@@ -67,6 +77,10 @@ func decodeString(data []byte) (string, []byte, error) {
 	length, err := strconv.Atoi(string(data[:colonIdx]))
 	if err != nil || length < 0 {
 		return "", nil, fmt.Errorf("%w: invalid string length", ErrInvalidFormat)
+	}
+
+	if length > MaxStringLength {
+		return "", nil, fmt.Errorf("%w: string length %d exceeds limit %d", ErrInvalidFormat, length, MaxStringLength)
 	}
 
 	start := colonIdx + 1
@@ -116,7 +130,7 @@ func decodeInt(data []byte) (int64, []byte, error) {
 	return n, data[endIdx+1:], nil
 }
 
-func decodeList(data []byte) ([]any, []byte, error) {
+func decodeList(data []byte, depth int) ([]any, []byte, error) {
 	// data[0] == 'l'
 	rest := data[1:]
 	var list []any
@@ -128,7 +142,10 @@ func decodeList(data []byte) ([]any, []byte, error) {
 		if rest[0] == 'e' {
 			return list, rest[1:], nil
 		}
-		val, remaining, err := decodeValue(rest)
+		if len(list) >= MaxCollectionSize {
+			return nil, nil, fmt.Errorf("%w: list exceeds %d items", ErrInvalidFormat, MaxCollectionSize)
+		}
+		val, remaining, err := decodeValue(rest, depth+1)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -137,7 +154,7 @@ func decodeList(data []byte) ([]any, []byte, error) {
 	}
 }
 
-func decodeDict(data []byte) (map[string]any, []byte, error) {
+func decodeDict(data []byte, depth int) (map[string]any, []byte, error) {
 	// data[0] == 'd'
 	rest := data[1:]
 	dict := make(map[string]any)
@@ -149,6 +166,10 @@ func decodeDict(data []byte) (map[string]any, []byte, error) {
 		}
 		if rest[0] == 'e' {
 			return dict, rest[1:], nil
+		}
+
+		if len(dict) >= MaxCollectionSize {
+			return nil, nil, fmt.Errorf("%w: dict exceeds %d items", ErrInvalidFormat, MaxCollectionSize)
 		}
 
 		// Key must be a string
@@ -170,7 +191,7 @@ func decodeDict(data []byte) (map[string]any, []byte, error) {
 		if len(remaining) == 0 {
 			return nil, nil, fmt.Errorf("%w: missing value for key %q", ErrUnexpectedEnd, key)
 		}
-		val, remaining2, err := decodeValue(remaining)
+		val, remaining2, err := decodeValue(remaining, depth+1)
 		if err != nil {
 			return nil, nil, err
 		}

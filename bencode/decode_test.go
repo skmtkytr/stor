@@ -1,6 +1,8 @@
 package bencode
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -151,6 +153,83 @@ func TestDecodeDict(t *testing.T) {
 				t.Errorf("got len %d, want %d", len(d), tt.wantLen)
 			}
 		})
+	}
+}
+
+func TestDecodeStringExceedsMaxLength(t *testing.T) {
+	// A bencode string header claiming 100MB should be rejected with
+	// ErrInvalidFormat (limit violation), not ErrUnexpectedEnd (truncated data).
+	input := []byte("104857601:x") // 100*1024*1024 + 1 = exceeds 64MB limit
+	_, err := Decode(input)
+	if err == nil {
+		t.Fatal("expected error for string length exceeding limit")
+	}
+	if !errors.Is(err, ErrInvalidFormat) {
+		t.Fatalf("expected ErrInvalidFormat, got: %v", err)
+	}
+}
+
+func TestDecodeListExceedsMaxItems(t *testing.T) {
+	// Build a bencode list with MaxCollectionSize+1 items: l i0e i0e ... e
+	// Each item is "i0e" (3 bytes). To avoid building a huge buffer,
+	// we test with a small limit by using a helper.
+	// Instead, build a list of 1_000_001 "i0e" items.
+	// This is ~3MB, acceptable for a test.
+	var buf []byte
+	buf = append(buf, 'l')
+	item := []byte("i0e")
+	for range MaxCollectionSize + 1 {
+		buf = append(buf, item...)
+	}
+	buf = append(buf, 'e')
+
+	_, err := Decode(buf)
+	if err == nil {
+		t.Fatal("expected error for list exceeding max items")
+	}
+	if !errors.Is(err, ErrInvalidFormat) {
+		t.Fatalf("expected ErrInvalidFormat, got: %v", err)
+	}
+}
+
+func TestDecodeDictExceedsMaxItems(t *testing.T) {
+	// Build a bencode dict with MaxCollectionSize+1 entries.
+	// Keys must be sorted, so use zero-padded numeric keys.
+	var buf []byte
+	buf = append(buf, 'd')
+	for i := range MaxCollectionSize + 1 {
+		key := fmt.Sprintf("%07d", i) // 7-char key, always sorted
+		buf = append(buf, fmt.Sprintf("%d:%s", len(key), key)...)
+		buf = append(buf, "i0e"...)
+	}
+	buf = append(buf, 'e')
+
+	_, err := Decode(buf)
+	if err == nil {
+		t.Fatal("expected error for dict exceeding max items")
+	}
+	if !errors.Is(err, ErrInvalidFormat) {
+		t.Fatalf("expected ErrInvalidFormat, got: %v", err)
+	}
+}
+
+func TestDecodeExceedsMaxDepth(t *testing.T) {
+	// Build deeply nested lists: l l l ... e e e
+	depth := 150 // exceeds MaxDecodeDepth (100)
+	var buf []byte
+	for range depth {
+		buf = append(buf, 'l')
+	}
+	for range depth {
+		buf = append(buf, 'e')
+	}
+
+	_, err := Decode(buf)
+	if err == nil {
+		t.Fatal("expected error for nesting depth exceeding limit")
+	}
+	if !errors.Is(err, ErrInvalidFormat) {
+		t.Fatalf("expected ErrInvalidFormat, got: %v", err)
 	}
 }
 
