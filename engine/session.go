@@ -682,7 +682,10 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 	if tf.Announce != "" {
 		fullDict["announce"] = tf.Announce
 	}
-	torrentData, _ := bencode.Encode(fullDict)
+	torrentData, err := bencode.Encode(fullDict)
+	if err != nil {
+		return fmt.Errorf("session: encode torrent data: %w", err)
+	}
 
 	s.tf = tf
 	s.mu.Lock()
