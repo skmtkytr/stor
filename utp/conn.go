@@ -13,19 +13,20 @@ var errClosed = errors.New("utp: connection closed")
 
 // Conn implements net.Conn over uTP.
 type Conn struct {
-	mu       sync.Mutex
-	udpConn  *net.UDPConn
-	remote   *net.UDPAddr
-	connID   uint16
-	seqNr    uint16
-	ackNr    uint16
-	ledbat   *LEDBAT
-	recvBuf  []byte
-	recvCh   chan []byte
-	closed   bool
-	closeCh  chan struct{}
-	deadline time.Time
-	ownsUDP  bool // true for outgoing (client) connections that own the UDP socket
+	mu            sync.Mutex
+	udpConn       *net.UDPConn
+	remote        *net.UDPAddr
+	connID        uint16
+	seqNr         uint16
+	ackNr         uint16
+	ledbat        *LEDBAT
+	recvBuf       []byte
+	recvCh        chan []byte
+	closed        bool
+	closeCh       chan struct{}
+	deadline      time.Time
+	writeDeadline time.Time
+	ownsUDP       bool // true for outgoing (client) connections that own the UDP socket
 }
 
 // newConn creates a uTP connection.
@@ -90,6 +91,12 @@ func (c *Conn) Write(b []byte) (int, error) {
 		// Wait for congestion window to allow sending
 		canSend := c.ledbat.CanSend()
 		for canSend <= 0 {
+			c.mu.Lock()
+			wd := c.writeDeadline
+			c.mu.Unlock()
+			if !wd.IsZero() && time.Now().After(wd) {
+				return total, &net.OpError{Op: "write", Net: "utp", Err: errors.New("timeout")}
+			}
 			time.Sleep(time.Millisecond)
 			canSend = c.ledbat.CanSend()
 		}
@@ -188,7 +195,10 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 
 // SetWriteDeadline sets the write deadline.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
-	return nil // write doesn't block on deadline
+	c.mu.Lock()
+	c.writeDeadline = t
+	c.mu.Unlock()
+	return nil
 }
 
 // deliverData is called by the listener/muxer when a data packet arrives.
