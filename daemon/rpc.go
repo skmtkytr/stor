@@ -4,10 +4,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,8 +77,9 @@ func (h *RPCHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	const maxRPCBodySize = 10 << 20 // 10 MB
 	var req rpcRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxRPCBodySize)).Decode(&req); err != nil {
 		slog.Warn("rpc parse error", "error", err)
 		writeRPCError(w, nil, -32700, "parse error")
 		return
@@ -357,6 +361,18 @@ func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
 		return nil, &rpcErr{Code: -32602, Message: "invalid params"}
 	}
 
+	// Validate directory paths: must be absolute and not contain traversal
+	if p.DownloadDir != nil {
+		if err := validateDirPath(*p.DownloadDir); err != nil {
+			return nil, &rpcErr{Code: -32602, Message: "invalid download_dir: " + err.Error()}
+		}
+	}
+	if p.TmpDir != nil {
+		if err := validateDirPath(*p.TmpDir); err != nil {
+			return nil, &rpcErr{Code: -32602, Message: "invalid tmp_dir: " + err.Error()}
+		}
+	}
+
 	// Engine setters are thread-safe; lock only for h.cfg mutations.
 	if p.DownloadDir != nil {
 		h.engine.SetDownloadDir(*p.DownloadDir)
@@ -423,6 +439,25 @@ func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
 
 func (h *RPCHandler) daemonVersion() (any, *rpcErr) {
 	return map[string]string{"version": "0.1.0"}, nil
+}
+
+// validateDirPath checks that a directory path is absolute, canonical,
+// and doesn't contain path traversal components.
+func validateDirPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("empty path")
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("must be absolute path")
+	}
+	// Reject if path contains ".." components (before or after cleaning)
+	normalized := strings.ReplaceAll(path, "\\", "/")
+	for _, part := range strings.Split(normalized, "/") {
+		if part == ".." {
+			return fmt.Errorf("path contains traversal")
+		}
+	}
+	return nil
 }
 
 func writeRPCError(w http.ResponseWriter, id any, code int, msg string) {

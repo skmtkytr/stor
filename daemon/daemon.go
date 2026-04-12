@@ -46,6 +46,9 @@ func New(eng *engine.Engine, cfg Config) *Daemon {
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           d.logMiddleware(d.corsMiddleware(mux)),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	return d
@@ -200,9 +203,9 @@ func (d *Daemon) corsMiddleware(next http.Handler) http.Handler {
 		}
 
 		if r.Method == http.MethodOptions {
-			// PNA preflight from same-origin on .local — respond even without Origin
+			// PNA preflight from same-origin on .local — allow private network
+			// but do NOT set wildcard CORS origin (prevents CORS bypass)
 			if origin == "" && r.Header.Get("Access-Control-Request-Private-Network") == "true" {
-				w.Header().Set("Access-Control-Allow-Origin", "*")
 				w.Header().Set("Access-Control-Allow-Private-Network", "true")
 			}
 			w.WriteHeader(http.StatusNoContent)

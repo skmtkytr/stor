@@ -89,7 +89,7 @@ func (c *Config) Save() error {
 	if c.path == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(c.path), 0o700); err != nil {
 		return err
 	}
 

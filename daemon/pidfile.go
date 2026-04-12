@@ -14,7 +14,7 @@ import (
 // AcquirePIDFile writes the current PID to the file.
 // If a previous daemon is still running, it is killed first.
 func AcquirePIDFile(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 

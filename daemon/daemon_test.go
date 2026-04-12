@@ -229,6 +229,21 @@ func TestDaemonCORSPrivateNetworkAccess(t *testing.T) {
 	}
 }
 
+func TestDaemonCORSPNANoOriginNoWildcard(t *testing.T) {
+	d, _ := newTestDaemon(t)
+
+	// PNA preflight WITHOUT Origin header should NOT get wildcard CORS
+	req := httptest.NewRequest(http.MethodOptions, "/api/rpc", http.NoBody)
+	req.Header.Set("Access-Control-Request-Private-Network", "true")
+	w := httptest.NewRecorder()
+	d.server.Handler.ServeHTTP(w, req)
+
+	origin := w.Header().Get("Access-Control-Allow-Origin")
+	if origin == "*" {
+		t.Error("PNA preflight without Origin should NOT use wildcard '*'")
+	}
+}
+
 func TestDaemonAddFileSizeLimit(t *testing.T) {
 	d, cfg := newTestDaemon(t)
 
@@ -464,6 +479,72 @@ func TestRPCTorrentAddURL(t *testing.T) {
 	// Should fail because it's not a valid torrent, but shouldn't crash
 	if resp.Error == nil {
 		t.Log("surprisingly succeeded with invalid torrent data")
+	}
+}
+
+func TestRPCSetConfigRejectsTraversalPaths(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+
+	tests := []struct {
+		name   string
+		params map[string]any
+	}{
+		{"download_dir with traversal", map[string]any{"download_dir": "/tmp/../../../etc"}},
+		{"tmp_dir with traversal", map[string]any{"tmp_dir": "../../root"}},
+		{"download_dir relative", map[string]any{"download_dir": "relative/path"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := doRPC(t, d, cfg.APIKey, "daemon.setConfig", tt.params)
+			var resp struct {
+				Error *struct {
+					Code    int
+					Message string
+				} `json:"error"`
+			}
+			_ = json.Unmarshal(w.Body.Bytes(), &resp)
+			if resp.Error == nil {
+				t.Errorf("expected error for %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestRPCSetConfigAcceptsValidPaths(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+
+	dir := t.TempDir()
+	w := doRPC(t, d, cfg.APIKey, "daemon.setConfig", map[string]any{
+		"download_dir": dir,
+	})
+	var resp struct {
+		Error *struct{ Code int } `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error != nil {
+		t.Errorf("expected success for valid absolute path, got error code %d", resp.Error.Code)
+	}
+}
+
+func TestRPCRejectsOversizedBody(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+
+	// Send a JSON body larger than 10 MB
+	bigBody := `{"jsonrpc":"2.0","method":"daemon.version","id":1,"extra":"` + strings.Repeat("x", 11*1024*1024) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/rpc", strings.NewReader(bigBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+	w := httptest.NewRecorder()
+	d.server.Handler.ServeHTTP(w, req)
+
+	// Should fail with parse error (body truncated by LimitReader)
+	var resp struct {
+		Error *struct{ Code int } `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error == nil {
+		t.Error("expected error for oversized body")
 	}
 }
 
