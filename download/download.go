@@ -27,6 +27,10 @@ const (
 	DefaultMaxPipeline = 16
 	DefaultMaxPeers    = 100
 	DefaultDialTimeout = 3 // seconds
+
+	// maxUnexpectedMessages is the limit on unexpected/wrong-index messages
+	// per piece before aborting. Prevents DoS from malicious peers.
+	maxUnexpectedMessages = 100
 )
 
 // DownloadConfig holds tunable parameters for the download engine.
@@ -538,6 +542,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 	downloaded := 0
 	requested := 0
 	backlog := 0
+	noProgressCount := 0
 
 	for downloaded < pw.Length {
 		flushed := false
@@ -579,8 +584,18 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 				return fail(err)
 			}
 			if int(idx) != pw.Index {
+				backlog--
+				noProgressCount++
+				if noProgressCount > maxUnexpectedMessages {
+					return fail(fmt.Errorf("download: piece %d too many unexpected messages from peer", pw.Index))
+				}
+				// Allow re-requesting lost blocks
+				if backlog <= 0 {
+					requested = downloaded
+				}
 				continue
 			}
+			noProgressCount = 0
 			if int(begin)+len(block) > len(buf) {
 				return fail(fmt.Errorf("download: piece %d block out of bounds (begin=%d, len=%d, piece=%d)", pw.Index, begin, len(block), len(buf)))
 			}

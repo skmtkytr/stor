@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,13 +17,30 @@ import (
 
 var httpClient = &http.Client{Timeout: 60 * time.Second}
 
-// validWebSeedURL checks that a webseed URL uses http or https scheme.
+// validWebSeedURL checks that a webseed URL uses http or https scheme
+// and does not point to a private/internal IP address (SSRF prevention).
 func validWebSeedURL(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
-	return u.Scheme == "http" || u.Scheme == "https"
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+
+	host := u.Hostname()
+	if host == "localhost" {
+		return false
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Non-IP hostname (e.g. "example.com") — allow.
+		// DNS resolution will happen at request time.
+		return true
+	}
+
+	return !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast()
 }
 
 // downloadPieceHTTP downloads a single piece from a webseed URL using HTTP Range.

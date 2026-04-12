@@ -392,6 +392,87 @@ func TestUploadWhileDownloading(t *testing.T) {
 // Verify piece hashes array is correct
 var _ = [2][20]byte{sha1.Sum([]byte{}), sha1.Sum([]byte{})}
 
+func TestDownloadPieceWrongIndex(t *testing.T) {
+	infoHash := [20]byte{0xAB}
+	peerID := [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'}
+
+	pieceData := make([]byte, BlockSize)
+	for i := range pieceData {
+		pieceData[i] = byte(i % 256)
+	}
+	pieceHash := sha1.Sum(pieceData)
+
+	// Fake peer that responds with wrong piece index
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		hs, _ := peer.ReadHandshake(conn)
+		if hs.InfoHash != infoHash {
+			return
+		}
+		_ = peer.WriteHandshake(conn, &peer.Handshake{
+			InfoHash: infoHash,
+			PeerID:   [20]byte{'-', 'F', 'K', '0', '0', '0', '1', '-'},
+		})
+
+		// Send bitfield + unchoke
+		bf := make([]byte, 1)
+		bf[0] = 0xFF
+		_ = (&peer.Message{ID: peer.MsgBitfield, Payload: bf}).Write(conn)
+		_ = (&peer.Message{ID: peer.MsgUnchoke}).Write(conn)
+
+		// Read messages and always respond with wrong piece index (999)
+		for {
+			msg, err := peer.ReadMessage(conn)
+			if err != nil {
+				return
+			}
+			if msg == nil {
+				continue
+			}
+			if msg.ID == peer.MsgRequest {
+				begin := binary.BigEndian.Uint32(msg.Payload[4:8])
+				length := binary.BigEndian.Uint32(msg.Payload[8:12])
+				block := make([]byte, length)
+				// Send piece with wrong index
+				pieceMsg := peer.NewPieceMessage(999, begin, block)
+				_ = pieceMsg.Write(conn)
+			}
+		}
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	p := tracker.Peer{IP: net.IPv4(127, 0, 0, 1), Port: uint16(addr.Port)}
+
+	client, err := NewClient(p, infoHash, peerID)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	pw := PieceWork{Index: 0, Hash: pieceHash, Length: len(pieceData)}
+	start := time.Now()
+	_, _, err = client.DownloadPiece(pw)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error when peer sends only wrong-index pieces")
+	}
+	// Should detect the flood and fail fast, not wait for 30s deadline
+	if elapsed > 10*time.Second {
+		t.Fatalf("took %v, expected fast failure from unexpected message limit", elapsed)
+	}
+}
+
 func TestDownloadPieceHashMismatch(t *testing.T) {
 	infoHash := [20]byte{0xBB}
 	peerID := [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'}
@@ -569,6 +650,33 @@ func TestProgressSnap(t *testing.T) {
 	}
 	if snap.ActivePeers != 2 {
 		t.Errorf("active_peers: got %d", snap.ActivePeers)
+	}
+}
+
+func TestValidWebSeedURLRejectsPrivateIPs(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"public http", "http://example.com/file.torrent", true},
+		{"public https", "https://cdn.example.com/data", true},
+		{"loopback", "http://127.0.0.1/data", false},
+		{"loopback v6", "http://[::1]/data", false},
+		{"private 10.x", "http://10.0.0.1/data", false},
+		{"private 172.16.x", "http://172.16.0.1/data", false},
+		{"private 192.168.x", "http://192.168.1.1/data", false},
+		{"link-local", "http://169.254.1.1/data", false},
+		{"localhost", "http://localhost/data", false},
+		{"ftp scheme", "ftp://example.com/data", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validWebSeedURL(tt.url)
+			if got != tt.want {
+				t.Errorf("validWebSeedURL(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
 	}
 }
 
