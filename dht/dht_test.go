@@ -314,3 +314,19 @@ func TestTokenValidation(t *testing.T) {
 		t.Error("token should not be valid for different IP")
 	}
 }
+
+func TestMaxLookupNodesConstant(t *testing.T) {
+	// Verify MaxLookupNodes and MaxLookupPeers are defined and reasonable.
+	if MaxLookupNodes < 100 {
+		t.Errorf("MaxLookupNodes too small: %d", MaxLookupNodes)
+	}
+	if MaxLookupNodes > 100000 {
+		t.Errorf("MaxLookupNodes too large: %d", MaxLookupNodes)
+	}
+	if MaxLookupPeers < 100 {
+		t.Errorf("MaxLookupPeers too small: %d", MaxLookupPeers)
+	}
+	if MaxLookupPeers > 100000 {
+		t.Errorf("MaxLookupPeers too large: %d", MaxLookupPeers)
+	}
+}

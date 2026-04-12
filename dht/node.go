@@ -16,6 +16,10 @@ const (
 	LookupTimeout = 15 * time.Second
 	// QueryTimeout is the timeout for a single KRPC query.
 	QueryTimeout = 5 * time.Second
+	// MaxLookupNodes is the maximum number of nodes tracked in a single lookup.
+	MaxLookupNodes = 1000
+	// MaxLookupPeers is the maximum number of peers collected in a single lookup.
+	MaxLookupPeers = 5000
 )
 
 // DHT represents a DHT node.
@@ -386,7 +390,13 @@ func (d *DHT) iterativeLookup(target ID, getPeers bool) ([]string, error) {
 					if values, ok := resp.R["values"].([]any); ok {
 						p := ParseCompactPeers(values)
 						mu.Lock()
-						allPeers = append(allPeers, p...)
+						space := MaxLookupPeers - len(allPeers)
+						if space > 0 {
+							if len(p) > space {
+								p = p[:space]
+							}
+							allPeers = append(allPeers, p...)
+						}
 						mu.Unlock()
 					}
 				}
@@ -397,6 +407,9 @@ func (d *DHT) iterativeLookup(target ID, getPeers bool) ([]string, error) {
 					if err == nil {
 						mu.Lock()
 						for _, ni := range newNodes {
+							if len(seen) >= MaxLookupNodes {
+								break
+							}
 							if _, exists := seen[ni.ID]; !exists {
 								node := &Node{ID: ni.ID, Addr: ni.Addr}
 								seen[ni.ID] = &nodeEntry{node: node}
