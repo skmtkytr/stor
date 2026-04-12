@@ -224,7 +224,10 @@ func (s *Session) phaseResolve(ctx context.Context) error {
 	}
 
 	// If resuming as seeder, don't change state or look for peers
-	if s.record.State == StateSeeding || s.record.State == StateComplete {
+	s.mu.RLock()
+	resuming := s.record.State == StateSeeding || s.record.State == StateComplete
+	s.mu.RUnlock()
+	if resuming {
 		return nil
 	}
 
