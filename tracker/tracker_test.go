@@ -156,6 +156,28 @@ func TestAnnounceHTTPTrackerError(t *testing.T) {
 	}
 }
 
+func TestParseDictPeersInvalidPort(t *testing.T) {
+	tests := []struct {
+		name string
+		port int64
+	}{
+		{"negative", -1},
+		{"too large", 70000},
+		{"zero", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			list := []any{
+				map[string]any{"ip": "1.2.3.4", "port": tt.port},
+			}
+			_, err := parseDictPeers(list)
+			if err == nil {
+				t.Errorf("expected error for port %d", tt.port)
+			}
+		})
+	}
+}
+
 func TestAnnounceHTTPLargeResponse(t *testing.T) {
 	// Build a valid bencode response with a large peers string (>10MB).
 	// Without a response size limit, this would be read fully and parsed.

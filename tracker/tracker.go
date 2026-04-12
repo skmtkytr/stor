@@ -198,8 +198,8 @@ func parseDictPeers(list []any) ([]Peer, error) {
 		}
 
 		portVal, ok := d["port"].(int64)
-		if !ok {
-			return nil, errors.New("tracker: peer missing 'port'")
+		if !ok || portVal <= 0 || portVal > 65535 {
+			return nil, fmt.Errorf("tracker: invalid peer port: %v", d["port"])
 		}
 
 		peers = append(peers, Peer{IP: ip, Port: uint16(portVal)})
