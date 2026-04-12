@@ -165,7 +165,8 @@ func (s *Session) Pause() {
 		s.cancel()
 		s.cancel = nil
 	}
-	if s.record.State == StateDownloading || s.record.State == StateMetadata || s.record.State == StateSeeding {
+	switch s.record.State {
+	case StateDownloading, StateMetadata, StateSeeding, StateVerifying, StateAdding:
 		s.record.State = StatePaused
 	}
 }
