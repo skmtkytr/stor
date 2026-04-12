@@ -146,17 +146,15 @@ func (a *Announcer) announce(ctx context.Context, event tracker.Event) time.Dura
 
 	wg.Wait()
 
-	// Send discovered peers to the download engine
-	// Use recover to handle case where peerSink is closed during shutdown
+	// Send discovered peers to the download engine.
+	// Skip if context is already done (peerSink may be closed during shutdown).
 	if len(allPeers) > 0 && a.peerSink != nil {
-		func() {
-			defer func() { recover() }() //nolint:errcheck // catch send on closed channel
-			select {
-			case a.peerSink <- allPeers:
-				slog.Debug("re-announce peers sent", "count", len(allPeers), "event", event)
-			case <-ctx.Done():
-			}
-		}()
+		select {
+		case <-ctx.Done():
+			// Context cancelled, peerSink may already be closed
+		case a.peerSink <- allPeers:
+			slog.Debug("re-announce peers sent", "count", len(allPeers), "event", event)
+		}
 	}
 
 	return minInterval
