@@ -267,6 +267,15 @@ func TestFetchMetadataOversizedBlock(t *testing.T) {
 	}
 }
 
+func TestFetchMetadataRejectsHugeSize(t *testing.T) {
+	// A malicious peer can claim metadataSize = 2GB to cause OOM.
+	// FetchMetadata should reject sizes above MaxMetadataSize.
+	_, err := FetchMetadata(nil, 100*1024*1024, [20]byte{}) // 100 MB
+	if err == nil {
+		t.Fatal("expected error for oversized metadata, got nil")
+	}
+}
+
 func TestFetchMetadataSmall(t *testing.T) {
 	// Create fake metadata (smaller than one block)
 	infoDict := map[string]any{

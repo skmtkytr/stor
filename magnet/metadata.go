@@ -93,9 +93,16 @@ func DecodeMetadataMessage(payload []byte) (*MetadataMessage, error) {
 	return msg, nil
 }
 
+// MaxMetadataSize is the maximum allowed metadata size (32 MB).
+// This prevents OOM from malicious peers claiming huge metadata sizes.
+const MaxMetadataSize = 32 * 1024 * 1024
+
 // FetchMetadata fetches the full info dict metadata from a peer that supports
 // BEP 9 ut_metadata extension. Returns the raw bencoded info dict.
 func FetchMetadata(conn *peer.ExtConn, metadataSize int, infoHash [20]byte) ([]byte, error) {
+	if metadataSize <= 0 || metadataSize > MaxMetadataSize {
+		return nil, fmt.Errorf("magnet: invalid metadata size %d (max %d)", metadataSize, MaxMetadataSize)
+	}
 	numPieces := (metadataSize + MetadataBlockSize - 1) / MetadataBlockSize
 	metadata := make([]byte, metadataSize)
 
