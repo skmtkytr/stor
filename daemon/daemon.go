@@ -117,7 +117,12 @@ func (d *Daemon) handleAdd(w http.ResponseWriter, r *http.Request) {
 		}
 		defer func() { _ = file.Close() }()
 
-		data, err := io.ReadAll(file)
+		const maxTorrentSize = 10 << 20 // 10 MB
+		data, err := io.ReadAll(io.LimitReader(file, maxTorrentSize+1))
+		if err == nil && len(data) > maxTorrentSize {
+			http.Error(w, "torrent file too large (>10MB)", http.StatusRequestEntityTooLarge)
+			return
+		}
 		if err != nil {
 			http.Error(w, "read file: "+err.Error(), http.StatusInternalServerError)
 			return

@@ -229,6 +229,29 @@ func TestDaemonCORSPrivateNetworkAccess(t *testing.T) {
 	}
 }
 
+func TestDaemonAddFileSizeLimit(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+
+	// Create a multipart form with a file > 10MB
+	var body strings.Builder
+	boundary := "----TestBoundary"
+	body.WriteString("--" + boundary + "\r\n")
+	body.WriteString("Content-Disposition: form-data; name=\"file\"; filename=\"big.torrent\"\r\n")
+	body.WriteString("Content-Type: application/x-bittorrent\r\n\r\n")
+	body.WriteString(strings.Repeat("X", 11*1024*1024)) // 11MB
+	body.WriteString("\r\n--" + boundary + "--\r\n")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/add", strings.NewReader(body.String()))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+	w := httptest.NewRecorder()
+	d.server.Handler.ServeHTTP(w, req)
+
+	if w.Code == http.StatusOK {
+		t.Error("expected rejection for oversized file upload")
+	}
+}
+
 func TestDaemonUIServed(t *testing.T) {
 	d, _ := newTestDaemon(t)
 
