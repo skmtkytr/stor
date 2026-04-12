@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"io"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/skmtkytr/stor/bencode"
@@ -157,6 +158,112 @@ func TestMetadataMessageRoundTrip(t *testing.T) {
 	}
 	if rejMsg.MsgType != MetadataReject || rejMsg.Piece != 5 {
 		t.Errorf("reject: type=%d piece=%d", rejMsg.MsgType, rejMsg.Piece)
+	}
+}
+
+func TestFetchMetadataOversizedBlock(t *testing.T) {
+	// Simulate a malicious peer that sends a metadata block larger than expected.
+	// metadataSize=100, but peer sends 16384 bytes — should not overflow the buffer.
+	metadata := make([]byte, 100)
+	for i := range metadata {
+		metadata[i] = byte(i)
+	}
+	infoHash := sha1.Sum(metadata)
+
+	// Fake peer that sends oversized data block
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		hs, err := peer.ReadHandshake(conn)
+		if err != nil || hs.InfoHash != infoHash {
+			return
+		}
+		_ = peer.WriteHandshake(conn, &peer.Handshake{
+			InfoHash: infoHash, PeerID: [20]byte{'-', 'F', 'K'}, Extensions: true,
+		})
+
+		// Read ext handshake
+		for {
+			msg, err := peer.ReadMessage(conn)
+			if err != nil {
+				return
+			}
+			if msg != nil && msg.ID == peer.MsgExtended {
+				extID, _, _ := peer.ParseExtended(msg.Payload)
+				if extID == peer.ExtHandshakeID {
+					break
+				}
+			}
+		}
+
+		// Send our ext handshake
+		ourHS := &peer.ExtHandshake{
+			M: map[string]int64{"ut_metadata": 2}, MetadataSize: 100, V: "evil/1.0",
+		}
+		hsPayload, _ := peer.EncodeExtHandshake(ourHS)
+		_ = peer.NewExtendedMessage(peer.ExtHandshakeID, hsPayload).Write(conn)
+
+		// Wait for metadata request, then send oversized block
+		for {
+			msg, err := peer.ReadMessage(conn)
+			if err != nil {
+				return
+			}
+			if msg == nil || msg.ID != peer.MsgExtended {
+				continue
+			}
+			extID, data, _ := peer.ParseExtended(msg.Payload)
+			if extID != 2 {
+				continue
+			}
+			metaMsg, _ := DecodeMetadataMessage(data)
+			if metaMsg == nil || metaMsg.MsgType != MetadataRequest {
+				continue
+			}
+
+			// Send 16KB block even though metadata is only 100 bytes
+			bigBlock := make([]byte, MetadataBlockSize)
+			respPayload, _ := EncodeMetadataData(metaMsg.Piece, 100, bigBlock)
+			_ = peer.NewExtendedMessage(1, respPayload).Write(conn)
+			return
+		}
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	conn, err := net.Dial("tcp", addr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	_ = peer.WriteHandshake(conn, &peer.Handshake{
+		InfoHash: infoHash, PeerID: [20]byte{'-', 'S', 'T'}, Extensions: true,
+	})
+	_, _ = peer.ReadHandshake(conn)
+
+	ourHS := &peer.ExtHandshake{M: map[string]int64{"ut_metadata": 1}, V: "stor/0.1"}
+	extConn, peerHS, err := peer.NegotiateExtension(conn.(io.ReadWriter), "ut_metadata", 1, ourHS)
+	if err != nil {
+		t.Fatalf("negotiate: %v", err)
+	}
+
+	_, err = FetchMetadata(extConn, int(peerHS.MetadataSize), infoHash)
+	if err == nil {
+		t.Fatal("expected error for oversized metadata block, got nil")
+	}
+	// Should be caught by bounds check, not hash mismatch
+	if strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("expected block overflow error, got hash mismatch: %v", err)
 	}
 }
 

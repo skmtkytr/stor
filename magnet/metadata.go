@@ -129,6 +129,9 @@ func FetchMetadata(conn *peer.ExtConn, metadataSize int, infoHash [20]byte) ([]b
 		}
 
 		offset := i * MetadataBlockSize
+		if offset+len(msg.Data) > metadataSize {
+			return nil, fmt.Errorf("magnet: metadata block %d overflows buffer (offset=%d, block=%d, total=%d)", i, offset, len(msg.Data), metadataSize)
+		}
 		copy(metadata[offset:], msg.Data)
 	}
 
