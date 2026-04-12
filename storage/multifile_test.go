@@ -3,6 +3,7 @@ package storage
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/skmtkytr/stor/torrent"
@@ -193,6 +194,53 @@ func TestMultiFileWriterWriteAfterClose(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when writing after Close")
 	}
+}
+
+func TestMultiFileWriterConcurrentAccess(t *testing.T) {
+	dir := t.TempDir()
+
+	tf := &torrent.TorrentFile{
+		Info: torrent.Info{
+			Name:        "testdir",
+			PieceLength: 4,
+			Files: []torrent.File{
+				{Length: 100, Path: []string{"a.dat"}},
+				{Length: 100, Path: []string{"b.dat"}},
+			},
+		},
+	}
+
+	base := filepath.Join(dir, "testdir")
+	mw, err := NewMultiFileWriter(base, tf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.PreallocateFiles(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = mw.Close() }()
+
+	// Concurrently write and read to trigger race in getHandle
+	var wg sync.WaitGroup
+	for i := range 10 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			data := []byte{byte(i), byte(i), byte(i), byte(i)}
+			for range 50 {
+				_, _ = mw.WriteAt(data, int64(i*4)%200)
+			}
+		}(i)
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			buf := make([]byte, 4)
+			for range 50 {
+				_, _ = mw.ReadAt(buf, int64(i*4)%200)
+			}
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestMultiFileWriterPieceSpan(t *testing.T) {
