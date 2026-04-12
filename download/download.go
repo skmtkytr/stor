@@ -103,8 +103,9 @@ type Client struct {
 	// Speed tracking (atomic: accessed from both worker and PeerManager goroutines)
 	downloaded atomic.Int64
 	uploaded   atomic.Int64
+	speedMu    sync.Mutex
 	speedStart time.Time
-	lastSpeed  atomic.Int64 // bytes/sec * 1000 (fixed-point)
+	lastSpeed  atomic.Int64 // bytes/sec
 
 	// PEX (BEP 11)
 	pexRemoteID uint8                 // remote's ut_pex message ID (0 = not supported)
@@ -122,7 +123,10 @@ type Client struct {
 
 // Speed returns the current download speed in bytes/sec.
 func (c *Client) Speed() float64 {
-	elapsed := time.Since(c.speedStart).Seconds()
+	c.speedMu.Lock()
+	start := c.speedStart
+	c.speedMu.Unlock()
+	elapsed := time.Since(start).Seconds()
 	if elapsed < 1 {
 		return float64(c.lastSpeed.Load())
 	}
@@ -135,12 +139,17 @@ func (c *Client) Speed() float64 {
 func (c *Client) ResetSpeed() {
 	c.Speed() // update lastSpeed
 	c.downloaded.Store(0)
+	c.speedMu.Lock()
 	c.speedStart = time.Now()
+	c.speedMu.Unlock()
 }
 
 // UploadSpeed returns bytes/sec uploaded to this peer.
 func (c *Client) UploadSpeed() float64 {
-	elapsed := time.Since(c.speedStart).Seconds()
+	c.speedMu.Lock()
+	start := c.speedStart
+	c.speedMu.Unlock()
+	elapsed := time.Since(start).Seconds()
 	if elapsed < 1 {
 		return 0
 	}
