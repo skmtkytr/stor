@@ -1,7 +1,7 @@
 # stor
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/skmtkytr/stor.svg)](https://pkg.go.dev/github.com/skmtkytr/stor)
-[![Go Report Card](https://goreportcard.com/badge/github.com/skmtkytr/stor)](https://goreportcard.com/report/github.com/skmtkytr/stor)
+[![Go Report Card](https://goreportcard.com/badge/github.com/skmtkytr/stor?v=1)](https://goreportcard.com/report/github.com/skmtkytr/stor)
 [![Release](https://img.shields.io/github/v/release/skmtkytr/stor)](https://github.com/skmtkytr/stor/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docker Image](https://img.shields.io/badge/docker-ghcr.io%2Fskmtkytr%2Fstor-blue?logo=docker)](https://ghcr.io/skmtkytr/stor)
