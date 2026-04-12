@@ -137,6 +137,9 @@ func parseInfo(d map[string]any) (Info, error) {
 	if !ok {
 		return info, errors.New("torrent: info missing 'piece length'")
 	}
+	if pieceLength <= 0 {
+		return info, fmt.Errorf("torrent: invalid piece length: %d", pieceLength)
+	}
 	info.PieceLength = pieceLength
 
 	piecesStr, ok := d["pieces"].(string)
@@ -161,6 +164,9 @@ func parseInfo(d map[string]any) (Info, error) {
 
 	// Single file or multi-file
 	if length, ok := d["length"].(int64); ok {
+		if length < 0 {
+			return info, fmt.Errorf("torrent: invalid file length: %d", length)
+		}
 		info.Length = length
 	} else if filesVal, ok := d["files"]; ok {
 		files, err := parseFiles(filesVal)
@@ -194,6 +200,9 @@ func parseFiles(v any) ([]File, error) {
 		length, ok := d["length"].(int64)
 		if !ok {
 			return nil, errors.New("torrent: file missing 'length'")
+		}
+		if length < 0 {
+			return nil, fmt.Errorf("torrent: invalid file length: %d", length)
 		}
 
 		pathList, ok := d["path"].([]any)

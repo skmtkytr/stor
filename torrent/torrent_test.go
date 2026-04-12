@@ -329,3 +329,45 @@ func TestParseNonPrivateTorrent(t *testing.T) {
 		t.Error("expected Private=false when private key absent")
 	}
 }
+
+func TestParseRejectsZeroPieceLength(t *testing.T) {
+	info := map[string]any{
+		"name":         "bad.txt",
+		"piece length": int64(0),
+		"pieces":       fakePieces(1),
+		"length":       int64(100),
+	}
+	data := buildTestTorrent(t, info, nil)
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error for zero piece length")
+	}
+}
+
+func TestParseRejectsNegativePieceLength(t *testing.T) {
+	info := map[string]any{
+		"name":         "bad.txt",
+		"piece length": int64(-256),
+		"pieces":       fakePieces(1),
+		"length":       int64(100),
+	}
+	data := buildTestTorrent(t, info, nil)
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error for negative piece length")
+	}
+}
+
+func TestParseRejectsNegativeFileLength(t *testing.T) {
+	info := map[string]any{
+		"name":         "bad.txt",
+		"piece length": int64(256),
+		"pieces":       fakePieces(1),
+		"length":       int64(-100),
+	}
+	data := buildTestTorrent(t, info, nil)
+	_, err := Parse(data)
+	if err == nil {
+		t.Fatal("expected error for negative file length")
+	}
+}
