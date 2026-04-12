@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// maxConns is the maximum number of tracked uTP connections per listener.
+const maxConns = 4096
+
 // Listener implements net.Listener for uTP connections.
 type Listener struct {
 	udpConn  *net.UDPConn
@@ -101,6 +104,10 @@ func (l *Listener) handlePacket(pkt *Packet, addr *net.UDPAddr) {
 	l.mu.Lock()
 	// SYN creates a new connection
 	if h.Type == StSyn {
+		if len(l.conns) >= maxConns {
+			l.mu.Unlock()
+			return // drop SYN: too many connections
+		}
 		connID := h.ConnID + 1 // we use connID+1 for our replies
 		c := newConn(l.udpConn, addr, connID, 1, h.SeqNr)
 		l.conns[h.ConnID] = c

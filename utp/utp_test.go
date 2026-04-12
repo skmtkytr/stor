@@ -140,6 +140,15 @@ func TestDialAndListen(t *testing.T) {
 	}
 }
 
+func TestMaxConnsConstant(t *testing.T) {
+	if maxConns < 100 {
+		t.Errorf("maxConns too small: %d", maxConns)
+	}
+	if maxConns > 100000 {
+		t.Errorf("maxConns too large: %d", maxConns)
+	}
+}
+
 // net.Conn interface compliance
 var (
 	_ net.Conn     = (*Conn)(nil)
