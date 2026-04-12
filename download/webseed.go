@@ -80,10 +80,13 @@ func downloadPieceHTTP(ctx context.Context, baseURL string, tf *torrent.TorrentF
 			if err != nil {
 				return nil, fmt.Errorf("webseed: %s: %w", f.Path[len(f.Path)-1], err)
 			}
+			if written+len(data) > len(buf) {
+				return nil, fmt.Errorf("webseed: piece %d multifile data exceeds buffer (written=%d, data=%d, buf=%d)", pw.Index, written, len(data), len(buf))
+			}
 			copy(buf[written:], data)
 			written += len(data)
-			remaining -= canRead
-			pos += canRead
+			remaining -= int64(len(data))
+			pos += int64(len(data))
 			fileOffset = fileEnd
 
 			if remaining <= 0 {
@@ -97,6 +100,37 @@ func downloadPieceHTTP(ctx context.Context, baseURL string, tf *torrent.TorrentF
 		return nil, fmt.Errorf("webseed: piece %d hash mismatch", pw.Index)
 	}
 	return buf, nil
+}
+
+// resolveAndValidateHost resolves a hostname and returns a validated public IP.
+// Returns error if the host resolves to a private/loopback address.
+func resolveAndValidateHost(host string) (string, error) {
+	if host == "localhost" {
+		return "", fmt.Errorf("host %q is localhost", host)
+	}
+	// If already an IP, validate directly
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return "", fmt.Errorf("host %s is a private address", host)
+		}
+		return ip.String(), nil
+	}
+	// Resolve hostname
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", host, err)
+	}
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return "", fmt.Errorf("host %s resolves to private address %s", host, addr)
+		}
+		return ip.String(), nil
+	}
+	return "", fmt.Errorf("host %s has no valid addresses", host)
 }
 
 // isPrivateHost returns true if the host is a private/loopback/link-local address.
@@ -124,13 +158,35 @@ func isPrivateHost(host string) bool {
 }
 
 func httpRange(ctx context.Context, targetURL string, offset, length int64) ([]byte, error) {
-	// Validate resolved IP to prevent DNS rebinding SSRF
+	// DNS pinning: resolve hostname once and validate, then connect to the
+	// resolved IP directly. This prevents DNS rebinding SSRF attacks.
 	parsed, err := url.Parse(targetURL)
 	if err != nil {
 		return nil, err
 	}
-	if isPrivateHost(parsed.Hostname()) {
-		return nil, fmt.Errorf("webseed: host %s resolves to private address", parsed.Hostname())
+	host := parsed.Hostname()
+	resolvedIP, err := resolveAndValidateHost(host)
+	if err != nil {
+		return nil, fmt.Errorf("webseed: %w", err)
+	}
+
+	// Build a client that dials the resolved IP directly (DNS pinning)
+	port := parsed.Port()
+	if port == "" {
+		if parsed.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	pinnedAddr := net.JoinHostPort(resolvedIP, port)
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, pinnedAddr)
+			},
+		},
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
@@ -139,7 +195,7 @@ func httpRange(ctx context.Context, targetURL string, offset, length int64) ([]b
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
 
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
