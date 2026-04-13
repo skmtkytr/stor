@@ -12,7 +12,8 @@ COPY go.mod ./
 RUN go mod download
 COPY . .
 COPY --from=ui-builder /src/ui/dist ./ui/dist
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /stor ./cmd/stor
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/skmtkytr/stor/daemon.Version=${VERSION}" -o /stor ./cmd/stor
 
 # --- Runtime stage ---
 FROM gcr.io/distroless/static-debian12
