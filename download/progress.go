@@ -199,12 +199,18 @@ func (p *Progress) Snap() ProgressSnap {
 		speed = p.speed.rate()
 	}
 
+	var upSpeed int64
+	if p.upSpeed != nil {
+		upSpeed = p.upSpeed.rate()
+	}
+
 	return ProgressSnap{
 		Downloaded:  downloaded,
 		Uploaded:    p.uploaded.Load(),
 		Total:       p.totalBytes,
 		Percent:     pct,
 		DownSpeed:   speed,
+		UpSpeed:     upSpeed,
 		ActivePeers: peers,
 		TotalPieces: p.totalPieces,
 		DonePieces:  completed,
