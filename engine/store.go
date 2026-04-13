@@ -162,13 +162,14 @@ func (s *Store) Delete(id string) {
 	s.mu.Unlock()
 }
 
-// All returns all records.
+// All returns copies of all records.
 func (s *Store) All() []*TorrentRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]*TorrentRecord, 0, len(s.records))
 	for _, r := range s.records {
-		result = append(result, r)
+		cp := *r
+		result = append(result, &cp)
 	}
 	return result
 }
