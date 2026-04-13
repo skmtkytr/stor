@@ -771,20 +771,18 @@ func TestResolveAndValidateHost(t *testing.T) {
 }
 
 func TestWebSeedRejectsResolvedPrivateIP(t *testing.T) {
-	// A hostname that resolves to a private IP should be rejected at request time.
-	// We can't control DNS, so test the resolveAndValidateHost function directly.
-	// 127.0.0.1 should be rejected even when passed as a resolved address.
-	if !isPrivateHost("127.0.0.1") {
-		t.Error("127.0.0.1 should be detected as private")
+	// resolveAndValidateHost should reject private/loopback addresses.
+	if _, err := resolveAndValidateHost("127.0.0.1"); err == nil {
+		t.Error("127.0.0.1 should be rejected as private")
 	}
-	if !isPrivateHost("10.0.0.1") {
-		t.Error("10.0.0.1 should be detected as private")
+	if _, err := resolveAndValidateHost("10.0.0.1"); err == nil {
+		t.Error("10.0.0.1 should be rejected as private")
 	}
-	if isPrivateHost("8.8.8.8") {
-		t.Error("8.8.8.8 should not be private")
+	if _, err := resolveAndValidateHost("8.8.8.8"); err != nil {
+		t.Error("8.8.8.8 should be accepted as public")
 	}
-	if !isPrivateHost("localhost") {
-		t.Error("localhost should be detected as private")
+	if _, err := resolveAndValidateHost("localhost"); err == nil {
+		t.Error("localhost should be rejected")
 	}
 }
 

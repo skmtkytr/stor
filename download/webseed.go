@@ -15,8 +15,6 @@ import (
 	"github.com/skmtkytr/stor/torrent"
 )
 
-var httpClient = &http.Client{Timeout: 60 * time.Second}
-
 // validWebSeedURL checks that a webseed URL uses http or https scheme
 // and does not point to a private/internal IP address (SSRF prevention).
 func validWebSeedURL(rawURL string) bool {
@@ -133,30 +131,6 @@ func resolveAndValidateHost(host string) (string, error) {
 	return "", fmt.Errorf("host %s has no valid addresses", host)
 }
 
-// isPrivateHost returns true if the host is a private/loopback/link-local address.
-func isPrivateHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	if ip != nil {
-		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
-	}
-	// Resolve hostname and check all addresses
-	addrs, err := net.LookupHost(host)
-	if err != nil {
-		return false
-	}
-	for _, addr := range addrs {
-		if resolved := net.ParseIP(addr); resolved != nil {
-			if resolved.IsLoopback() || resolved.IsPrivate() || resolved.IsLinkLocalUnicast() {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func httpRange(ctx context.Context, targetURL string, offset, length int64) ([]byte, error) {
 	// DNS pinning: resolve hostname once and validate, then connect to the
 	// resolved IP directly. This prevents DNS rebinding SSRF attacks.
@@ -180,14 +154,17 @@ func httpRange(ctx context.Context, targetURL string, offset, length int64) ([]b
 		}
 	}
 	pinnedAddr := net.JoinHostPort(resolvedIP, port)
-	client := &http.Client{
-		Timeout: 60 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, pinnedAddr)
-			},
+	transport := &http.Transport{
+		DisableKeepAlives: true, // one-shot: avoid leaking idle connections
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, pinnedAddr)
 		},
 	}
+	client := &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: transport,
+	}
+	defer transport.CloseIdleConnections()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
