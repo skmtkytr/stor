@@ -38,7 +38,8 @@ type DHT struct {
 	tokenSecretOld [20]byte
 	tokenMu        sync.Mutex
 
-	closed chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 // pendingEntry tracks a pending KRPC transaction.
@@ -120,10 +121,14 @@ func (d *DHT) TableSize() int {
 	return d.table.Len()
 }
 
-// Close shuts down the DHT node.
+// Close shuts down the DHT node. It is safe to call multiple times.
 func (d *DHT) Close() error {
-	close(d.closed)
-	return d.conn.Close()
+	var err error
+	d.closeOnce.Do(func() {
+		close(d.closed)
+		err = d.conn.Close()
+	})
+	return err
 }
 
 // Bootstrap adds initial nodes and performs a self-lookup to populate the routing table.
