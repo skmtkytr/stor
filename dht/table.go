@@ -113,6 +113,18 @@ func (rt *RoutingTable) Len() int {
 	return total
 }
 
+// AllNodes returns all nodes in the routing table.
+func (rt *RoutingTable) AllNodes() []*Node {
+	var all []*Node
+	for i := range NumBuckets {
+		b := &rt.buckets[i]
+		b.mu.RLock()
+		all = append(all, b.nodes...)
+		b.mu.RUnlock()
+	}
+	return all
+}
+
 // sortByDistance sorts nodes by XOR distance to target (insertion sort for small slices).
 func sortByDistance(nodes []*Node, target ID) {
 	for i := 1; i < len(nodes); i++ {

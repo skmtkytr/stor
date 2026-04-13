@@ -316,13 +316,15 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	}
 
 	// --- Cleanup on exit (error or success) ---
+	// Note: we do NOT close peerCh here. Closing it while workers are still
+	// running causes "send on closed channel" panics from PEX (handleExtended).
+	// The feeder goroutine in runWorkers also listens on ctx.Done(), so
+	// cancelling the context is sufficient to stop all consumers.
+	// The channel will be GC'd once all references are gone.
 	cleanup := func() {
 		announceCancel()
 		s.mu.Lock()
-		if s.peerCh != nil {
-			close(s.peerCh)
-			s.peerCh = nil
-		}
+		s.peerCh = nil
 		s.mu.Unlock()
 	}
 
@@ -367,7 +369,7 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	}
 
 	// --- Download complete: transition to seeding ---
-	cleanup() // stop download-phase announcer, close peerCh
+	cleanup() // stop download-phase announcer
 
 	// Move from tmpDir if configured
 	finalPath := filepath.Join(s.downloadDir, s.tf.Info.Name)

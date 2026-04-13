@@ -185,9 +185,16 @@ func (e *Engine) Start() error {
 	if !e.cfg.DisableDHT {
 		d, err := dht.New(":0", dht.WithAlpha(e.cfg.DHTAlpha))
 		if err == nil {
+			// Restore persisted routing table for warm start
+			loaded, loadErr := d.LoadNodes(e.dhtNodesPath())
+			if loadErr != nil {
+				slog.Warn("dht: failed to load persisted nodes", "error", loadErr)
+			} else if loaded > 0 {
+				slog.Info("dht: loaded persisted nodes", "count", loaded)
+			}
 			_ = d.Bootstrap(dhtBootstrapNodes)
 			e.dht = d
-			slog.Info("dht started", "bootstrap_nodes", len(dhtBootstrapNodes))
+			slog.Info("dht started", "table_size", d.TableSize())
 		} else {
 			slog.Warn("dht failed to start", "error", err)
 		}
@@ -261,12 +268,22 @@ func (e *Engine) Stop() error {
 	}
 
 	if e.dht != nil {
+		if err := e.dht.SaveNodes(e.dhtNodesPath()); err != nil {
+			slog.Warn("dht: failed to save nodes", "error", err)
+		} else {
+			slog.Info("dht: saved nodes", "count", e.dht.TableSize())
+		}
 		_ = e.dht.Close()
 	}
 
 	e.saveState()
 	slog.Info("engine stopped, state saved")
 	return nil
+}
+
+// dhtNodesPath returns the file path for persisted DHT routing table nodes.
+func (e *Engine) dhtNodesPath() string {
+	return filepath.Join(filepath.Dir(e.cfg.StatePath), "dht_nodes.dat")
 }
 
 // AddTorrent adds a torrent from a magnet URI or .torrent file path.
