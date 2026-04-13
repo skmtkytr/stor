@@ -91,6 +91,7 @@ type Client struct {
 	r              *bufio.Reader
 	w              *bufio.Writer
 	wmu            sync.Mutex // protects w from concurrent writes (BroadcastHave vs DownloadPiece)
+	stateMu        sync.Mutex // protects choked, choking, sentInterested
 	peerID         [20]byte
 	infoHash       [20]byte
 	bitfield       peer.Bitfield
@@ -160,9 +161,12 @@ func (c *Client) UploadSpeed() float64 {
 
 // SendChoke sends a choke message to the peer.
 func (c *Client) SendChoke() error {
+	c.stateMu.Lock()
 	if c.choking {
+		c.stateMu.Unlock()
 		return nil
 	}
+	c.stateMu.Unlock()
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	msg := &peer.Message{ID: peer.MsgChoke}
@@ -172,15 +176,20 @@ func (c *Client) SendChoke() error {
 	if err := c.w.Flush(); err != nil {
 		return err
 	}
+	c.stateMu.Lock()
 	c.choking = true
+	c.stateMu.Unlock()
 	return nil
 }
 
 // SendUnchoke sends an unchoke message to the peer.
 func (c *Client) SendUnchoke() error {
+	c.stateMu.Lock()
 	if !c.choking {
+		c.stateMu.Unlock()
 		return nil
 	}
+	c.stateMu.Unlock()
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	msg := &peer.Message{ID: peer.MsgUnchoke}
@@ -190,13 +199,18 @@ func (c *Client) SendUnchoke() error {
 	if err := c.w.Flush(); err != nil {
 		return err
 	}
+	c.stateMu.Lock()
 	c.choking = false
+	c.stateMu.Unlock()
 	return nil
 }
 
 // IsChoking returns whether we are choking this peer.
 func (c *Client) IsChoking() bool {
-	return c.choking
+	c.stateMu.Lock()
+	v := c.choking
+	c.stateMu.Unlock()
+	return v
 }
 
 // NewClient connects to a peer, performs the handshake, and receives the bitfield.
