@@ -90,7 +90,8 @@ func ParsePacket(data []byte) (*Packet, error) {
 	}
 	p := &Packet{Header: *h}
 	if len(data) > headerSize {
-		p.Payload = data[headerSize:]
+		p.Payload = make([]byte, len(data)-headerSize)
+		copy(p.Payload, data[headerSize:])
 	}
 	return p, nil
 }
