@@ -558,8 +558,35 @@ func (e *Engine) QueueDown(id string) error {
 func (e *Engine) QueueBottom(id string) error {
 	e.mu.Lock()
 	maxPos := e.maxQueuePosition()
+	// Hold the lock and call the internal version to avoid TOCTOU race.
+	// setQueuePosition also acquires e.mu, so call the logic directly.
+	s, ok := e.sessions[id]
+	if !ok {
+		e.mu.Unlock()
+		return fmt.Errorf("engine: torrent %s not found", id)
+	}
+	oldPos := s.Record().QueuePosition
+	if oldPos == maxPos {
+		e.mu.Unlock()
+		return nil
+	}
+	// Shift items between (oldPos, maxPos] up by 1
+	for _, other := range e.sessions {
+		if other == s {
+			continue
+		}
+		or := other.Record()
+		if or.QueuePosition > oldPos && or.QueuePosition <= maxPos {
+			other.mu.Lock()
+			other.record.QueuePosition--
+			other.mu.Unlock()
+		}
+	}
+	s.mu.Lock()
+	s.record.QueuePosition = maxPos
+	s.mu.Unlock()
 	e.mu.Unlock()
-	return e.setQueuePosition(id, maxPos)
+	return nil
 }
 
 func (e *Engine) setQueuePosition(id string, newPos int) error {
