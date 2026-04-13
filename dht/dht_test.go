@@ -248,6 +248,62 @@ func TestDHTBootstrapAndLookup(t *testing.T) {
 	}
 }
 
+func TestDHTBootstrapPopulatesTable(t *testing.T) {
+	// Create 3 "bootstrap" nodes that know each other
+	b1, err := New("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b1.Close() }()
+
+	b2, err := New("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b2.Close() }()
+
+	b3, err := New("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b3.Close() }()
+
+	// Bootstrap nodes know each other
+	b1Addr := b1.Addr().(*net.UDPAddr)
+	b2Addr := b2.Addr().(*net.UDPAddr)
+	b3Addr := b3.Addr().(*net.UDPAddr)
+	b1.table.Update(&Node{ID: b2.id, Addr: *b2Addr})
+	b1.table.Update(&Node{ID: b3.id, Addr: *b3Addr})
+	b2.table.Update(&Node{ID: b1.id, Addr: *b1Addr})
+	b2.table.Update(&Node{ID: b3.id, Addr: *b3Addr})
+	b3.table.Update(&Node{ID: b1.id, Addr: *b1Addr})
+	b3.table.Update(&Node{ID: b2.id, Addr: *b2Addr})
+
+	// Create a new node that bootstraps from b1 and b2
+	d, err := New("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+
+	if d.TableSize() != 0 {
+		t.Fatalf("new node should start with empty table, got %d", d.TableSize())
+	}
+
+	err = d.Bootstrap([]string{b1Addr.String(), b2Addr.String()})
+	if err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	// After bootstrap, the node should have discovered nodes
+	if d.TableSize() == 0 {
+		t.Error("routing table should not be empty after bootstrap")
+	}
+	if d.TableSize() < 2 {
+		t.Errorf("expected at least 2 nodes in table after bootstrap, got %d", d.TableSize())
+	}
+}
+
 func TestHandleResponseInvalidPendingType(t *testing.T) {
 	d, err := New("127.0.0.1:0")
 	if err != nil {

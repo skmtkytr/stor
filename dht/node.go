@@ -128,18 +128,52 @@ func (d *DHT) Close() error {
 
 // Bootstrap adds initial nodes and performs a self-lookup to populate the routing table.
 func (d *DHT) Bootstrap(addrs []string) error {
+	type bootstrapReq struct {
+		ch   chan *KRPCMessage
+		addr *net.UDPAddr
+	}
+
+	var reqs []bootstrapReq
 	for _, a := range addrs {
 		addr, err := net.ResolveUDPAddr("udp", a)
 		if err != nil {
 			continue
 		}
-		// Send find_node for our own ID
 		msg := NewFindNodeQuery(d.id, d.id)
-		_ = d.sendQuery(addr, msg)
+		ch := d.sendQuery(addr, msg)
+		reqs = append(reqs, bootstrapReq{ch: ch, addr: addr})
 	}
 
-	// Wait a bit for responses, then do iterative lookup for our own ID
-	time.Sleep(500 * time.Millisecond)
+	// Collect responses and populate routing table
+	for _, req := range reqs {
+		select {
+		case resp := <-req.ch:
+			if resp == nil || resp.R == nil {
+				continue
+			}
+			// Add the bootstrap node itself
+			if idStr, ok := resp.R["id"].(string); ok && len(idStr) == 20 {
+				d.table.Update(&Node{ID: IDFromBytes([]byte(idStr)), Addr: *req.addr})
+			}
+			// Add returned nodes
+			if nodesStr, ok := resp.R["nodes"].(string); ok {
+				nodes, err := UnmarshalCompactNodeInfo([]byte(nodesStr))
+				if err == nil {
+					for _, ni := range nodes {
+						d.table.Update(&Node{ID: ni.ID, Addr: ni.Addr})
+					}
+				}
+			}
+		case <-time.After(QueryTimeout):
+			// skip unresponsive bootstrap node
+		case <-d.closed:
+			return nil
+		}
+	}
+
+	slog.Debug("dht: bootstrap initial table", "size", d.table.Len())
+
+	// Iterative self-lookup to further populate the routing table
 	_, _ = d.iterativeLookup(d.id, false)
 	return nil
 }
