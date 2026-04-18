@@ -16,3 +16,13 @@ export function formatETA(downloaded: number, total: number, speed: number): str
 	if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
 	return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
 }
+
+export function formatRatio(downloaded: number, uploaded: number): string {
+	if (!downloaded || downloaded <= 0) return uploaded > 0 ? "\u221e" : "0.000";
+	return (uploaded / downloaded).toFixed(3);
+}
+
+export function formatUnixDate(unix: number): string {
+	if (!unix) return "-";
+	return new Date(unix * 1000).toLocaleString();
+}

@@ -1,4 +1,4 @@
-import type { TorrentInfo, EngineStats, EngineConfig, PeerSnap } from "./types";
+import type { TorrentInfo, EngineStats, EngineConfig, PeerSnap, FileEntry } from "./types";
 
 const API_KEY_STORAGE = "stor_api_key";
 
@@ -59,6 +59,7 @@ export const api = {
 	list: () => rpc<TorrentInfo[]>("torrent.list"),
 	get: (id: string) => rpc<TorrentInfo>("torrent.get", { id }),
 	peers: (id: string) => rpc<PeerSnap[]>("torrent.peers", { id }),
+	files: (id: string) => rpc<FileEntry[]>("torrent.files", { id }),
 	add: (source: string) => rpc<{ id: string }>("torrent.add", { source }),
 	addFile: (data: string) => rpc<{ id: string }>("torrent.addFile", { data }),
 	addURL: (url: string) => rpc<{ id: string }>("torrent.addURL", { url }),

@@ -280,6 +280,121 @@ func TestEnginePersistence(t *testing.T) {
 	}
 }
 
+func buildMultiFileTorrentData(t *testing.T, name string, pieceLen int, files []struct {
+	path []string
+	size int
+},
+) ([]byte, [20]byte) {
+	t.Helper()
+	total := 0
+	for _, f := range files {
+		total += f.size
+	}
+	pieces := make([]byte, 0)
+	remaining := total
+	for remaining > 0 {
+		size := pieceLen
+		if remaining < size {
+			size = remaining
+		}
+		chunk := make([]byte, size)
+		h := sha1.Sum(chunk)
+		pieces = append(pieces, h[:]...)
+		remaining -= size
+	}
+
+	filesList := make([]any, len(files))
+	for i, f := range files {
+		pathAny := make([]any, len(f.path))
+		for j, p := range f.path {
+			pathAny[j] = p
+		}
+		filesList[i] = map[string]any{
+			"length": int64(f.size),
+			"path":   pathAny,
+		}
+	}
+
+	info := map[string]any{
+		"name":         name,
+		"piece length": int64(pieceLen),
+		"pieces":       string(pieces),
+		"files":        filesList,
+	}
+	d := map[string]any{
+		"announce": "http://tracker.example.com/announce",
+		"info":     info,
+	}
+	data, err := bencode.Encode(d)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	infoData, _ := bencode.Encode(info)
+	infoHash := sha1.Sum(infoData)
+	return data, infoHash
+}
+
+func TestEngineTorrentFilesSingle(t *testing.T) {
+	eng := newTestEngine(t)
+
+	data, _ := buildTestTorrentData(t, "solo.bin", 256, 512)
+	id, err := eng.AddTorrentFile(data)
+	if err != nil {
+		t.Fatalf("AddTorrentFile: %v", err)
+	}
+
+	files, err := eng.TorrentFiles(id)
+	if err != nil {
+		t.Fatalf("TorrentFiles: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("files: got %d, want 1", len(files))
+	}
+	if files[0].Path != "solo.bin" {
+		t.Errorf("path: got %q, want solo.bin", files[0].Path)
+	}
+	if files[0].Length != 512 {
+		t.Errorf("length: got %d, want 512", files[0].Length)
+	}
+}
+
+func TestEngineTorrentFilesMulti(t *testing.T) {
+	eng := newTestEngine(t)
+
+	data, _ := buildMultiFileTorrentData(t, "pack", 256, []struct {
+		path []string
+		size int
+	}{
+		{path: []string{"a.txt"}, size: 100},
+		{path: []string{"sub", "b.txt"}, size: 200},
+	})
+	id, err := eng.AddTorrentFile(data)
+	if err != nil {
+		t.Fatalf("AddTorrentFile: %v", err)
+	}
+
+	files, err := eng.TorrentFiles(id)
+	if err != nil {
+		t.Fatalf("TorrentFiles: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files: got %d, want 2", len(files))
+	}
+	if files[0].Path != "a.txt" || files[0].Length != 100 {
+		t.Errorf("files[0]: %+v", files[0])
+	}
+	if files[1].Path != "sub/b.txt" || files[1].Length != 200 {
+		t.Errorf("files[1]: %+v", files[1])
+	}
+}
+
+func TestEngineTorrentFilesNotFound(t *testing.T) {
+	eng := newTestEngine(t)
+	if _, err := eng.TorrentFiles("no-such-id"); err == nil {
+		t.Error("expected error for nonexistent torrent")
+	}
+}
+
 func TestEngineAddTorrentFile(t *testing.T) {
 	eng := newTestEngine(t)
 

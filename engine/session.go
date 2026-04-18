@@ -125,6 +125,35 @@ func (s *Session) Snap() download.ProgressSnap {
 	}
 }
 
+// Files returns the file list for the torrent. Returns an empty slice when
+// metadata has not yet been resolved.
+func (s *Session) Files() []FileEntry {
+	s.mu.RLock()
+	tf := s.tf
+	data := s.record.TorrentData
+	s.mu.RUnlock()
+	if tf == nil && len(data) > 0 {
+		if parsed, err := torrent.Parse(data); err == nil {
+			tf = parsed
+		}
+	}
+	if tf == nil {
+		return []FileEntry{}
+	}
+	// Single-file torrent: info.length > 0, files list is empty.
+	if len(tf.Info.Files) == 0 {
+		return []FileEntry{{Path: tf.Info.Name, Length: tf.Info.Length}}
+	}
+	out := make([]FileEntry, 0, len(tf.Info.Files))
+	for _, f := range tf.Info.Files {
+		out = append(out, FileEntry{
+			Path:   filepath.ToSlash(filepath.Join(f.Path...)),
+			Length: f.Length,
+		})
+	}
+	return out
+}
+
 // PeerList returns snapshots of all currently connected peers
 // (both downloading and seeding/incoming). Safe to call from any goroutine.
 func (s *Session) PeerList() []download.PeerSnap {
