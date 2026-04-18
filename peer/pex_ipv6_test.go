@@ -3,6 +3,8 @@ package peer
 import (
 	"net"
 	"testing"
+
+	"github.com/skmtkytr/stor/bencode"
 )
 
 func TestPEXEncodeDecodeIPv6(t *testing.T) {
@@ -96,6 +98,109 @@ func TestPEXDecodeMaxPeers6(t *testing.T) {
 		t.Fatal("expected error for PEX added6 exceeding max")
 	}
 	_ = d
+}
+
+func TestEncodePEXOnlyV6(t *testing.T) {
+	// When only IPv6 peers are given, the output dict must NOT contain the
+	// v4 "added"/"dropped" fields — only added6/added6.f/dropped6.
+	msg := &PEXMessage{
+		Added: []PEXPeer{
+			{IP: net.ParseIP("2001:db8::1"), Port: 6881},
+		},
+		Dropped: []PEXPeer{
+			{IP: net.ParseIP("2001:db8::2"), Port: 8080},
+		},
+	}
+	data, err := EncodePEX(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := bencode.Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := decoded.(map[string]any)
+	if _, has := d["added"]; has {
+		t.Error("added field must not appear when no v4 peers present")
+	}
+	if _, has := d["added.f"]; has {
+		t.Error("added.f field must not appear when no v4 peers present")
+	}
+	if _, has := d["dropped"]; has {
+		t.Error("dropped field must not appear when no v4 peers present")
+	}
+	if _, has := d["added6"]; !has {
+		t.Error("added6 field must be present")
+	}
+	if _, has := d["dropped6"]; !has {
+		t.Error("dropped6 field must be present")
+	}
+}
+
+func TestEncodePEXOnlyV4(t *testing.T) {
+	// When only IPv4 peers are given, the output must NOT contain added6/dropped6.
+	msg := &PEXMessage{
+		Added: []PEXPeer{
+			{IP: net.IPv4(1, 2, 3, 4), Port: 6881},
+		},
+		Dropped: []PEXPeer{
+			{IP: net.IPv4(5, 6, 7, 8), Port: 8080},
+		},
+	}
+	data, err := EncodePEX(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := bencode.Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := decoded.(map[string]any)
+	if _, has := d["added6"]; has {
+		t.Error("added6 field must not appear when no v6 peers present")
+	}
+	if _, has := d["added6.f"]; has {
+		t.Error("added6.f field must not appear when no v6 peers present")
+	}
+	if _, has := d["dropped6"]; has {
+		t.Error("dropped6 field must not appear when no v6 peers present")
+	}
+	if _, has := d["added"]; !has {
+		t.Error("added field must be present")
+	}
+}
+
+func TestDecodePEXDropped6Limit(t *testing.T) {
+	// dropped6 exceeding maxPEXPeers must be rejected (parallel to added6).
+	n := maxPEXPeers + 1
+	compact := make([]byte, n*18)
+	raw := buildBencodedPEXWithDropped6(compact)
+	_, err := DecodePEX(raw)
+	if err == nil {
+		t.Fatal("expected error for PEX dropped6 exceeding max")
+	}
+}
+
+func TestDecodePEXInvalidAdded6Length(t *testing.T) {
+	// added6 with length not multiple of 18 should be silently ignored
+	// (not crash, not error) for forward compatibility.
+	raw := buildBencodedPEXWithAdded6([]byte("bad"), []byte{})
+	msg, err := DecodePEX(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if msg != nil && len(msg.Added) > 0 {
+		t.Errorf("expected no peers from malformed added6, got %d", len(msg.Added))
+	}
+}
+
+func buildBencodedPEXWithDropped6(dropped6 []byte) []byte {
+	var buf []byte
+	buf = append(buf, 'd')
+	buf = append(buf, "8:dropped6"...)
+	buf = appendBencodedStr(buf, dropped6)
+	buf = append(buf, 'e')
+	return buf
 }
 
 // buildBencodedPEXWithAdded6 creates a minimal bencode dict for test input.

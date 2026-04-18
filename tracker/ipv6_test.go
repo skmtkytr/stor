@@ -3,7 +3,11 @@ package tracker
 import (
 	"encoding/binary"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/skmtkytr/stor/bencode"
 )
@@ -144,6 +148,136 @@ func TestLocalIPv6(t *testing.T) {
 	}
 	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
 		t.Errorf("LocalIPv6 returned non-global address: %q", got)
+	}
+}
+
+func TestFilterPrivatePeersIPv4MappedV6(t *testing.T) {
+	// Security: ensure a malicious tracker can't bypass private IP filtering
+	// by sending IPv4-mapped IPv6 addresses like ::ffff:10.0.0.1.
+	peers := []Peer{
+		{IP: net.ParseIP("::ffff:10.0.0.1"), Port: 6881},    // v4-mapped private
+		{IP: net.ParseIP("::ffff:127.0.0.1"), Port: 6881},   // v4-mapped loopback
+		{IP: net.ParseIP("::ffff:192.168.1.1"), Port: 6881}, // v4-mapped private
+		{IP: net.ParseIP("::ffff:169.254.1.1"), Port: 6881}, // v4-mapped link-local
+		{IP: net.ParseIP("::ffff:8.8.8.8"), Port: 6881},     // v4-mapped public — keep
+		{IP: net.ParseIP("2001:db8::1"), Port: 6881},        // public v6 — keep
+	}
+	filtered := FilterPrivatePeers(peers)
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 public peers, got %d: %+v", len(filtered), filtered)
+	}
+	for _, p := range filtered {
+		// Re-check: must not be any form of private
+		if p.IP.IsLoopback() || p.IP.IsPrivate() || p.IP.IsLinkLocalUnicast() {
+			t.Errorf("private address leaked through filter: %s", p.IP)
+		}
+	}
+}
+
+func TestParseAnnounceResponsePeers6Only(t *testing.T) {
+	// A tracker may return only peers6 with no peers field.
+	p6 := make([]byte, 18)
+	copy(p6[0:16], net.ParseIP("2001:db8::1").To16())
+	binary.BigEndian.PutUint16(p6[16:18], 6881)
+
+	resp := map[string]any{
+		"interval": int64(1800),
+		"peers6":   string(p6),
+	}
+	data, _ := bencode.Encode(resp)
+
+	r, err := parseAnnounceResponse(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.Peers) != 1 {
+		t.Fatalf("expected 1 peer, got %d", len(r.Peers))
+	}
+	if !r.Peers[0].IP.Equal(net.ParseIP("2001:db8::1")) {
+		t.Errorf("peer IP: got %s, want 2001:db8::1", r.Peers[0].IP)
+	}
+}
+
+func TestParseAnnounceResponseInvalidPeers6(t *testing.T) {
+	// peers6 with length not multiple of 18 must cause error.
+	resp := map[string]any{
+		"interval": int64(1800),
+		"peers6":   "shortbadbad", // 11 bytes, not multiple of 18
+	}
+	data, _ := bencode.Encode(resp)
+
+	_, err := parseAnnounceResponse(data)
+	if err == nil {
+		t.Fatal("expected error for invalid peers6 length")
+	}
+}
+
+func TestBuildAnnounceURLIPv6Escaping(t *testing.T) {
+	// IPv6 addresses contain colons which must be percent-encoded.
+	req := AnnounceRequest{
+		AnnounceURL: "http://tracker.example.com/announce",
+		InfoHash:    [20]byte{0x01},
+		PeerID:      [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'},
+		Port:        6881,
+		Left:        1000,
+		IPv6:        "2001:db8::1",
+	}
+	u, err := buildAnnounceURL(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The parsed Query().Get() decodes back to plain form
+	if u.Query().Get("ipv6") != "2001:db8::1" {
+		t.Errorf("ipv6 roundtrip: got %q", u.Query().Get("ipv6"))
+	}
+	// Raw URL must be properly percent-encoded (colons → %3A)
+	raw := u.String()
+	if !strings.Contains(raw, "ipv6=2001%3Adb8%3A%3A1") {
+		t.Errorf("ipv6 not percent-encoded in raw URL: %s", raw)
+	}
+}
+
+func TestAnnounceHTTPEndToEndWithPeers6(t *testing.T) {
+	// Integration: httptest server returns bencoded response with both peers
+	// and peers6; announceHTTP must read both and send ipv6= param.
+	p4 := make([]byte, 6)
+	copy(p4[0:4], net.IPv4(8, 8, 8, 8).To4())
+	binary.BigEndian.PutUint16(p4[4:6], 6881)
+
+	p6 := make([]byte, 18)
+	copy(p6[0:16], net.ParseIP("2001:db8::1").To16())
+	binary.BigEndian.PutUint16(p6[16:18], 6881)
+
+	var gotIPv6Param string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIPv6Param = r.URL.Query().Get("ipv6")
+		data, _ := bencode.Encode(map[string]any{
+			"interval": int64(1800),
+			"peers":    string(p4),
+			"peers6":   string(p6),
+		})
+		_, _ = w.Write(data)
+	}))
+	defer server.Close()
+
+	req := AnnounceRequest{
+		AnnounceURL: server.URL + "/announce",
+		InfoHash:    [20]byte{0x01},
+		PeerID:      [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'},
+		Port:        6881,
+		Left:        1000,
+		IPv6:        "2001:db8::beef",
+	}
+	// Use announceHTTP with explicit client (bypasses DNS pinning for test server)
+	resp, err := announceHTTP(req, &http.Client{Timeout: 15 * time.Second})
+	if err != nil {
+		t.Fatalf("announceHTTP: %v", err)
+	}
+	if gotIPv6Param != "2001:db8::beef" {
+		t.Errorf("tracker got ipv6=%q, want 2001:db8::beef", gotIPv6Param)
+	}
+	if len(resp.Peers) != 2 {
+		t.Fatalf("expected 2 peers (v4+v6), got %d", len(resp.Peers))
 	}
 }
 
