@@ -115,6 +115,18 @@ type Engine struct {
 	// Periodic save
 	saveTicker *time.Ticker
 	saveStop   chan struct{}
+
+	// Tracks running session goroutines so Stop can drain them.
+	sessionWG sync.WaitGroup
+}
+
+// startSession launches a session, tracking it so Stop can wait for it.
+func (e *Engine) startSession(s *Session) {
+	e.sessionWG.Add(1)
+	s.Start(e.ctx, func(id string) {
+		defer e.sessionWG.Done()
+		e.onSessionDone(id)
+	})
 }
 
 // New creates a new engine.
@@ -242,7 +254,7 @@ func (e *Engine) Start() error {
 		if r.State == StateDownloading || r.State == StateMetadata || r.State == StateVerifying || r.State == StateAdding || r.State == StateSeeding {
 			slog.Info("resuming torrent", "id", r.ID, "name", r.Name, "state", r.State)
 			if e.activeCount() < e.cfg.MaxActive {
-				s.Start(e.ctx, e.onSessionDone)
+				e.startSession(s)
 			}
 		}
 	}
@@ -286,6 +298,10 @@ func (e *Engine) Stop() error {
 		}
 		_ = e.dht.Close()
 	}
+
+	// Wait for in-flight session goroutines to finish so their final
+	// onSessionDone (and saveState) doesn't race with shutdown / cleanup.
+	e.sessionWG.Wait()
 
 	e.saveState()
 	slog.Info("engine stopped, state saved")
@@ -342,7 +358,7 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 
 	// Always start immediately — MaxActive only limits auto-resume from queue
 	slog.Info("starting torrent", "id", id)
-	s.Start(e.ctx, e.onSessionDone)
+	e.startSession(s)
 
 	return id, nil
 }
@@ -445,7 +461,7 @@ func (e *Engine) ResumeTorrent(id string) error {
 	s.mu.Unlock()
 
 	if e.activeCount() < e.cfg.MaxActive {
-		s.Start(e.ctx, e.onSessionDone)
+		e.startSession(s)
 	}
 
 	e.saveState()
@@ -864,7 +880,7 @@ func (e *Engine) startQueuedLocked() {
 		}
 		r := s.Record()
 		slog.Info("starting queued torrent", "id", r.ID, "name", r.Name, "queue_pos", r.QueuePosition)
-		s.Start(e.ctx, e.onSessionDone)
+		e.startSession(s)
 		active++
 	}
 }
