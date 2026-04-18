@@ -47,6 +47,21 @@ export interface ProgressSnap {
 	done_pieces: number;
 }
 
+export interface PeerSnap {
+	addr: string;
+	ip_version: number;
+	incoming: boolean;
+	using_utp: boolean;
+	encrypted: boolean;
+	client: string;
+	peer_id: string;
+	down_rate: number;
+	up_rate: number;
+	choked: boolean;
+	choking: boolean;
+	progress: number;
+}
+
 export interface EngineStats {
 	total_down_speed: number;
 	total_up_speed: number;

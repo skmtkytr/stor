@@ -4,6 +4,7 @@
 	import { api } from "$lib/rpc";
 	import TorrentRow from "./TorrentRow.svelte";
 	import ContextActions from "./ContextActions.svelte";
+	import PeerPanel from "./PeerPanel.svelte";
 
 	let {
 		filter = "all",
@@ -18,6 +19,7 @@
 	let sortKey = $state<string>("queue");
 	let sortDesc = $state(false);
 	let ctxPos = $state<{ x: number; y: number } | null>(null);
+	let expanded = $state<string | null>(null); // ID of row with peer panel open
 
 	// Notify parent of selection changes
 	$effect(() => {
@@ -100,11 +102,19 @@
 			const next = new Set(selected);
 			for (let i = from; i <= to; i++) next.add(sorted[i].id);
 			selected = next;
+			expanded = null;
 		} else if (e.ctrlKey || e.metaKey) {
 			const next = new Set(selected);
 			if (next.has(id)) next.delete(id); else next.add(id);
 			selected = next;
+			expanded = null;
 		} else {
+			// Single click on an already-expanded row → collapse. Otherwise expand.
+			if (expanded === id) {
+				expanded = null;
+			} else {
+				expanded = id;
+			}
 			selected = new Set([id]);
 		}
 		lastIdx = idx;
@@ -169,6 +179,7 @@
 			selected = new Set();
 			lastIdx = null;
 			ctxPos = null;
+			expanded = null;
 		}
 		if (e.key === "Delete" && selected.size > 0) batchAction("remove");
 	}}
@@ -204,6 +215,13 @@
 					onclick={(e) => handleRowClick(e, t.id, idx)}
 					oncontextmenu={(e) => handleContextMenu(e, t.id)}
 				/>
+				{#if expanded === t.id}
+					<tr class="bg-zinc-950/60">
+						<td colspan={columns.length} class="p-0">
+							<PeerPanel torrentId={t.id} />
+						</td>
+					</tr>
+				{/if}
 			{:else}
 				<tr>
 					<td colspan={columns.length} class="h-32 text-center text-zinc-600 text-sm">
