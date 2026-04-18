@@ -251,6 +251,41 @@ func TestDecodePEXFlagsShorterThanAdded6(t *testing.T) {
 	}
 }
 
+func TestEncodePEXEmpty(t *testing.T) {
+	// An empty PEXMessage (no Added, no Dropped) must encode to an empty
+	// dict "de" without any added/added6/dropped/dropped6 fields.
+	msg := &PEXMessage{}
+	data, err := EncodePEX(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := bencode.Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, ok := decoded.(map[string]any)
+	if !ok {
+		t.Fatalf("decoded type: %T, want map", decoded)
+	}
+	if len(d) != 0 {
+		t.Errorf("expected empty dict, got keys: %+v", d)
+	}
+}
+
+func TestDecodePEXEmpty(t *testing.T) {
+	// An empty dict "de" must decode to an empty (but non-nil) PEXMessage.
+	msg, err := DecodePEX([]byte("de"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg == nil {
+		t.Fatal("expected non-nil PEXMessage for empty dict")
+	}
+	if len(msg.Added) != 0 || len(msg.Dropped) != 0 {
+		t.Errorf("expected empty message, got added=%d dropped=%d", len(msg.Added), len(msg.Dropped))
+	}
+}
+
 func buildBencodedPEXWithDropped6(dropped6 []byte) []byte {
 	var buf []byte
 	buf = append(buf, 'd')

@@ -342,6 +342,84 @@ func TestParseCompactPeers6UnspecifiedFiltered(t *testing.T) {
 	}
 }
 
+func TestFilterULA(t *testing.T) {
+	// RFC 4193 Unique Local Addresses (fc00::/7) must be filtered.
+	peers := []Peer{
+		{IP: net.ParseIP("fc00::1"), Port: 6881},              // ULA
+		{IP: net.ParseIP("fd12::1"), Port: 6881},              // ULA
+		{IP: net.ParseIP("2606:4700:4700::1111"), Port: 6881}, // public
+	}
+	filtered := FilterPrivatePeers(peers)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 public peer after ULA filter, got %d: %+v", len(filtered), filtered)
+	}
+	if !filtered[0].IP.Equal(net.ParseIP("2606:4700:4700::1111")) {
+		t.Errorf("unexpected peer: %s", filtered[0].IP)
+	}
+}
+
+func TestFilterIPv6Multicast(t *testing.T) {
+	// Document current behavior: link-local multicast (ff02::) is filtered,
+	// but global multicast (ff0e::) is NOT currently detected as "private".
+	// If this behavior changes, update the test.
+	peers := []Peer{
+		{IP: net.ParseIP("ff02::1"), Port: 6881}, // link-local multicast — filtered
+	}
+	filtered := FilterPrivatePeers(peers)
+	if len(filtered) != 0 {
+		t.Errorf("link-local multicast should be filtered, got %d", len(filtered))
+	}
+}
+
+func TestResolveAndValidateTrackerHostIPv6Public(t *testing.T) {
+	// Bracketed IPv6 literal in tracker URL: hostname is extracted without brackets.
+	// Public IPv6 (Cloudflare DNS) should pass.
+	host := "2606:4700:4700::1111"
+	resolved, err := resolveAndValidateTrackerHost(host)
+	if err != nil {
+		t.Fatalf("unexpected error for public IPv6: %v", err)
+	}
+	if resolved != host {
+		t.Errorf("resolved: got %q, want %q", resolved, host)
+	}
+}
+
+func TestResolveAndValidateTrackerHostIPv6ULA(t *testing.T) {
+	// ULA must be rejected at host validation.
+	_, err := resolveAndValidateTrackerHost("fd12::1")
+	if err == nil {
+		t.Fatal("expected error for ULA tracker host")
+	}
+}
+
+func TestResolveAndValidateTrackerHostIPv6LinkLocal(t *testing.T) {
+	_, err := resolveAndValidateTrackerHost("fe80::1")
+	if err == nil {
+		t.Fatal("expected error for link-local v6 tracker host")
+	}
+}
+
+func TestBuildAnnounceURLIPv6LiteralInTrackerURL(t *testing.T) {
+	// Tracker URL with IPv6 literal (bracketed host) must parse cleanly.
+	req := AnnounceRequest{
+		AnnounceURL: "http://[2606:4700:4700::1111]:6969/announce",
+		InfoHash:    [20]byte{0x01},
+		PeerID:      [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'},
+		Port:        6881,
+		Left:        1000,
+	}
+	u, err := buildAnnounceURL(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if u.Hostname() != "2606:4700:4700::1111" {
+		t.Errorf("hostname: got %q, want 2606:4700:4700::1111", u.Hostname())
+	}
+	if u.Port() != "6969" {
+		t.Errorf("port: got %q, want 6969", u.Port())
+	}
+}
+
 func TestParseCompactPeers6Limit(t *testing.T) {
 	numPeers := MaxPeersPerResponse + 50
 	data := make([]byte, numPeers*18)
