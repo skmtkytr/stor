@@ -281,6 +281,67 @@ func TestAnnounceHTTPEndToEndWithPeers6(t *testing.T) {
 	}
 }
 
+func TestParseDictPeersIPv6(t *testing.T) {
+	// Non-compact (dict) peer list with IPv6 string. Some trackers still use
+	// the legacy dict format and may embed IPv6 addresses.
+	list := []any{
+		map[string]any{"ip": "2001:db8::1", "port": int64(6881)},
+		map[string]any{"ip": "::1", "port": int64(8080)},
+	}
+	peers, err := parseDictPeers(list)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(peers) != 2 {
+		t.Fatalf("expected 2 peers, got %d", len(peers))
+	}
+	if !peers[0].IP.Equal(net.ParseIP("2001:db8::1")) {
+		t.Errorf("peer[0] IP: got %s", peers[0].IP)
+	}
+	if peers[0].Port != 6881 {
+		t.Errorf("peer[0] port: got %d", peers[0].Port)
+	}
+}
+
+func TestFilterUnspecifiedIPv6(t *testing.T) {
+	// :: (all zeros) is unspecified and must be filtered by FilterPrivatePeers.
+	peers := []Peer{
+		{IP: net.ParseIP("::"), Port: 6881},
+		{IP: net.ParseIP("0.0.0.0"), Port: 6881},
+		{IP: net.ParseIP("2001:db8::1"), Port: 6881},
+	}
+	filtered := FilterPrivatePeers(peers)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 peer, got %d: %+v", len(filtered), filtered)
+	}
+	if !filtered[0].IP.Equal(net.ParseIP("2001:db8::1")) {
+		t.Errorf("unexpected filtered peer: %s", filtered[0].IP)
+	}
+}
+
+func TestParseCompactPeers6UnspecifiedFiltered(t *testing.T) {
+	// End-to-end: malicious tracker sends 18 zero bytes → :: peer.
+	// parseCompactPeers6 accepts it (no validation), FilterPrivatePeers rejects.
+	data := make([]byte, 36)
+	// peer 0: all zeros (::) with port 6881
+	binary.BigEndian.PutUint16(data[16:18], 6881)
+	// peer 1: valid public v6
+	copy(data[18:34], net.ParseIP("2001:db8::1").To16())
+	binary.BigEndian.PutUint16(data[34:36], 6881)
+
+	peers, err := parseCompactPeers6(string(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 2 {
+		t.Fatalf("parseCompactPeers6: got %d, want 2", len(peers))
+	}
+	filtered := FilterPrivatePeers(peers)
+	if len(filtered) != 1 {
+		t.Fatalf("after filter: got %d, want 1", len(filtered))
+	}
+}
+
 func TestParseCompactPeers6Limit(t *testing.T) {
 	numPeers := MaxPeersPerResponse + 50
 	data := make([]byte, numPeers*18)

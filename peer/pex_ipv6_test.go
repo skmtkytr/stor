@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"encoding/binary"
 	"net"
 	"testing"
 
@@ -191,6 +192,62 @@ func TestDecodePEXInvalidAdded6Length(t *testing.T) {
 	}
 	if msg != nil && len(msg.Added) > 0 {
 		t.Errorf("expected no peers from malformed added6, got %d", len(msg.Added))
+	}
+}
+
+func TestEncodePEXSkipsNilIP(t *testing.T) {
+	// Defensive: a Peer with nil IP (malformed input) must be silently skipped
+	// rather than panicking on To4()/To16() calls.
+	msg := &PEXMessage{
+		Added: []PEXPeer{
+			{IP: nil, Port: 6881},
+			{IP: net.IPv4(1, 2, 3, 4), Port: 6881},
+		},
+		Dropped: []PEXPeer{
+			{IP: nil, Port: 8080},
+		},
+	}
+	data, err := EncodePEX(msg)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := DecodePEX(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Added) != 1 {
+		t.Errorf("expected 1 added peer (nil skipped), got %d", len(got.Added))
+	}
+	if len(got.Dropped) != 0 {
+		t.Errorf("expected 0 dropped peers (nil skipped), got %d", len(got.Dropped))
+	}
+}
+
+func TestDecodePEXFlagsShorterThanAdded6(t *testing.T) {
+	// Protocol robustness: if the peer sends added6 with 3 peers but only 1
+	// flag byte, the decode must not panic on out-of-bounds flags access.
+	// The 2nd and 3rd peers default to Seed=false.
+	n := 3
+	compact := make([]byte, n*18)
+	for i := range n {
+		compact[i*18+15] = byte(i + 1)
+		binary.BigEndian.PutUint16(compact[i*18+16:], 6881)
+	}
+	flags := []byte{0x02} // only 1 byte for 3 peers
+
+	raw := buildBencodedPEXWithAdded6(compact, flags)
+	msg, err := DecodePEX(raw)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(msg.Added) != 3 {
+		t.Fatalf("expected 3 peers, got %d", len(msg.Added))
+	}
+	if !msg.Added[0].Seed {
+		t.Error("peer[0] should have Seed=true (flag byte 0x02)")
+	}
+	if msg.Added[1].Seed || msg.Added[2].Seed {
+		t.Error("peers 1 and 2 should have Seed=false (flags missing)")
 	}
 }
 
