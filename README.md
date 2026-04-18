@@ -31,18 +31,28 @@ Most Go BitTorrent implementations wrap anacrolix/torrent or similar. stor repla
 | 19 | WebSeed (GetRight) | Implemented (HTTP Range, multi-file) |
 | 23 | Tracker Returns Compact Peer Lists | Implemented |
 | 27 | Private Torrents | Implemented (DHT/PEX auto-disable) |
-| 29 | uTP (Micro Transport Protocol) | Implemented (LEDBAT congestion control) |
+| 29 | uTP (Micro Transport Protocol) | Experimental — see note below |
 | 52 | BitTorrent v2 | Partial (hybrid parse + v1 download) |
 | — | MSE/PE (Protocol Encryption) | Implemented (768-bit DH + RC4, plaintext fallback) |
 
 See [BEP.md](BEP.md) for detailed implementation notes and protocol format references.
+
+> **Note on uTP (BEP 29).** The in-tree `utp/` package implements the wire format
+> and the SYN/DATA/STATE/FIN packet exchange, but is missing pieces libutp has:
+> data retransmission, SYN retransmission, in-order reassembly with reorder
+> buffering, SACK, correct one-way delay calculation for LEDBAT feedback, and
+> remote receive-window honoring. Enabling uTP (`enable_utp = true`) against
+> mainstream clients (μTorrent / qBittorrent / Transmission / libtorrent) on a
+> lossy path can produce truncated or stalled transfers. uTP is therefore
+> **disabled by default**. Treat it as an experimental flag; TCP + MSE/PE is
+> the supported production transport.
 
 ## Features
 
 - **Download**: rarest-first piece selection, endgame mode, resume with piece verification, multi-file support
 - **Upload**: seeding after download, incoming peer listener, BEP 3 upload choking algorithm
 - **Peers**: dynamic peer injection, periodic tracker re-announce, peer reconnection, PEX, multitracker
-- **Transport**: TCP and uTP (LEDBAT), MSE/PE encryption with RC4, automatic plaintext fallback
+- **Transport**: TCP with MSE/PE encryption (RC4, automatic plaintext fallback); uTP/LEDBAT is experimental and off by default
 - **Daemon**: JSON-RPC 2.0 API, persistent queue, configurable tuning, web-based settings
 - **Web UI**: Deluge-inspired layout, real-time stats, filter/sort, settings editor
 - **Chrome Extension**: intercepts `.torrent`/`magnet:` links, popup management
@@ -116,7 +126,7 @@ max_pipeline = 16     # outstanding block requests per peer
 dial_timeout = 3      # seconds
 numwant = 200         # peers requested per tracker announce
 dht_alpha = 8         # DHT lookup concurrency
-enable_utp = false    # enable uTP transport (LEDBAT congestion control)
+enable_utp = false    # experimental uTP transport; leave off unless you are testing
 ```
 
 Most settings can be changed at runtime via the Web UI settings page or the `daemon.setConfig` RPC method.

@@ -25,18 +25,27 @@ Go の BitTorrent 実装の多くは anacrolix/torrent 等のラッパー。stor
 | 19 | WebSeed (GetRight) | 実装済（HTTP Range、マルチファイル対応） |
 | 23 | コンパクトピアリスト | 実装済 |
 | 27 | Private Torrents | 実装済（DHT/PEX 自動無効化） |
-| 29 | uTP (Micro Transport Protocol) | 実装済（LEDBAT 輻輳制御） |
+| 29 | uTP (Micro Transport Protocol) | 実験的実装（下記注記参照） |
 | 52 | BitTorrent v2 | 部分対応（hybrid パース + v1 ダウンロード） |
 | — | MSE/PE（プロトコル暗号化） | 実装済（768-bit DH + RC4、平文フォールバック） |
 
 詳細は [BEP.md](BEP.md) を参照。
+
+> **uTP (BEP 29) について。** 同梱の `utp/` パッケージはワイヤフォーマットと
+> SYN/DATA/STATE/FIN の転送までは実装しているが、libutp が備えるデータ再送・
+> SYN 再送・到着順復元用リオーダバッファ・SACK・LEDBAT 用の正しい片方向遅延
+> 計測・相手の受信ウィンドウ尊重が揃っていない。ロスのある経路で主要クライアント
+> (μTorrent / qBittorrent / Transmission / libtorrent) と通信するとデータが
+> 破損したり転送が停止する可能性がある。そのため **デフォルトでは無効**
+> (`enable_utp = false`) としている。実験的フラグ扱い。プロダクション用途は
+> TCP + MSE/PE を推奨。
 
 ## 主な機能
 
 - **ダウンロード**: rarest-first ピース選択、endgame モード、ピース検証付きレジューム、マルチファイル対応
 - **アップロード**: ダウンロード完了後の自動シード、incoming ピア受付、BEP 3 チョーキングアルゴリズム
 - **ピア管理**: 動的ピア注入、定期 re-announce、ピア再接続、PEX、マルチトラッカー
-- **トランスポート**: TCP / uTP (LEDBAT)、MSE/PE 暗号化（RC4）、自動平文フォールバック
+- **トランスポート**: TCP + MSE/PE 暗号化（RC4、平文フォールバック）。uTP/LEDBAT は実験的実装でデフォルト無効
 - **デーモン**: JSON-RPC 2.0 API、永続キュー、チューニング設定、Web 設定画面
 - **Web UI**: Deluge 風レイアウト、リアルタイム統計、フィルタ/ソート、設定エディタ
 - **Chrome 拡張**: `.torrent` / `magnet:` リンク自動キャプチャ、ポップアップ管理
@@ -92,7 +101,7 @@ max_pipeline = 16     # ピアあたりの未応答リクエスト数
 dial_timeout = 3      # 秒
 numwant = 200         # トラッカーへのピア要求数
 dht_alpha = 8         # DHT lookup の並列度
-enable_utp = false    # uTP トランスポート有効化（LEDBAT 輻輳制御）
+enable_utp = false    # 実験的 uTP トランスポート。検証以外では有効化しない
 ```
 
 ほとんどの設定は Web UI の設定画面または `daemon.setConfig` RPC から実行時に変更可能。
