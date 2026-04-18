@@ -819,32 +819,20 @@ func (s *Session) fetchMetadataAttempt(ctx context.Context, m *magnet.Magnet) (*
 	return tf, peers
 }
 
-// dhtLookup performs a DHT GetPeers using the shared DHT or a temporary one.
+// dhtLookup performs a DHT GetPeers using the shared DHT. If the shared
+// DHT is unavailable (engine started with DisableDHT or DHT failed to
+// start), returns nil — we never spin up a temporary DHT just for one
+// lookup, since that would leak DNS / Bootstrap latency into every magnet
+// add and leave goroutines running past Stop().
 func (s *Session) dhtLookup(infoHash [20]byte) []tracker.Peer {
-	var d *dhtpkg.DHT
-	var cleanup func()
-
-	if s.dht != nil {
-		d = s.dht
-		cleanup = func() {}
-	} else {
-		var err error
-		d, err = dhtpkg.New(":0")
-		if err != nil {
-			slog.Debug("dht lookup: failed to create node", "error", err)
-			return nil
-		}
-		_ = d.Bootstrap(dhtBootstrapNodes)
-		cleanup = func() { _ = d.Close() }
+	if s.dht == nil {
+		return nil
 	}
-	defer cleanup()
-
-	peerAddrs, err := d.GetPeers(infoHash)
+	peerAddrs, err := s.dht.GetPeers(infoHash)
 	if err != nil {
 		slog.Debug("dht GetPeers failed", "info_hash", hex.EncodeToString(infoHash[:]), "error", err)
 		return nil
 	}
-
 	return parsePeerAddrs(peerAddrs)
 }
 
