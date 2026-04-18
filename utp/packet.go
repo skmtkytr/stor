@@ -1,5 +1,11 @@
 // Package utp implements the Micro Transport Protocol (uTP, BEP 29)
 // over UDP with LEDBAT congestion control.
+//
+// Status: experimental. The wire format and SYN/DATA/STATE/FIN exchange
+// are implemented, but data retransmission, SYN retransmission, in-order
+// reassembly, SACK, correct LEDBAT one-way delay measurement, and remote
+// receive-window honoring are not. Do not enable (enable_utp=true) for
+// production transfers against mainstream clients on lossy paths.
 package utp
 
 import (
