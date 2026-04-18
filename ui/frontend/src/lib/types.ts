@@ -47,6 +47,11 @@ export interface ProgressSnap {
 	done_pieces: number;
 }
 
+export interface FileEntry {
+	path: string;
+	length: number;
+}
+
 export interface PeerSnap {
 	addr: string;
 	ip_version: number;

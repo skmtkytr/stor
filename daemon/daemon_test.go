@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,8 +11,32 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/skmtkytr/stor/bencode"
 	"github.com/skmtkytr/stor/engine"
 )
+
+func buildDaemonTestTorrent(t *testing.T, name string) []byte {
+	t.Helper()
+	pieces := make([]byte, 0)
+	chunk := make([]byte, 256)
+	h := sha1.Sum(chunk)
+	pieces = append(pieces, h[:]...)
+	info := map[string]any{
+		"name":         name,
+		"piece length": int64(256),
+		"pieces":       string(pieces),
+		"length":       int64(256),
+	}
+	d := map[string]any{
+		"announce": "http://tracker.example.com/announce",
+		"info":     info,
+	}
+	data, err := bencode.Encode(d)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	return data
+}
 
 func newTestDaemon(t *testing.T) (*Daemon, Config) {
 	t.Helper()
@@ -358,6 +384,51 @@ func TestRPCTorrentAddFileInvalidBase64(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
 	if resp.Error == nil {
 		t.Error("expected error for invalid base64")
+	}
+}
+
+func TestRPCTorrentFiles(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+	torrentData := buildDaemonTestTorrent(t, "files.bin")
+	encoded := base64.StdEncoding.EncodeToString(torrentData)
+
+	w := doRPC(t, d, cfg.APIKey, "torrent.addFile", map[string]string{"data": encoded})
+	var addResp struct {
+		Result map[string]string `json:"result"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &addResp)
+	id := addResp.Result["id"]
+	if id == "" {
+		t.Fatalf("no id returned: body=%s", w.Body.String())
+	}
+
+	w = doRPC(t, d, cfg.APIKey, "torrent.files", map[string]string{"id": id})
+	if w.Code != http.StatusOK {
+		t.Fatalf("files: %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Result []engine.FileEntry `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Result) != 1 {
+		t.Fatalf("files: got %d, want 1, body=%s", len(resp.Result), w.Body.String())
+	}
+	if resp.Result[0].Path != "files.bin" || resp.Result[0].Length != 256 {
+		t.Errorf("file entry: %+v", resp.Result[0])
+	}
+}
+
+func TestRPCTorrentFilesMissingID(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+	w := doRPC(t, d, cfg.APIKey, "torrent.files", map[string]string{})
+	var resp struct {
+		Error *struct{ Code int } `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error == nil {
+		t.Error("expected error for missing id")
 	}
 }
 

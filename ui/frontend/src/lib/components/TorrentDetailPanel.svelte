@@ -3,6 +3,7 @@
 	import { torrents } from "$lib/stores/torrents.svelte";
 	import { formatBytes, formatSpeed, formatETA, formatRatio, formatUnixDate } from "$lib/format";
 	import PeerPanel from "./PeerPanel.svelte";
+	import FileList from "./FileList.svelte";
 
 	let {
 		torrentId,
@@ -147,9 +148,7 @@
 				</div>
 			</div>
 		{:else if active === "files"}
-			<div class="flex h-full items-center justify-center px-4 py-6 text-xs text-zinc-600">
-				File listing is not yet available.
-			</div>
+			<FileList torrentId={torrent.id} />
 		{:else if active === "peers"}
 			<PeerPanel torrentId={torrent.id} />
 		{/if}

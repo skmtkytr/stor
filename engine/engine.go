@@ -62,6 +62,12 @@ type TorrentInfo struct {
 	Error         string                `json:"error,omitempty"`
 }
 
+// FileEntry describes one file in a torrent.
+type FileEntry struct {
+	Path   string `json:"path"`
+	Length int64  `json:"length"`
+}
+
 // EngineConfig is the subset of Config exposed to API clients.
 type EngineConfig struct {
 	DownloadDir string `json:"download_dir"`
@@ -452,6 +458,19 @@ func (e *Engine) GetTorrent(id string) (*TorrentInfo, error) {
 	}
 
 	return e.sessionToInfo(s), nil
+}
+
+// TorrentFiles returns the file list for a torrent. An empty slice is
+// returned if the metadata has not yet been resolved (magnet without
+// metainfo yet).
+func (e *Engine) TorrentFiles(id string) ([]FileEntry, error) {
+	e.mu.RLock()
+	s, ok := e.sessions[id]
+	e.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("engine: torrent %s not found", id)
+	}
+	return s.Files(), nil
 }
 
 // TorrentPeers returns the live peer list for a torrent, or an error if the

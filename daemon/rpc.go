@@ -134,6 +134,8 @@ func (h *RPCHandler) dispatch(method string, params json.RawMessage) (any, *rpcE
 		return h.torrentList()
 	case "torrent.peers":
 		return h.torrentPeers(params)
+	case "torrent.files":
+		return h.torrentFiles(params)
 	case "torrent.queueTop":
 		return h.torrentQueueMove(params, "top")
 	case "torrent.queueUp":
@@ -315,6 +317,23 @@ func (h *RPCHandler) torrentPeers(params json.RawMessage) (any, *rpcErr) {
 		peers = []download.PeerSnap{}
 	}
 	return peers, nil
+}
+
+func (h *RPCHandler) torrentFiles(params json.RawMessage) (any, *rpcErr) {
+	var p struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.ID == "" {
+		return nil, &rpcErr{Code: -32602, Message: "invalid params: id required"}
+	}
+	files, err := h.engine.TorrentFiles(p.ID)
+	if err != nil {
+		return nil, &rpcErr{Code: -32000, Message: err.Error()}
+	}
+	if files == nil {
+		files = []engine.FileEntry{}
+	}
+	return files, nil
 }
 
 func (h *RPCHandler) torrentQueueMove(params json.RawMessage, direction string) (any, *rpcErr) {
