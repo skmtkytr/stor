@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"net"
 
 	"github.com/skmtkytr/stor/bencode"
 )
@@ -89,7 +90,12 @@ func NewPingQuery(id ID) *KRPCMessage {
 	}
 }
 
-// NewFindNodeQuery creates a find_node query.
+// bep32Want is the `want` parameter requesting both v4 and v6 node replies.
+func bep32Want() []any {
+	return []any{"n4", "n6"}
+}
+
+// NewFindNodeQuery creates a find_node query (BEP 32: requests both v4/v6 nodes).
 func NewFindNodeQuery(id, target ID) *KRPCMessage {
 	return &KRPCMessage{
 		T: NewTxnID(),
@@ -98,11 +104,12 @@ func NewFindNodeQuery(id, target ID) *KRPCMessage {
 		A: map[string]any{
 			"id":     string(id[:]),
 			"target": string(target[:]),
+			"want":   bep32Want(),
 		},
 	}
 }
 
-// NewGetPeersQuery creates a get_peers query.
+// NewGetPeersQuery creates a get_peers query (BEP 32: requests both v4/v6 nodes).
 func NewGetPeersQuery(id ID, infoHash ID) *KRPCMessage {
 	return &KRPCMessage{
 		T: NewTxnID(),
@@ -111,6 +118,7 @@ func NewGetPeersQuery(id ID, infoHash ID) *KRPCMessage {
 		A: map[string]any{
 			"id":        string(id[:]),
 			"info_hash": string(infoHash[:]),
+			"want":      bep32Want(),
 		},
 	}
 }
@@ -144,17 +152,26 @@ func NewResponse(txnID string, values map[string]any) *KRPCMessage {
 	}
 }
 
-// ParseCompactPeers extracts compact peer addresses (6 bytes each) from get_peers values.
+// ParseCompactPeers extracts compact peer addresses from a get_peers values
+// list. Each entry is either 6 bytes (IPv4 + port) or 18 bytes (BEP 32: IPv6 +
+// port). Other lengths are skipped.
 func ParseCompactPeers(values []any) []string {
 	var peers []string
 	for _, v := range values {
 		s, ok := v.(string)
-		if !ok || len(s) != 6 {
+		if !ok {
 			continue
 		}
-		ip := fmt.Sprintf("%d.%d.%d.%d", s[0], s[1], s[2], s[3])
-		port := binary.BigEndian.Uint16([]byte(s[4:6]))
-		peers = append(peers, fmt.Sprintf("%s:%d", ip, port))
+		switch len(s) {
+		case 6:
+			ip := fmt.Sprintf("%d.%d.%d.%d", s[0], s[1], s[2], s[3])
+			port := binary.BigEndian.Uint16([]byte(s[4:6]))
+			peers = append(peers, fmt.Sprintf("%s:%d", ip, port))
+		case 18:
+			ip := net.IP(s[:16])
+			port := binary.BigEndian.Uint16([]byte(s[16:18]))
+			peers = append(peers, fmt.Sprintf("[%s]:%d", ip.String(), port))
+		}
 	}
 	return peers
 }

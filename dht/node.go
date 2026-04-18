@@ -25,10 +25,11 @@ const (
 
 // DHT represents a DHT node.
 type DHT struct {
-	id    ID
-	conn  *net.UDPConn
-	table *RoutingTable
-	alpha int // lookup concurrency
+	id      ID
+	conn    *net.UDPConn
+	table   *RoutingTable // IPv4 nodes
+	tableV6 *RoutingTable // IPv6 nodes (BEP 32)
+	alpha   int           // lookup concurrency
 
 	// Pending transactions: txnID → pendingEntry
 	pending sync.Map // string → *pendingEntry
@@ -88,11 +89,12 @@ func New(listenAddr string, opts ...Option) (*DHT, error) {
 
 	id := GenerateID()
 	d := &DHT{
-		id:     id,
-		conn:   conn,
-		table:  NewRoutingTable(id),
-		alpha:  DefaultAlpha,
-		closed: make(chan struct{}),
+		id:      id,
+		conn:    conn,
+		table:   NewRoutingTable(id),
+		tableV6: NewRoutingTable(id),
+		alpha:   DefaultAlpha,
+		closed:  make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -116,9 +118,18 @@ func (d *DHT) Addr() net.Addr {
 	return d.conn.LocalAddr()
 }
 
-// TableSize returns the number of nodes in the routing table.
+// TableSize returns the combined number of nodes in both routing tables.
 func (d *DHT) TableSize() int {
-	return d.table.Len()
+	return d.table.Len() + d.tableV6.Len()
+}
+
+// updateNode adds a node to the appropriate routing table based on address family.
+func (d *DHT) updateNode(n *Node) {
+	if n.Addr.IP.To4() != nil {
+		d.table.Update(n)
+	} else if n.Addr.IP.To16() != nil {
+		d.tableV6.Update(n)
+	}
 }
 
 // Close shuts down the DHT node. It is safe to call multiple times.
@@ -156,16 +167,25 @@ func (d *DHT) Bootstrap(addrs []string) error {
 			if resp == nil || resp.R == nil {
 				continue
 			}
-			// Add the bootstrap node itself
+			// Add the bootstrap node itself (v4 or v6 based on its addr)
 			if idStr, ok := resp.R["id"].(string); ok && len(idStr) == 20 {
-				d.table.Update(&Node{ID: IDFromBytes([]byte(idStr)), Addr: *req.addr})
+				d.updateNode(&Node{ID: IDFromBytes([]byte(idStr)), Addr: *req.addr})
 			}
-			// Add returned nodes
+			// Add returned v4 nodes
 			if nodesStr, ok := resp.R["nodes"].(string); ok {
 				nodes, err := UnmarshalCompactNodeInfo([]byte(nodesStr))
 				if err == nil {
 					for _, ni := range nodes {
-						d.table.Update(&Node{ID: ni.ID, Addr: ni.Addr})
+						d.updateNode(&Node{ID: ni.ID, Addr: ni.Addr})
+					}
+				}
+			}
+			// BEP 32: add returned v6 nodes
+			if nodes6Str, ok := resp.R["nodes6"].(string); ok {
+				nodes, err := UnmarshalCompactNodeInfo6([]byte(nodes6Str))
+				if err == nil {
+					for _, ni := range nodes {
+						d.updateNode(&Node{ID: ni.ID, Addr: ni.Addr})
 					}
 				}
 			}
@@ -240,9 +260,9 @@ func (d *DHT) handleResponse(msg *KRPCMessage) {
 
 // handleQuery responds to incoming queries.
 func (d *DHT) handleQuery(msg *KRPCMessage, addr *net.UDPAddr) {
-	// Update routing table with the querying node
+	// Update routing table with the querying node (v4 or v6)
 	if idStr, ok := msg.A["id"].(string); ok && len(idStr) == 20 {
-		d.table.Update(&Node{ID: IDFromBytes([]byte(idStr)), Addr: *addr})
+		d.updateNode(&Node{ID: IDFromBytes([]byte(idStr)), Addr: *addr})
 	}
 
 	switch msg.Q {
@@ -275,19 +295,51 @@ func (d *DHT) respondFindNode(msg *KRPCMessage, addr *net.UDPAddr) {
 		return
 	}
 	target := IDFromBytes([]byte(targetStr))
-	closest := d.table.Closest(target, K)
+	wantV4, wantV6 := parseWant(msg.A)
 
+	r := map[string]any{"id": string(d.id[:])}
+	if wantV4 {
+		r["nodes"] = string(MarshalCompactNodeInfo(closestAsCompact(d.table, target)))
+	}
+	if wantV6 {
+		r["nodes6"] = string(MarshalCompactNodeInfo6(closestAsCompact(d.tableV6, target)))
+	}
+
+	resp := NewResponse(msg.T, r)
+	data, _ := EncodeKRPC(resp)
+	d.sendUDP(data, addr)
+}
+
+// parseWant returns which address families are requested. Absent `want`
+// defaults to v4 only (BEP 5 compatibility).
+func parseWant(a map[string]any) (v4, v6 bool) {
+	want, ok := a["want"].([]any)
+	if !ok {
+		return true, false
+	}
+	for _, v := range want {
+		if s, ok := v.(string); ok {
+			if s == "n4" {
+				v4 = true
+			}
+			if s == "n6" {
+				v6 = true
+			}
+		}
+	}
+	if !v4 && !v6 {
+		return true, false
+	}
+	return v4, v6
+}
+
+func closestAsCompact(rt *RoutingTable, target ID) []CompactNodeInfo {
+	closest := rt.Closest(target, K)
 	nodes := make([]CompactNodeInfo, len(closest))
 	for i, n := range closest {
 		nodes[i] = CompactNodeInfo{ID: n.ID, Addr: n.Addr}
 	}
-
-	resp := NewResponse(msg.T, map[string]any{
-		"id":    string(d.id[:]),
-		"nodes": string(MarshalCompactNodeInfo(nodes)),
-	})
-	data, _ := EncodeKRPC(resp)
-	d.sendUDP(data, addr)
+	return nodes
 }
 
 func (d *DHT) respondGetPeers(msg *KRPCMessage, addr *net.UDPAddr) {
@@ -297,19 +349,20 @@ func (d *DHT) respondGetPeers(msg *KRPCMessage, addr *net.UDPAddr) {
 		return
 	}
 	target := IDFromBytes([]byte(infoHashStr))
-	closest := d.table.Closest(target, K)
+	wantV4, wantV6 := parseWant(msg.A)
 
-	nodes := make([]CompactNodeInfo, len(closest))
-	for i, n := range closest {
-		nodes[i] = CompactNodeInfo{ID: n.ID, Addr: n.Addr}
+	r := map[string]any{
+		"id":    string(d.id[:]),
+		"token": d.makeToken(addr),
+	}
+	if wantV4 {
+		r["nodes"] = string(MarshalCompactNodeInfo(closestAsCompact(d.table, target)))
+	}
+	if wantV6 {
+		r["nodes6"] = string(MarshalCompactNodeInfo6(closestAsCompact(d.tableV6, target)))
 	}
 
-	token := d.makeToken(addr)
-	resp := NewResponse(msg.T, map[string]any{
-		"id":    string(d.id[:]),
-		"token": token,
-		"nodes": string(MarshalCompactNodeInfo(nodes)),
-	})
+	resp := NewResponse(msg.T, r)
 	data, _ := EncodeKRPC(resp)
 	d.sendUDP(data, addr)
 }
@@ -371,10 +424,12 @@ type nodeEntry struct {
 // iterativeLookup performs a Kademlia iterative lookup.
 // If getPeers is true, sends get_peers; otherwise find_node.
 // Returns discovered peers (for get_peers) or nil.
+// BEP 32: seeds from both v4 and v6 routing tables.
 func (d *DHT) iterativeLookup(target ID, getPeers bool) ([]string, error) {
-	// Seed with closest known nodes
-	closest := d.table.Closest(target, K)
-	if len(closest) == 0 {
+	// Seed with closest known nodes from BOTH routing tables
+	closestV4 := d.table.Closest(target, K)
+	closestV6 := d.tableV6.Closest(target, K)
+	if len(closestV4) == 0 && len(closestV6) == 0 {
 		return nil, fmt.Errorf("dht: no nodes in routing table")
 	}
 
@@ -383,8 +438,13 @@ func (d *DHT) iterativeLookup(target ID, getPeers bool) ([]string, error) {
 	var mu sync.Mutex
 	var allPeers []string
 
-	for _, n := range closest {
+	for _, n := range closestV4 {
 		seen[n.ID] = &nodeEntry{node: n}
+	}
+	for _, n := range closestV6 {
+		if _, exists := seen[n.ID]; !exists {
+			seen[n.ID] = &nodeEntry{node: n}
+		}
 	}
 
 	deadline := time.Now().Add(LookupTimeout)
@@ -442,12 +502,13 @@ func (d *DHT) iterativeLookup(target ID, getPeers bool) ([]string, error) {
 					return
 				}
 
-				// Update routing table
+				// Update routing table (classify by address family)
 				if idStr, ok := resp.R["id"].(string); ok && len(idStr) == 20 {
-					d.table.Update(&Node{ID: IDFromBytes([]byte(idStr)), Addr: n.Addr})
+					d.updateNode(&Node{ID: IDFromBytes([]byte(idStr)), Addr: n.Addr})
 				}
 
-				// Collect peers (get_peers only)
+				// Collect peers (get_peers only). BEP 32: values may contain
+				// 6-byte v4 entries and/or 18-byte v6 entries.
 				if getPeers {
 					if values, ok := resp.R["values"].([]any); ok {
 						p := ParseCompactPeers(values)
@@ -463,7 +524,7 @@ func (d *DHT) iterativeLookup(target ID, getPeers bool) ([]string, error) {
 					}
 				}
 
-				// Parse returned nodes and add to seen
+				// Parse returned nodes (v4) and add to seen
 				if nodesStr, ok := resp.R["nodes"].(string); ok {
 					newNodes, err := UnmarshalCompactNodeInfo([]byte(nodesStr))
 					if err == nil {
@@ -475,7 +536,26 @@ func (d *DHT) iterativeLookup(target ID, getPeers bool) ([]string, error) {
 							if _, exists := seen[ni.ID]; !exists {
 								node := &Node{ID: ni.ID, Addr: ni.Addr}
 								seen[ni.ID] = &nodeEntry{node: node}
-								d.table.Update(node)
+								d.updateNode(node)
+							}
+						}
+						mu.Unlock()
+					}
+				}
+
+				// BEP 32: parse returned v6 nodes
+				if nodes6Str, ok := resp.R["nodes6"].(string); ok {
+					newNodes, err := UnmarshalCompactNodeInfo6([]byte(nodes6Str))
+					if err == nil {
+						mu.Lock()
+						for _, ni := range newNodes {
+							if len(seen) >= MaxLookupNodes {
+								break
+							}
+							if _, exists := seen[ni.ID]; !exists {
+								node := &Node{ID: ni.ID, Addr: ni.Addr}
+								seen[ni.ID] = &nodeEntry{node: node}
+								d.updateNode(node)
 							}
 						}
 						mu.Unlock()

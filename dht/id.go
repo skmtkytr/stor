@@ -88,6 +88,41 @@ func MarshalCompactNodeInfo(nodes []CompactNodeInfo) []byte {
 	return buf
 }
 
+// MarshalCompactNodeInfo6 encodes a slice of IPv6 node infos into BEP 32
+// compact format (38 bytes per node: 20-byte ID + 16-byte IPv6 + 2-byte port).
+// IPv4-only nodes emit a zero-filled 38-byte record for alignment.
+func MarshalCompactNodeInfo6(nodes []CompactNodeInfo) []byte {
+	buf := make([]byte, 38*len(nodes))
+	for i, n := range nodes {
+		off := i * 38
+		copy(buf[off:off+20], n.ID[:])
+		if ip := n.Addr.IP.To16(); ip != nil && n.Addr.IP.To4() == nil {
+			copy(buf[off+20:off+36], ip)
+		}
+		buf[off+36] = byte(n.Addr.Port >> 8)
+		buf[off+37] = byte(n.Addr.Port)
+	}
+	return buf
+}
+
+// UnmarshalCompactNodeInfo6 decodes BEP 32 compact IPv6 node info.
+func UnmarshalCompactNodeInfo6(data []byte) ([]CompactNodeInfo, error) {
+	if len(data)%38 != 0 {
+		return nil, fmt.Errorf("dht: compact node info6 length %d is not a multiple of 38", len(data))
+	}
+	n := len(data) / 38
+	nodes := make([]CompactNodeInfo, n)
+	for i := range n {
+		off := i * 38
+		copy(nodes[i].ID[:], data[off:off+20])
+		nodes[i].Addr = net.UDPAddr{
+			IP:   net.IP(append([]byte{}, data[off+20:off+36]...)),
+			Port: int(data[off+36])<<8 | int(data[off+37]),
+		}
+	}
+	return nodes, nil
+}
+
 // UnmarshalCompactNodeInfo decodes compact node info.
 func UnmarshalCompactNodeInfo(data []byte) ([]CompactNodeInfo, error) {
 	if len(data)%26 != 0 {

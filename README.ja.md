@@ -16,6 +16,7 @@ Go の BitTorrent 実装の多くは anacrolix/torrent 等のラッパー。stor
 | 5 | DHT プロトコル | 実装済（共有インスタンス、alpha 設定可） |
 | 6 | Fast Extension | 実装済（have-all、have-none、reject） |
 | 7 | IPv6 Tracker Extension | 実装済（peers6、ipv6= announce パラメータ） |
+| 32 | DHT IPv6 Extension | 実装済（v6 ルーティングテーブル、want=n6、nodes6） |
 | 9 | メタデータ交換拡張 | 実装済 |
 | 10 | 拡張プロトコル | 実装済 |
 | 11 | ピア交換 (PEX) | 実装済（IPv4 + IPv6 added6/dropped6 対応） |
