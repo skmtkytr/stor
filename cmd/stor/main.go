@@ -108,18 +108,19 @@ func runDaemon() {
 	logHandler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(logHandler))
 
-	slog.Info("config loaded",
-		"path", configPath,
-		"port", cfg.Port,
-		"download_dir", cfg.DownloadDir,
-		"log_level", cfg.LogLevel,
-		"max_active", cfg.MaxActive,
-	)
-
 	peerPort := uint16(6881)
 	if cfg.PeerPort > 0 && cfg.PeerPort < 65536 {
 		peerPort = uint16(cfg.PeerPort)
 	}
+
+	slog.Info("config loaded",
+		"path", configPath,
+		"port", cfg.Port,
+		"peer_port", peerPort,
+		"download_dir", cfg.DownloadDir,
+		"log_level", cfg.LogLevel,
+		"max_active", cfg.MaxActive,
+	)
 	engCfg := engine.Config{
 		DownloadDir: cfg.DownloadDir,
 		TmpDir:      cfg.TmpDir,

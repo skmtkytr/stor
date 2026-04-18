@@ -59,3 +59,61 @@ func TestConfigPeerPortParsed(t *testing.T) {
 		t.Errorf("peer_port: got %d, want 51413", cfg.PeerPort)
 	}
 }
+
+func TestConfigParsesInlineComments(t *testing.T) {
+	// Users copy the README example which has inline `#` comments.
+	// The parser must strip them before converting numeric values.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `
+peer_port = 16881    # avoid collision with Deluge
+port = 9090          # Web UI port
+max_active = 20      # concurrent downloads
+api_key = "sk-x"     # pre-generated
+enable_utp = true    # try uTP first
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PeerPort != 16881 {
+		t.Errorf("peer_port: got %d, want 16881", cfg.PeerPort)
+	}
+	if cfg.Port != 9090 {
+		t.Errorf("port: got %d, want 9090", cfg.Port)
+	}
+	if cfg.MaxActive != 20 {
+		t.Errorf("max_active: got %d, want 20", cfg.MaxActive)
+	}
+	if cfg.APIKey != "sk-x" {
+		t.Errorf("api_key: got %q, want %q", cfg.APIKey, "sk-x")
+	}
+	if !cfg.EnableUTP {
+		t.Error("enable_utp: should be true")
+	}
+}
+
+func TestConfigPreservesHashInQuotedString(t *testing.T) {
+	// A `#` inside a quoted string must NOT be stripped as a comment.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `api_key = "sk-abc#def"
+download_dir = "/data/has#hash"
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIKey != "sk-abc#def" {
+		t.Errorf("api_key: got %q, want %q", cfg.APIKey, "sk-abc#def")
+	}
+	if cfg.DownloadDir != "/data/has#hash" {
+		t.Errorf("download_dir: got %q, want %q", cfg.DownloadDir, "/data/has#hash")
+	}
+}

@@ -143,7 +143,7 @@ func parseTOML(data string, cfg *Config) {
 			continue
 		}
 		key = strings.TrimSpace(key)
-		val = strings.TrimSpace(val)
+		val = stripInlineComment(strings.TrimSpace(val))
 
 		// Unquote string values
 		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
@@ -195,6 +195,27 @@ func parseTOML(data string, cfg *Config) {
 			cfg.EnableUTP = val == "true"
 		}
 	}
+}
+
+// stripInlineComment removes a trailing `# ...` comment from a TOML value,
+// preserving `#` characters that appear inside a quoted string.
+func stripInlineComment(val string) string {
+	inStr := false
+	for i := 0; i < len(val); i++ {
+		c := val[i]
+		if c == '"' {
+			// Respect backslash escapes inside strings
+			if inStr && i > 0 && val[i-1] == '\\' {
+				continue
+			}
+			inStr = !inStr
+			continue
+		}
+		if c == '#' && !inStr {
+			return strings.TrimSpace(val[:i])
+		}
+	}
+	return val
 }
 
 // ParseLogLevel converts a log level string to slog.Level.
