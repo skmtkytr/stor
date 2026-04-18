@@ -54,7 +54,8 @@ type AnnounceRequest struct {
 	Downloaded  int64
 	Left        int64
 	Event       Event
-	NumWant     int // peers requested; 0 means use default (200)
+	NumWant     int    // peers requested; 0 means use default (200)
+	IPv6        string // BEP 7: advertise this IPv6 address (empty = don't send)
 }
 
 // AnnounceResponse contains the tracker's response.
@@ -156,6 +157,11 @@ func buildAnnounceURL(req AnnounceRequest) (*url.URL, error) {
 		q.Set("event", string(req.Event))
 	}
 
+	// BEP 7: advertise our IPv6 address if available
+	if req.IPv6 != "" {
+		q.Set("ipv6", req.IPv6)
+	}
+
 	u.RawQuery = q.Encode()
 	return u, nil
 }
@@ -196,6 +202,15 @@ func parseAnnounceResponse(data []byte) (*AnnounceResponse, error) {
 		}
 	}
 
+	// BEP 7: parse peers6 (compact IPv6) and merge with IPv4 peers.
+	if peers6, ok := d["peers6"].(string); ok {
+		v6Peers, err := parseCompactPeers6(peers6)
+		if err != nil {
+			return nil, err
+		}
+		resp.Peers = append(resp.Peers, v6Peers...)
+	}
+
 	return resp, nil
 }
 
@@ -216,6 +231,28 @@ func parseCompactPeers(data string) ([]Peer, error) {
 		ip := net.IP(make([]byte, 4))
 		copy(ip, data[offset:offset+4])
 		port := binary.BigEndian.Uint16([]byte(data[offset+4 : offset+6]))
+		peers[i] = Peer{IP: ip, Port: port}
+	}
+	return peers, nil
+}
+
+// parseCompactPeers6 parses BEP 7 compact IPv6 peer list.
+// Each peer is 18 bytes: 16-byte IPv6 + 2-byte port (big-endian).
+func parseCompactPeers6(data string) ([]Peer, error) {
+	if len(data)%18 != 0 {
+		return nil, fmt.Errorf("tracker: compact peers6 length %d is not a multiple of 18", len(data))
+	}
+
+	numPeers := len(data) / 18
+	if numPeers > MaxPeersPerResponse {
+		numPeers = MaxPeersPerResponse
+	}
+	peers := make([]Peer, numPeers)
+	for i := range numPeers {
+		offset := i * 18
+		ip := net.IP(make([]byte, 16))
+		copy(ip, data[offset:offset+16])
+		port := binary.BigEndian.Uint16([]byte(data[offset+16 : offset+18]))
 		peers[i] = Peer{IP: ip, Port: port}
 	}
 	return peers, nil
@@ -252,6 +289,44 @@ func resolveAndValidateTrackerHost(host string) (string, error) {
 		return ip.String(), nil
 	}
 	return "", fmt.Errorf("host %s has no valid public addresses", host)
+}
+
+// LocalIPv6 returns a global-unicast IPv6 address from the local interfaces,
+// or "" if none is available. Used to advertise our IPv6 address to trackers
+// via BEP 7 `ipv6` parameter.
+func LocalIPv6() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() != nil {
+				continue
+			}
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsPrivate() {
+				continue
+			}
+			if ip.IsGlobalUnicast() {
+				return ip.String()
+			}
+		}
+	}
+	return ""
 }
 
 // FilterPrivatePeers removes peers with private/loopback/link-local addresses.
