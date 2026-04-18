@@ -104,6 +104,7 @@ All parameters in `config.toml` are optional. Shown values are defaults.
 
 ```toml
 port = 9090
+peer_port = 6881      # BitTorrent peer port (TCP + uTP). Change if it conflicts with another client.
 download_dir = "~/Downloads"
 tmp_dir = ""          # temp dir for in-progress downloads (empty = use download_dir)
 max_active = 5

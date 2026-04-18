@@ -116,11 +116,15 @@ func runDaemon() {
 		"max_active", cfg.MaxActive,
 	)
 
+	peerPort := uint16(6881)
+	if cfg.PeerPort > 0 && cfg.PeerPort < 65536 {
+		peerPort = uint16(cfg.PeerPort)
+	}
 	engCfg := engine.Config{
 		DownloadDir: cfg.DownloadDir,
 		TmpDir:      cfg.TmpDir,
 		StatePath:   cfg.StatePath,
-		ListenPort:  6881,
+		ListenPort:  peerPort,
 		MaxActive:   cfg.MaxActive,
 		MaxPeers:    cfg.MaxPeers,
 		MaxPipeline: cfg.MaxPipeline,

@@ -15,6 +15,7 @@ import (
 // Config holds daemon configuration.
 type Config struct {
 	Port        int    `toml:"port"`
+	PeerPort    int    `toml:"peer_port"` // BitTorrent peer listen port (TCP + uTP). 0 = default 6881
 	DownloadDir string `toml:"download_dir"`
 	TmpDir      string `toml:"tmp_dir"` // temp dir for in-progress downloads; empty = use download_dir
 	APIKey      string `toml:"api_key"`
@@ -96,6 +97,9 @@ func (c *Config) Save() error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# stor daemon configuration\n\n")
 	fmt.Fprintf(&b, "port = %d\n", c.Port)
+	if c.PeerPort > 0 {
+		fmt.Fprintf(&b, "peer_port = %d\n", c.PeerPort)
+	}
 	fmt.Fprintf(&b, "download_dir = %q\n", c.DownloadDir)
 	if c.TmpDir != "" {
 		fmt.Fprintf(&b, "tmp_dir = %q\n", c.TmpDir)
@@ -150,6 +154,10 @@ func parseTOML(data string, cfg *Config) {
 		case "port":
 			if n, err := strconv.Atoi(val); err == nil {
 				cfg.Port = n
+			}
+		case "peer_port":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.PeerPort = n
 			}
 		case "download_dir":
 			cfg.DownloadDir = val

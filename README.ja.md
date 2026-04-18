@@ -80,6 +80,7 @@ services:
 
 ```toml
 port = 9090
+peer_port = 6881      # BitTorrent ピアポート (TCP + uTP)。他クライアントと衝突する場合に変更
 download_dir = "~/Downloads"
 tmp_dir = ""          # DL中の一時フォルダ（空 = download_dir を使用）
 max_active = 5
