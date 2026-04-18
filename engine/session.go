@@ -571,6 +571,7 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 				Left:        1,
 				Event:       tracker.EventStarted,
 				NumWant:     s.numWant,
+				IPv6:        tracker.LocalIPv6(),
 			}
 			resp, err := tracker.Announce(req)
 			if err != nil {
@@ -811,6 +812,7 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 				Left:        tl,
 				Event:       tracker.EventStarted,
 				NumWant:     s.numWant,
+				IPv6:        tracker.LocalIPv6(),
 			}
 			resp, err := tracker.Announce(req)
 			if err != nil {

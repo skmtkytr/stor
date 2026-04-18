@@ -112,6 +112,7 @@ func (a *Announcer) announce(ctx context.Context, event tracker.Event) time.Dura
 				Left:        a.left(),
 				Event:       event,
 				NumWant:     a.numWant,
+				IPv6:        tracker.LocalIPv6(),
 			}
 			resp, err := tracker.Announce(req)
 			if err != nil {

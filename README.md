@@ -21,9 +21,10 @@ Most Go BitTorrent implementations wrap anacrolix/torrent or similar. stor repla
 | 3 | The BitTorrent Protocol | Implemented (choking, rarest-first, endgame) |
 | 5 | DHT Protocol | Implemented (shared instance, configurable alpha) |
 | 6 | Fast Extension | Implemented (have-all, have-none, reject) |
+| 7 | IPv6 Tracker Extension | Implemented (peers6, ipv6= announce param) |
 | 9 | Extension for Peers to Send Metadata Files | Implemented |
 | 10 | Extension Protocol | Implemented |
-| 11 | Peer Exchange (PEX) | Implemented |
+| 11 | Peer Exchange (PEX) | Implemented (IPv4 + IPv6 via added6/dropped6) |
 | 12 | Multitracker Metadata Extension | Implemented |
 | 15 | UDP Tracker Protocol | Implemented |
 | 19 | WebSeed (GetRight) | Implemented (HTTP Range, multi-file) |

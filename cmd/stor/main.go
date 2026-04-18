@@ -267,6 +267,7 @@ func handleMagnet(uri string, peerID [20]byte) (*torrent.TorrentFile, error) {
 				Port:        6881,
 				Left:        1,
 				Event:       tracker.EventStarted,
+				IPv6:        tracker.LocalIPv6(),
 			}
 			resp, err := tracker.Announce(req)
 			if err != nil {
@@ -489,6 +490,7 @@ func announceToTrackers(tf *torrent.TorrentFile, peerID [20]byte) ([]tracker.Pee
 				Port:        6881,
 				Left:        tl,
 				Event:       tracker.EventStarted,
+				IPv6:        tracker.LocalIPv6(),
 			}
 			resp, err := tracker.Announce(req)
 			if err != nil {

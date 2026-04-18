@@ -95,6 +95,7 @@ ref: https://www.bittorrent.org/beps/bep_0000.html
 | BEP | タイトル | 状態 | 対応パッケージ | 実装状況 |
 |-----|---------|------|--------------|---------|
 | [BEP 6](https://www.bittorrent.org/beps/bep_0006.html) | Fast Extension | Accepted | `peer/`, `download/` | ✅ 完了 |
+| [BEP 7](https://www.bittorrent.org/beps/bep_0007.html) | IPv6 Tracker Extension | Accepted | `tracker/`, `engine/` | ✅ 完了 |
 | [BEP 19](https://www.bittorrent.org/beps/bep_0019.html) | WebSeed (GetRight) | Accepted | `torrent/`, `download/` | ✅ 完了 |
 | [BEP 27](https://www.bittorrent.org/beps/bep_0027.html) | Private Torrents | Accepted | `torrent/`, `engine/`, `download/` | ✅ 完了 |
 
@@ -102,6 +103,13 @@ ref: https://www.bittorrent.org/beps/bep_0000.html
 - have-all/have-none でシーダーの bitfield 送信を省略
 - reject メッセージでチョーク中のリクエストを明示的に拒否
 - reserved[7] bit 2 でネゴシエーション
+
+**BEP 7 (IPv6 Tracker Extension):**
+- `peers6` レスポンスフィールド対応（18 バイト/peer = 16-byte IPv6 + 2-byte port）
+- announce リクエストに `&ipv6=<addr>` パラメータを送信（`tracker.LocalIPv6()` で自動検出）
+- `peers` (IPv4) と `peers6` (IPv6) を同じ `AnnounceResponse.Peers` にマージ
+- PEX (BEP 11) も IPv6 対応: `added6`/`added6.f`/`dropped6` フィールド送受信
+- プライベート/ループバック/リンクローカル v6 アドレスは `FilterPrivatePeers` で除外
 
 **BEP 19 (WebSeed):**
 - `.torrent` の `url-list` から HTTP Range リクエストでピース取得
