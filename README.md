@@ -133,6 +133,7 @@ The daemon exposes a JSON-RPC 2.0 endpoint at `POST /api/rpc`. Authentication us
 | `torrent.resume` | Resume a paused torrent |
 | `torrent.get` | Get torrent details by ID |
 | `torrent.list` | List all torrents with stats |
+| `torrent.peers` | List currently connected peers for a torrent (address, transport, client, speeds) |
 | `torrent.queueTop` | Move torrent to top of queue |
 | `torrent.queueUp` | Move torrent up one position |
 | `torrent.queueDown` | Move torrent down one position |

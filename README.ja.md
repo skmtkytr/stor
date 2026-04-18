@@ -109,6 +109,7 @@ enable_utp = false    # uTP トランスポート有効化（LEDBAT 輻輳制御
 | `torrent.resume` | 一時停止したトレントを再開 |
 | `torrent.get` | ID でトレント詳細取得 |
 | `torrent.list` | 全トレントの一覧と統計 |
+| `torrent.peers` | トレントの接続中ピア一覧 (アドレス、転送、クライアント、速度) |
 | `torrent.queueTop` | キュー先頭に移動 |
 | `torrent.queueUp` | キュー位置を1つ上へ |
 | `torrent.queueDown` | キュー位置を1つ下へ |
