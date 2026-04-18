@@ -11,7 +11,7 @@
 
 	let peers = $state<PeerSnap[]>([]);
 	let error = $state<string | null>(null);
-	let loading = $state(true);
+	let initialized = $state(false);
 
 	async function refresh() {
 		try {
@@ -20,15 +20,16 @@
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
-			loading = false;
+			initialized = true;
 		}
 	}
 
 	$effect(() => {
-		// Re-poll when torrentId changes
+		// Re-poll when torrentId changes. Do NOT clear peers here — let the
+		// previous data stay visible until the first refresh completes so the
+		// panel doesn't flash "Loading…" on every open.
 		void torrentId;
-		loading = true;
-		peers = [];
+		initialized = false;
 		refresh();
 		const iv = setInterval(refresh, 2000);
 		return () => clearInterval(iv);
@@ -37,15 +38,35 @@
 	function directionLabel(p: PeerSnap): string {
 		return p.incoming ? "\u2193 in" : "\u2191 out";
 	}
+
+	const v4Count = $derived(peers.filter((p) => p.ip_version === 4).length);
+	const v6Count = $derived(peers.filter((p) => p.ip_version === 6).length);
+	const inCount = $derived(peers.filter((p) => p.incoming).length);
+	const outCount = $derived(peers.length - inCount);
+	const encCount = $derived(peers.filter((p) => p.encrypted).length);
+	const utpCount = $derived(peers.filter((p) => p.using_utp).length);
 </script>
 
 <div class="border-b border-zinc-800 bg-zinc-950/60">
-	<div class="px-4 py-2 text-xs uppercase tracking-wider text-zinc-500">
-		Peers ({peers.length})
+	<div class="flex items-center gap-4 px-4 py-2 text-xs text-zinc-400">
+		<span class="uppercase tracking-wider text-zinc-500">
+			Peers ({peers.length})
+		</span>
+		{#if peers.length > 0}
+			<span class="text-zinc-600">·</span>
+			<span>v4 <span class="text-zinc-200">{v4Count}</span></span>
+			<span>v6 <span class="text-zinc-200">{v6Count}</span></span>
+			<span class="text-zinc-600">·</span>
+			<span class="text-blue-400">↑ out {outCount}</span>
+			<span class="text-emerald-400">↓ in {inCount}</span>
+			<span class="text-zinc-600">·</span>
+			<span>uTP {utpCount}</span>
+			<span>🔒 {encCount}</span>
+		{/if}
 	</div>
-	{#if loading && peers.length === 0}
+	{#if !initialized && peers.length === 0}
 		<div class="px-4 py-3 text-xs text-zinc-500">Loading…</div>
-	{:else if error}
+	{:else if error && peers.length === 0}
 		<div class="px-4 py-3 text-xs text-red-400">Error: {error}</div>
 	{:else if peers.length === 0}
 		<div class="px-4 py-3 text-xs text-zinc-500">No connected peers.</div>
