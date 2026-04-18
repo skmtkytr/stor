@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatBytes, formatSpeed, formatETA } from "./format";
+import { formatBytes, formatSpeed, formatETA, formatRatio, formatUnixDate } from "./format";
 
 describe("formatBytes", () => {
 	test("bytes", () => {
@@ -72,5 +72,41 @@ describe("formatETA", () => {
 	test("partial download", () => {
 		// 500 remaining, speed 100 => 5s
 		expect(formatETA(500, 1000, 100)).toBe("5s");
+	});
+});
+
+describe("formatRatio", () => {
+	test("zero downloaded, zero uploaded", () => {
+		expect(formatRatio(0, 0)).toBe("0.000");
+	});
+
+	test("zero downloaded, positive uploaded → infinity", () => {
+		expect(formatRatio(0, 1024)).toBe("\u221e");
+	});
+
+	test("rounds to three decimals", () => {
+		expect(formatRatio(1000, 1500)).toBe("1.500");
+		expect(formatRatio(3, 1)).toBe("0.333");
+	});
+
+	test("equal values gives 1.000", () => {
+		expect(formatRatio(2048, 2048)).toBe("1.000");
+	});
+
+	test("handles large values", () => {
+		expect(formatRatio(1, 1_000_000)).toBe("1000000.000");
+	});
+});
+
+describe("formatUnixDate", () => {
+	test("returns - for zero timestamp", () => {
+		expect(formatUnixDate(0)).toBe("-");
+	});
+
+	test("returns a non-empty string for a valid timestamp", () => {
+		const s = formatUnixDate(1_700_000_000);
+		expect(typeof s).toBe("string");
+		expect(s.length).toBeGreaterThan(0);
+		expect(s).not.toBe("-");
 	});
 });

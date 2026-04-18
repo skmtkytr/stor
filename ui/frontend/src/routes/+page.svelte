@@ -7,6 +7,7 @@
 	import Toolbar from "$lib/components/Toolbar.svelte";
 	import FilterBar from "$lib/components/FilterBar.svelte";
 	import TorrentTable from "$lib/components/TorrentTable.svelte";
+	import TorrentDetailPanel from "$lib/components/TorrentDetailPanel.svelte";
 	import StatusBar from "$lib/components/StatusBar.svelte";
 	import SettingsDialog from "$lib/components/SettingsDialog.svelte";
 
@@ -14,6 +15,8 @@
 	let activeFilter = $state("all");
 	let selectedIds = $state<string[]>([]);
 	let table = $state<TorrentTable>();
+
+	const detailId = $derived(selectedIds.length === 1 ? selectedIds[0] : null);
 
 	onMount(async () => {
 		await auth.tryAutoAuth();
@@ -43,6 +46,9 @@
 			filter={activeFilter}
 			onSelectionChange={(ids) => (selectedIds = ids)}
 		/>
+		<div class="h-72 shrink-0">
+			<TorrentDetailPanel torrentId={detailId} />
+		</div>
 		<StatusBar />
 	</div>
 	<SettingsDialog bind:open={settingsOpen} />
