@@ -187,20 +187,25 @@ func (e *Engine) Start() error {
 		}
 	}
 
-	// Start shared DHT node
+	// Start shared DHT node. Bootstrap (DNS lookups + ~5s wait for bootstrap
+	// node responses + up to 15s self-lookup) runs in the background so the
+	// daemon HTTP server can come up immediately. Persisted nodes are loaded
+	// synchronously so warm starts have a usable table right away.
 	if !e.cfg.DisableDHT {
 		d, err := dht.New(":0", dht.WithAlpha(e.cfg.DHTAlpha))
 		if err == nil {
-			// Restore persisted routing table for warm start
 			loaded, loadErr := d.LoadNodes(e.dhtNodesPath())
 			if loadErr != nil {
 				slog.Warn("dht: failed to load persisted nodes", "error", loadErr)
 			} else if loaded > 0 {
 				slog.Info("dht: loaded persisted nodes", "count", loaded)
 			}
-			_ = d.Bootstrap(dhtBootstrapNodes)
 			e.dht = d
-			slog.Info("dht started", "table_size", d.TableSize())
+			slog.Info("dht starting", "persisted_nodes", loaded)
+			go func() {
+				_ = d.Bootstrap(dhtBootstrapNodes)
+				slog.Info("dht bootstrap complete", "table_size", d.TableSize())
+			}()
 		} else {
 			slog.Warn("dht failed to start", "error", err)
 		}
