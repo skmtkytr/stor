@@ -350,7 +350,10 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		announceCancel()
 		s.mu.Lock()
 		s.peerCh = nil
-		s.peerMgr = nil
+		// Intentionally keep s.peerMgr non-nil: the PeerManager's worker
+		// goroutines remain registered until the session ctx is cancelled,
+		// so PeerList should continue to surface those connections during
+		// the seed phase.
 		s.mu.Unlock()
 	}
 
@@ -487,6 +490,7 @@ func (s *Session) phaseSeed(ctx context.Context) error {
 		s.record.State = StateComplete
 	}
 	s.uploader = nil
+	s.peerMgr = nil
 	s.mu.Unlock()
 
 	return nil
