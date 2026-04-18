@@ -12,6 +12,7 @@ import (
 	"github.com/skmtkytr/stor/peer"
 	"github.com/skmtkytr/stor/storage"
 	"github.com/skmtkytr/stor/torrent"
+	"github.com/skmtkytr/stor/utp"
 )
 
 // Uploader serves piece data to incoming peers.
@@ -78,16 +79,22 @@ func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {
 	r := bufio.NewReaderSize(conn, 64*1024)
 	w := bufio.NewWriterSize(conn, 32*1024)
 
+	_, isUTP := conn.(*utp.Conn)
 	client := &Client{
-		conn:       conn,
-		r:          r,
-		w:          w,
-		peerID:     u.peerID,
-		infoHash:   u.tf.InfoHash,
-		Addr:       conn.RemoteAddr().String(),
-		choking:    true, // start by choking them
-		fastExt:    remoteHS.FastExtension,
-		speedStart: time.Now(),
+		conn:         conn,
+		r:            r,
+		w:            w,
+		peerID:       u.peerID,
+		infoHash:     u.tf.InfoHash,
+		Addr:         conn.RemoteAddr().String(),
+		choking:      true, // start by choking them
+		fastExt:      remoteHS.FastExtension,
+		speedStart:   time.Now(),
+		Incoming:     true,
+		UsingUTP:     isUTP,
+		RemotePeerID: remoteHS.PeerID,
+		// Encrypted: not tracked for incoming — MSE handshake happens before
+		// peer.ReadHandshake in the listener layer (future enhancement)
 	}
 
 	u.pm.Register(client)

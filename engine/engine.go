@@ -454,6 +454,19 @@ func (e *Engine) GetTorrent(id string) (*TorrentInfo, error) {
 	return e.sessionToInfo(s), nil
 }
 
+// TorrentPeers returns the live peer list for a torrent, or an error if the
+// torrent is not found. An empty slice is returned if the torrent has no
+// active connections (e.g. paused).
+func (e *Engine) TorrentPeers(id string) ([]download.PeerSnap, error) {
+	e.mu.RLock()
+	s, ok := e.sessions[id]
+	e.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("engine: torrent %s not found", id)
+	}
+	return s.PeerList(), nil
+}
+
 // ListTorrents returns info about all torrents.
 func (e *Engine) ListTorrents() []*TorrentInfo {
 	e.mu.RLock()

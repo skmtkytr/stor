@@ -101,6 +101,12 @@ type Client struct {
 	maxPipeline    int
 	Addr           string // peer address for identification
 
+	// Peer metadata (for UI / introspection)
+	Incoming     bool     // true if this connection was accepted (remote dialed us)
+	UsingUTP     bool     // true if the underlying transport is uTP (not TCP)
+	Encrypted    bool     // true if MSE/PE (RC4) was negotiated
+	RemotePeerID [20]byte // peer ID from remote handshake
+
 	// Speed tracking (atomic: accessed from both worker and PeerManager goroutines)
 	downloaded atomic.Int64
 	uploaded   atomic.Int64
@@ -300,19 +306,24 @@ func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int
 		return nil, fmt.Errorf("download: info hash mismatch")
 	}
 
+	_, isUTP := rawConn.(*utp.Conn)
 	c := &Client{
-		conn:        conn,
-		r:           bufio.NewReaderSize(conn, 64*1024),
-		w:           bufio.NewWriterSize(conn, 32*1024),
-		peerID:      peerID,
-		infoHash:    infoHash,
-		choked:      true, // we are choked by peer (default per BT protocol)
-		choking:     true, // we are choking peer (default per BT protocol)
-		maxPipeline: DefaultMaxPipeline,
-		Addr:        p.String(),
-		speedStart:  time.Now(),
-		disablePEX:  noPEX,
-		fastExt:     resp.FastExtension,
+		conn:         conn,
+		r:            bufio.NewReaderSize(conn, 64*1024),
+		w:            bufio.NewWriterSize(conn, 32*1024),
+		peerID:       peerID,
+		infoHash:     infoHash,
+		choked:       true, // we are choked by peer (default per BT protocol)
+		choking:      true, // we are choking peer (default per BT protocol)
+		maxPipeline:  DefaultMaxPipeline,
+		Addr:         p.String(),
+		speedStart:   time.Now(),
+		disablePEX:   noPEX,
+		fastExt:      resp.FastExtension,
+		Incoming:     false, // outgoing: we dialed
+		UsingUTP:     isUTP,
+		Encrypted:    encrypt,
+		RemotePeerID: resp.PeerID,
 	}
 
 	// BEP 10: send extension handshake if peer supports extensions
@@ -839,6 +850,7 @@ type DownloadParams struct {
 	OnRequest   func(index, begin, length uint32) []byte // serve incoming piece requests (set automatically if nil)
 	HaveBF      peer.Bitfield                            // live bitfield updated by OnPiece (for upload-while-downloading)
 	WebSeedURLs []string                                 // BEP 19: HTTP URLs for downloading pieces
+	OnPeerMgr   func(*PeerManager)                       // called once after PeerManager creation (for UI introspection)
 }
 
 // DownloadToFileCtx is like DownloadToFile but accepts a context for cancellation.
@@ -947,6 +959,9 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 
 	pq := NewPieceQueue(pieces)
 	resultCh, pm := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.PeerSink, p.Progress, p.Cfg, p.OnRequest, p.HaveBF, p.TF, p.WebSeedURLs)
+	if p.OnPeerMgr != nil {
+		p.OnPeerMgr(pm)
+	}
 
 	pieceLength := p.TF.Info.PieceLength
 	for completed := 0; completed < remaining; {

@@ -47,11 +47,12 @@ type Session struct {
 	port        uint16
 	dlCfg       download.DownloadConfig
 	numWant     int
-	dht         *dhtpkg.DHT         // shared DHT instance from engine (may be nil)
-	cachedPeers []tracker.Peer      // peers collected during metadata phase (avoids double query)
-	peerCh      chan []tracker.Peer // dynamic peer injection channel (active during download)
-	uploader    *download.Uploader  // active during seeding
-	listener    *PeerListener       // reference to engine's listener for registration
+	dht         *dhtpkg.DHT           // shared DHT instance from engine (may be nil)
+	cachedPeers []tracker.Peer        // peers collected during metadata phase (avoids double query)
+	peerCh      chan []tracker.Peer   // dynamic peer injection channel (active during download)
+	uploader    *download.Uploader    // active during seeding
+	peerMgr     *download.PeerManager // active during downloading (nil when seeding)
+	listener    *PeerListener         // reference to engine's listener for registration
 }
 
 // NewSession creates a session from a persisted record.
@@ -122,6 +123,30 @@ func (s *Session) Snap() download.ProgressSnap {
 		State: string(state),
 		Total: totalBytes,
 	}
+}
+
+// PeerList returns snapshots of all currently connected peers
+// (both downloading and seeding/incoming). Safe to call from any goroutine.
+func (s *Session) PeerList() []download.PeerSnap {
+	s.mu.RLock()
+	pm := s.peerMgr
+	up := s.uploader
+	tf := s.tf
+	s.mu.RUnlock()
+
+	numPieces := 0
+	if tf != nil {
+		numPieces = len(tf.Info.PieceHashes)
+	}
+
+	var all []download.PeerSnap
+	if pm != nil {
+		all = append(all, pm.Snapshot(numPieces)...)
+	}
+	if up != nil {
+		all = append(all, up.Snapshot(numPieces)...)
+	}
+	return all
 }
 
 // Err returns the last error.
@@ -325,6 +350,7 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		announceCancel()
 		s.mu.Lock()
 		s.peerCh = nil
+		s.peerMgr = nil
 		s.mu.Unlock()
 	}
 
@@ -361,6 +387,11 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		OnPiece: func(index int) {
 			uploadBF.SetPiece(index)
 			up.SetPiece(index)
+		},
+		OnPeerMgr: func(pm *download.PeerManager) {
+			s.mu.Lock()
+			s.peerMgr = pm
+			s.mu.Unlock()
 		},
 	})
 	if dlErr != nil {

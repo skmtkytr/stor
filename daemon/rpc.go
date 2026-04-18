@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/skmtkytr/stor/download"
 	"github.com/skmtkytr/stor/engine"
 )
 
@@ -131,6 +132,8 @@ func (h *RPCHandler) dispatch(method string, params json.RawMessage) (any, *rpcE
 		return h.torrentGet(params)
 	case "torrent.list":
 		return h.torrentList()
+	case "torrent.peers":
+		return h.torrentPeers(params)
 	case "torrent.queueTop":
 		return h.torrentQueueMove(params, "top")
 	case "torrent.queueUp":
@@ -294,6 +297,24 @@ func (h *RPCHandler) torrentGet(params json.RawMessage) (any, *rpcErr) {
 
 func (h *RPCHandler) torrentList() (any, *rpcErr) {
 	return h.engine.ListTorrents(), nil
+}
+
+func (h *RPCHandler) torrentPeers(params json.RawMessage) (any, *rpcErr) {
+	var p struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil || p.ID == "" {
+		return nil, &rpcErr{Code: -32602, Message: "invalid params: id required"}
+	}
+	peers, err := h.engine.TorrentPeers(p.ID)
+	if err != nil {
+		return nil, &rpcErr{Code: -32000, Message: err.Error()}
+	}
+	// Return empty array rather than null for UI convenience
+	if peers == nil {
+		peers = []download.PeerSnap{}
+	}
+	return peers, nil
 }
 
 func (h *RPCHandler) torrentQueueMove(params json.RawMessage, direction string) (any, *rpcErr) {
