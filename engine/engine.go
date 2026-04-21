@@ -64,8 +64,9 @@ type TorrentInfo struct {
 
 // FileEntry describes one file in a torrent.
 type FileEntry struct {
-	Path   string `json:"path"`
-	Length int64  `json:"length"`
+	Path       string `json:"path"`
+	Length     int64  `json:"length"`
+	Downloaded int64  `json:"downloaded"`
 }
 
 // EngineConfig is the subset of Config exposed to API clients.

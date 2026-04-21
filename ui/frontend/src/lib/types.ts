@@ -50,6 +50,7 @@ export interface ProgressSnap {
 export interface FileEntry {
 	path: string;
 	length: number;
+	downloaded: number;
 }
 
 export interface PeerSnap {

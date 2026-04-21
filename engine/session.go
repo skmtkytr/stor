@@ -65,6 +65,13 @@ type Session struct {
 	uploader    *download.Uploader    // active during seeding
 	peerMgr     *download.PeerManager // active during downloading (nil when seeding)
 	listener    *PeerListener         // reference to engine's listener for registration
+
+	// Live have-bitfield used for per-file progress reporting. Updated by
+	// OnPiece during download and set to a full bitfield in seeding phases.
+	// Shares storage with the download/upload HaveBF in the session
+	// goroutine, so mutations happen in that goroutine; snapshots taken by
+	// Files() copy the bytes under s.mu.
+	haveBF peer.Bitfield
 }
 
 // NewSession creates a session from a persisted record.
@@ -143,6 +150,15 @@ func (s *Session) Files() []FileEntry {
 	s.mu.RLock()
 	tf := s.tf
 	data := s.record.TorrentData
+	// Snapshot the have-bitfield. Prefer the live one; fall back to the
+	// persisted record bitfield so a paused/unstarted torrent still shows
+	// file progress from the last session.
+	var bf peer.Bitfield
+	if s.haveBF != nil {
+		bf = append(peer.Bitfield(nil), s.haveBF...)
+	} else if len(s.record.Bitfield) > 0 {
+		bf = append(peer.Bitfield(nil), s.record.Bitfield...)
+	}
 	s.mu.RUnlock()
 	if tf == nil && len(data) > 0 {
 		if parsed, err := torrent.Parse(data); err == nil {
@@ -152,16 +168,27 @@ func (s *Session) Files() []FileEntry {
 	if tf == nil {
 		return []FileEntry{}
 	}
+
+	numPieces := len(tf.Info.PieceHashes)
+	pieceLength := tf.Info.PieceLength
+	totalBytes := storage.TotalSize(tf)
+
 	// Single-file torrent: info.length > 0, files list is empty.
 	if len(tf.Info.Files) == 0 {
-		return []FileEntry{{Path: tf.Info.Name, Length: tf.Info.Length}}
+		entry := FileEntry{Path: tf.Info.Name, Length: tf.Info.Length}
+		entry.Downloaded = computeFileDownloaded(bf, 0, tf.Info.Length, pieceLength, totalBytes, numPieces)
+		return []FileEntry{entry}
 	}
+
 	out := make([]FileEntry, 0, len(tf.Info.Files))
+	var offset int64
 	for _, f := range tf.Info.Files {
 		out = append(out, FileEntry{
-			Path:   filepath.ToSlash(filepath.Join(f.Path...)),
-			Length: f.Length,
+			Path:       filepath.ToSlash(filepath.Join(f.Path...)),
+			Length:     f.Length,
+			Downloaded: computeFileDownloaded(bf, offset, f.Length, pieceLength, totalBytes, numPieces),
 		})
+		offset += f.Length
 	}
 	return out
 }
@@ -374,6 +401,7 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	up := download.NewUploader(s.tf, savePath, s.peerID, uploadBF)
 	s.mu.Lock()
 	s.uploader = up
+	s.haveBF = uploadBF
 	s.mu.Unlock()
 	go up.Run(ctx)
 
@@ -429,7 +457,12 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		WebSeedURLs: s.tf.WebSeedURLs,
 		HaveBF:      uploadBF, // live bitfield for OnRequest (auto-wired in DownloadWithParams)
 		OnPiece: func(index int) {
+			s.mu.Lock()
 			uploadBF.SetPiece(index)
+			// Persist the have-bitfield so a resume picks up where we
+			// left off without re-verifying already-downloaded pieces.
+			s.record.Bitfield = append(s.record.Bitfield[:0], uploadBF...)
+			s.mu.Unlock()
 			up.SetPiece(index)
 		},
 		OnPeerMgr: func(pm *download.PeerManager) {
@@ -498,6 +531,7 @@ func (s *Session) phaseSeedDirect(ctx context.Context, savePath string) error {
 	up := download.NewUploader(s.tf, savePath, s.peerID, fullBF)
 	s.mu.Lock()
 	s.uploader = up
+	s.haveBF = fullBF
 	s.mu.Unlock()
 	go up.Run(ctx)
 
