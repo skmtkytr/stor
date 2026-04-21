@@ -127,6 +127,9 @@ dial_timeout = 3      # seconds
 numwant = 200         # peers requested per tracker announce
 dht_alpha = 8         # DHT lookup concurrency
 enable_utp = false    # experimental uTP transport; leave off unless you are testing
+
+# Observability (both /metrics and /debug/pprof require the API key)
+enable_metrics = false
 ```
 
 Most settings can be changed at runtime via the Web UI settings page or the `daemon.setConfig` RPC method.
@@ -162,6 +165,21 @@ Additional REST endpoints:
 | `POST /api/add` | Form-based add (for Chrome extension) |
 | `GET /api/torrents` | Torrent list (polling) |
 | `GET /` | Web UI |
+
+## Observability
+
+Optional Prometheus metrics and Go `pprof` endpoints, both hand-rolled on stdlib (no `prometheus/client_golang` dependency). Disabled by default; enable in `config.toml`:
+
+```toml
+enable_metrics = true
+```
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /metrics` | Prometheus text format (`stor_torrents_total`, `stor_peers_total`, `stor_dht_nodes_total`, `stor_download_bytes_total`, `stor_upload_bytes_total`, `stor_*_speed_bytes_per_second`, `stor_free_space_bytes`, `stor_build_info`, plus `go_goroutines` / `go_memstats_*`) |
+| `GET /debug/pprof/` | Standard `net/http/pprof` handler tree (`cmdline`, `profile`, `symbol`, `trace`) |
+
+Both endpoints require the same `Authorization: Bearer <api_key>` header as `/api/rpc` — profiling leaks runtime internals, so unauthenticated access is never allowed. If you scrape from Prometheus, configure a `bearer_token` on the scrape job.
 
 ## Security
 

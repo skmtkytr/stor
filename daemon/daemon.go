@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"strings"
 	"time"
 
@@ -37,6 +38,23 @@ func New(eng *engine.Engine, cfg Config) *Daemon {
 	mux.Handle("POST /api/rpc", d.authMiddleware(rpc))
 	mux.Handle("POST /api/add", d.authMiddleware(http.HandlerFunc(d.handleAdd)))
 	mux.Handle("GET /api/torrents", d.authMiddleware(http.HandlerFunc(d.handleListTorrents)))
+
+	// Observability (opt-in via config; always behind API key auth).
+	// /metrics serves Prometheus text format; /debug/pprof/* serves the
+	// stdlib pprof handler tree. Profiling endpoints are expensive and
+	// leak detailed runtime info, so auth is mandatory.
+	if cfg.EnableMetrics {
+		mux.Handle("GET /metrics", d.authMiddleware(http.HandlerFunc(d.handleMetrics)))
+
+		// Register pprof explicitly to avoid depending on http.DefaultServeMux
+		// (which the side-effect import of net/http/pprof mutates).
+		mux.Handle("GET /debug/pprof/", d.authMiddleware(http.HandlerFunc(pprof.Index)))
+		mux.Handle("GET /debug/pprof/cmdline", d.authMiddleware(http.HandlerFunc(pprof.Cmdline)))
+		mux.Handle("GET /debug/pprof/profile", d.authMiddleware(http.HandlerFunc(pprof.Profile)))
+		mux.Handle("GET /debug/pprof/symbol", d.authMiddleware(http.HandlerFunc(pprof.Symbol)))
+		mux.Handle("POST /debug/pprof/symbol", d.authMiddleware(http.HandlerFunc(pprof.Symbol)))
+		mux.Handle("GET /debug/pprof/trace", d.authMiddleware(http.HandlerFunc(pprof.Trace)))
+	}
 
 	// Web UI (no auth — static files only, API key entered in browser)
 	uiFS, _ := fs.Sub(ui.FS, "dist")

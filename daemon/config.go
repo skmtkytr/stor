@@ -33,6 +33,11 @@ type Config struct {
 	DHTAlpha    int  `toml:"dht_alpha"`
 	EnableUTP   bool `toml:"enable_utp"`
 
+	// Observability: when true, the daemon exposes /metrics (Prometheus text
+	// format) and /debug/pprof/*. Both endpoints require the API key just
+	// like the RPC endpoint. Off by default.
+	EnableMetrics bool `toml:"enable_metrics"`
+
 	path string // file path for saving back
 }
 
@@ -126,6 +131,10 @@ func (c *Config) Save() error {
 	if c.EnableUTP {
 		fmt.Fprintf(&b, "enable_utp = true\n")
 	}
+	if c.EnableMetrics {
+		fmt.Fprintf(&b, "\n# Observability (exposes /metrics and /debug/pprof/; both require API key)\n")
+		fmt.Fprintf(&b, "enable_metrics = true\n")
+	}
 
 	return os.WriteFile(c.path, []byte(b.String()), 0o600)
 }
@@ -193,6 +202,8 @@ func parseTOML(data string, cfg *Config) {
 			}
 		case "enable_utp":
 			cfg.EnableUTP = val == "true"
+		case "enable_metrics":
+			cfg.EnableMetrics = val == "true"
 		}
 	}
 }

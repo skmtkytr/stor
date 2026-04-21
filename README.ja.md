@@ -102,6 +102,9 @@ dial_timeout = 3      # 秒
 numwant = 200         # トラッカーへのピア要求数
 dht_alpha = 8         # DHT lookup の並列度
 enable_utp = false    # 実験的 uTP トランスポート。検証以外では有効化しない
+
+# 可観測性（/metrics と /debug/pprof は API キー必須）
+enable_metrics = false
 ```
 
 ほとんどの設定は Web UI の設定画面または `daemon.setConfig` RPC から実行時に変更可能。
@@ -137,6 +140,21 @@ enable_utp = false    # 実験的 uTP トランスポート。検証以外では
 | `POST /api/add` | フォームベースの追加（Chrome 拡張用） |
 | `GET /api/torrents` | トレント一覧（ポーリング用） |
 | `GET /` | Web UI |
+
+## 可観測性 (Observability)
+
+Prometheus メトリクスと Go の `pprof` を提供（いずれも標準ライブラリのみ、`prometheus/client_golang` 依存なし）。デフォルトは無効。`config.toml` で有効化する:
+
+```toml
+enable_metrics = true
+```
+
+| エンドポイント | 説明 |
+|--------------|------|
+| `GET /metrics` | Prometheus テキスト形式（`stor_torrents_total`、`stor_peers_total`、`stor_dht_nodes_total`、`stor_download_bytes_total`、`stor_upload_bytes_total`、`stor_*_speed_bytes_per_second`、`stor_free_space_bytes`、`stor_build_info`、加えて `go_goroutines` / `go_memstats_*`） |
+| `GET /debug/pprof/` | 標準 `net/http/pprof` ハンドラー（`cmdline` / `profile` / `symbol` / `trace`） |
+
+いずれも `/api/rpc` と同じ `Authorization: Bearer <api_key>` ヘッダーが必須。プロファイリングは実行時情報を暴露するため、認証なしでは一切公開しない。Prometheus からスクレイプする際は scrape job に `bearer_token` を設定する。
 
 ## セキュリティ
 
