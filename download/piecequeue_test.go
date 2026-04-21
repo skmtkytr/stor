@@ -199,6 +199,7 @@ func TestPieceQueueEndgame(t *testing.T) {
 func TestPieceQueueRespectsSkipMask(t *testing.T) {
 	// 4 pieces; skip mask marks pieces 1 and 3 as skipped → they must never
 	// be handed out by Pick, and Remaining() counts only the 2 wanted.
+	// Use many pieces to stay out of endgame (threshold is max(5, n/100)).
 	pieces := []PieceWork{
 		{Index: 0, Length: 100},
 		{Index: 1, Length: 100},
@@ -215,14 +216,17 @@ func TestPieceQueueRespectsSkipMask(t *testing.T) {
 		t.Fatalf("Remaining: got %d, want 2 (pieces 1,3 skipped)", got)
 	}
 
+	// Loop until no more work is available (complete each pick to ensure
+	// pending bookkeeping can't re-hand the same index in endgame mode).
 	hasAll := func(int) bool { return true }
 	picked := make(map[int]bool)
-	for range 4 {
+	for range 10 {
 		pw, ok := pq.Pick(hasAll)
 		if !ok {
 			break
 		}
 		picked[pw.Index] = true
+		pq.Complete(pw.Index)
 	}
 	if picked[1] || picked[3] {
 		t.Fatalf("skipped pieces should never be picked, got %v", picked)
