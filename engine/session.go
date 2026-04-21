@@ -159,6 +159,7 @@ func (s *Session) Files() []FileEntry {
 	} else if len(s.record.Bitfield) > 0 {
 		bf = append(peer.Bitfield(nil), s.record.Bitfield...)
 	}
+	prios := append([]int8(nil), s.record.FilePriorities...)
 	s.mu.RUnlock()
 	if tf == nil && len(data) > 0 {
 		if parsed, err := torrent.Parse(data); err == nil {
@@ -173,20 +174,33 @@ func (s *Session) Files() []FileEntry {
 	pieceLength := tf.Info.PieceLength
 	totalBytes := storage.TotalSize(tf)
 
+	// priorityOf returns the priority for file index i (default: normal).
+	priorityOf := func(i int) int8 {
+		if i < len(prios) {
+			return prios[i]
+		}
+		return PriorityNormal
+	}
+
 	// Single-file torrent: info.length > 0, files list is empty.
 	if len(tf.Info.Files) == 0 {
-		entry := FileEntry{Path: tf.Info.Name, Length: tf.Info.Length}
+		entry := FileEntry{
+			Path:     tf.Info.Name,
+			Length:   tf.Info.Length,
+			Priority: priorityOf(0),
+		}
 		entry.Downloaded = computeFileDownloaded(bf, 0, tf.Info.Length, pieceLength, totalBytes, numPieces)
 		return []FileEntry{entry}
 	}
 
 	out := make([]FileEntry, 0, len(tf.Info.Files))
 	var offset int64
-	for _, f := range tf.Info.Files {
+	for i, f := range tf.Info.Files {
 		out = append(out, FileEntry{
 			Path:       filepath.ToSlash(filepath.Join(f.Path...)),
 			Length:     f.Length,
 			Downloaded: computeFileDownloaded(bf, offset, f.Length, pieceLength, totalBytes, numPieces),
+			Priority:   priorityOf(i),
 		})
 		offset += f.Length
 	}
@@ -444,6 +458,11 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		dlCfg.DisablePEX = true
 	}
 
+	// Compute the skip-piece mask from per-file priorities. Bits for pieces
+	// fully inside skipped files will be omitted from the download queue.
+	// Priority changes take effect on next pause→resume; we don't hot-requeue.
+	skipMask := computeSkipMaskFromRecord(s.tf, s.record.FilePriorities)
+
 	dlErr := download.DownloadWithParams(ctx, download.DownloadParams{
 		TF:          s.tf,
 		PeerID:      s.peerID,
@@ -454,6 +473,7 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		Progress:    progress,
 		Cfg:         dlCfg,
 		Have:        haveBitfield,
+		SkipMask:    skipMask,
 		WebSeedURLs: s.tf.WebSeedURLs,
 		HaveBF:      uploadBF, // live bitfield for OnRequest (auto-wired in DownloadWithParams)
 		OnPiece: func(index int) {

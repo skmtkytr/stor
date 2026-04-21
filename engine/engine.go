@@ -67,6 +67,8 @@ type FileEntry struct {
 	Path       string `json:"path"`
 	Length     int64  `json:"length"`
 	Downloaded int64  `json:"downloaded"`
+	// Priority is 0 (normal) or -1 (skip). See PriorityNormal / PrioritySkip.
+	Priority int8 `json:"priority"`
 }
 
 // EngineConfig is the subset of Config exposed to API clients.
@@ -506,6 +508,65 @@ func (e *Engine) TorrentPeers(id string) ([]download.PeerSnap, error) {
 		return nil, fmt.Errorf("engine: torrent %s not found", id)
 	}
 	return s.PeerList(), nil
+}
+
+// SetFilePriority sets the priority for a single file in a torrent. The
+// change is persisted to the record so it survives restarts. Priority
+// changes take effect on next pause→resume — no hot requeue is attempted.
+//
+// Valid priorities: 0 (normal), -1 (skip). Any other value is rejected.
+func (e *Engine) SetFilePriority(id string, fileIndex int, priority int8) error {
+	if priority != PriorityNormal && priority != PrioritySkip {
+		return fmt.Errorf("engine: invalid priority %d (must be 0 or -1)", priority)
+	}
+	if fileIndex < 0 {
+		return fmt.Errorf("engine: invalid file_index %d", fileIndex)
+	}
+
+	e.mu.RLock()
+	s, ok := e.sessions[id]
+	e.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("engine: torrent %s not found", id)
+	}
+
+	// Determine file count for the torrent. Require metadata to be
+	// resolved, otherwise we can't bounds-check fileIndex.
+	s.mu.Lock()
+	tf := s.tf
+	if tf == nil && len(s.record.TorrentData) > 0 {
+		if parsed, err := torrent.Parse(s.record.TorrentData); err == nil {
+			tf = parsed
+		}
+	}
+	if tf == nil {
+		s.mu.Unlock()
+		return fmt.Errorf("engine: torrent %s metadata not yet resolved", id)
+	}
+
+	fileCount := len(tf.Info.Files)
+	if fileCount == 0 {
+		fileCount = 1 // single-file torrent has one implicit file
+	}
+	if fileIndex >= fileCount {
+		s.mu.Unlock()
+		return fmt.Errorf("engine: file_index %d out of range (file count %d)", fileIndex, fileCount)
+	}
+
+	// Grow the priorities slice if needed; default entries stay at 0 (normal).
+	if len(s.record.FilePriorities) < fileCount {
+		grown := make([]int8, fileCount)
+		copy(grown, s.record.FilePriorities)
+		s.record.FilePriorities = grown
+	}
+	s.record.FilePriorities[fileIndex] = priority
+	s.mu.Unlock()
+
+	// Persist immediately so the change survives a crash before the next
+	// periodic save. Hot requeue is intentionally not done: the user
+	// pauses + resumes to apply.
+	e.saveState()
+	return nil
 }
 
 // ListTorrents returns info about all torrents.

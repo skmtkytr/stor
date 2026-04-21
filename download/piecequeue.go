@@ -28,19 +28,38 @@ type PieceQueue struct {
 
 // NewPieceQueue creates a piece queue from a list of pieces to download.
 func NewPieceQueue(pieces []PieceWork) *PieceQueue {
+	return NewPieceQueueWithSkip(pieces, nil)
+}
+
+// NewPieceQueueWithSkip creates a piece queue from a list of pieces, omitting
+// any piece whose bit is set in skipMask. A nil skipMask is equivalent to
+// calling NewPieceQueue directly. Skipped pieces are never handed out by
+// Pick and do not count toward Remaining().
+func NewPieceQueueWithSkip(pieces []PieceWork, skipMask peer.Bitfield) *PieceQueue {
+	filtered := pieces
+	if skipMask != nil {
+		filtered = make([]PieceWork, 0, len(pieces))
+		for _, pw := range pieces {
+			if skipMask.HasPiece(pw.Index) {
+				continue
+			}
+			filtered = append(filtered, pw)
+		}
+	}
+
 	pq := &PieceQueue{
-		pieces:       make(map[int]PieceWork, len(pieces)),
+		pieces:       make(map[int]PieceWork, len(filtered)),
 		availability: make(map[int]int),
 		pending:      make(map[int]bool),
 		done:         make(map[int]bool),
-		totalPieces:  len(pieces),
+		totalPieces:  len(filtered),
 		waitCh:       make(chan struct{}, 1),
 		cancelCh:     make(chan int, 64),
 		buckets:      make(map[int]map[int]bool),
 	}
 	// All pieces start with availability 0
-	bucket0 := make(map[int]bool, len(pieces))
-	for _, pw := range pieces {
+	bucket0 := make(map[int]bool, len(filtered))
+	for _, pw := range filtered {
 		pq.pieces[pw.Index] = pw
 		bucket0[pw.Index] = true
 	}

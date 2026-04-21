@@ -875,6 +875,7 @@ type DownloadParams struct {
 	Progress    *Progress
 	Cfg         DownloadConfig
 	Have        peer.Bitfield                            // pieces already downloaded (for resume)
+	SkipMask    peer.Bitfield                            // pieces fully inside skipped files; not queued for download
 	OnPiece     func(index int)                          // called when a piece is downloaded (for upload during download)
 	OnRequest   func(index, begin, length uint32) []byte // serve incoming piece requests (set automatically if nil)
 	HaveBF      peer.Bitfield                            // live bitfield updated by OnPiece (for upload-while-downloading)
@@ -966,10 +967,14 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 		}
 	}
 
-	// Build piece list for remaining work
+	// Build piece list for remaining work (skipping both already-have and
+	// skip-mask pieces — those must not be queued).
 	var pieces []PieceWork
 	for i, hash := range p.TF.Info.PieceHashes {
 		if p.Have != nil && p.Have.HasPiece(i) {
+			continue
+		}
+		if p.SkipMask != nil && p.SkipMask.HasPiece(i) {
 			continue
 		}
 		length := p.TF.Info.PieceLength
@@ -986,7 +991,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 		p.Progress.SetInitial(alreadyDone, tl, int64(p.TF.Info.PieceLength))
 	}
 
-	pq := NewPieceQueue(pieces)
+	pq := NewPieceQueueWithSkip(pieces, p.SkipMask)
 	resultCh, pm := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.PeerSink, p.Progress, p.Cfg, p.OnRequest, p.HaveBF, p.TF, p.WebSeedURLs)
 	if p.OnPeerMgr != nil {
 		p.OnPeerMgr(pm)

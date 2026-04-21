@@ -196,6 +196,53 @@ func TestPieceQueueEndgame(t *testing.T) {
 	_ = pw2 // used
 }
 
+func TestPieceQueueRespectsSkipMask(t *testing.T) {
+	// 4 pieces; skip mask marks pieces 1 and 3 as skipped → they must never
+	// be handed out by Pick, and Remaining() counts only the 2 wanted.
+	pieces := []PieceWork{
+		{Index: 0, Length: 100},
+		{Index: 1, Length: 100},
+		{Index: 2, Length: 100},
+		{Index: 3, Length: 100},
+	}
+	skip := make(peer.Bitfield, 1) // 1 byte covers 4 bits
+	skip.SetPiece(1)
+	skip.SetPiece(3)
+
+	pq := NewPieceQueueWithSkip(pieces, skip)
+
+	if got := pq.Remaining(); got != 2 {
+		t.Fatalf("Remaining: got %d, want 2 (pieces 1,3 skipped)", got)
+	}
+
+	hasAll := func(int) bool { return true }
+	picked := make(map[int]bool)
+	for range 4 {
+		pw, ok := pq.Pick(hasAll)
+		if !ok {
+			break
+		}
+		picked[pw.Index] = true
+	}
+	if picked[1] || picked[3] {
+		t.Fatalf("skipped pieces should never be picked, got %v", picked)
+	}
+	if !picked[0] || !picked[2] {
+		t.Fatalf("wanted pieces 0,2 should be picked, got %v", picked)
+	}
+}
+
+func TestPieceQueueNilSkipMaskEquivalentToNoMask(t *testing.T) {
+	pieces := []PieceWork{
+		{Index: 0, Length: 100},
+		{Index: 1, Length: 100},
+	}
+	pq := NewPieceQueueWithSkip(pieces, nil)
+	if pq.Remaining() != 2 {
+		t.Fatalf("Remaining: got %d, want 2", pq.Remaining())
+	}
+}
+
 func TestPieceQueueRemaining(t *testing.T) {
 	pieces := []PieceWork{
 		{Index: 0, Length: 100},

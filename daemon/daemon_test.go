@@ -432,6 +432,95 @@ func TestRPCTorrentFilesMissingID(t *testing.T) {
 	}
 }
 
+func TestRPCTorrentSetFilePriority(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+	torrentData := buildDaemonTestTorrent(t, "prio.bin")
+	encoded := base64.StdEncoding.EncodeToString(torrentData)
+
+	w := doRPC(t, d, cfg.APIKey, "torrent.addFile", map[string]string{"data": encoded})
+	var addResp struct {
+		Result map[string]string `json:"result"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &addResp)
+	id := addResp.Result["id"]
+	if id == "" {
+		t.Fatalf("no id: body=%s", w.Body.String())
+	}
+
+	// Set priority to skip.
+	w = doRPC(t, d, cfg.APIKey, "torrent.setFilePriority", map[string]any{
+		"id":         id,
+		"file_index": 0,
+		"priority":   -1,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("setFilePriority: %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+
+	// Verify via files RPC that priority is now -1.
+	w = doRPC(t, d, cfg.APIKey, "torrent.files", map[string]string{"id": id})
+	var filesResp struct {
+		Result []engine.FileEntry `json:"result"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &filesResp); err != nil {
+		t.Fatalf("unmarshal files: %v", err)
+	}
+	if len(filesResp.Result) != 1 || filesResp.Result[0].Priority != engine.PrioritySkip {
+		t.Fatalf("files after setFilePriority: %+v", filesResp.Result)
+	}
+}
+
+func TestRPCTorrentSetFilePriorityInvalidValue(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+	torrentData := buildDaemonTestTorrent(t, "badprio.bin")
+	encoded := base64.StdEncoding.EncodeToString(torrentData)
+
+	w := doRPC(t, d, cfg.APIKey, "torrent.addFile", map[string]string{"data": encoded})
+	var addResp struct {
+		Result map[string]string `json:"result"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &addResp)
+	id := addResp.Result["id"]
+
+	w = doRPC(t, d, cfg.APIKey, "torrent.setFilePriority", map[string]any{
+		"id":         id,
+		"file_index": 0,
+		"priority":   42,
+	})
+	var resp struct {
+		Error *struct{ Code int } `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error == nil {
+		t.Error("expected error for invalid priority")
+	}
+}
+
+func TestRPCTorrentSetFilePriorityMissingID(t *testing.T) {
+	d, cfg := newTestDaemon(t)
+	w := doRPC(t, d, cfg.APIKey, "torrent.setFilePriority", map[string]any{
+		"file_index": 0,
+		"priority":   -1,
+	})
+	var resp struct {
+		Error *struct{ Code int } `json:"error"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Error == nil {
+		t.Error("expected error for missing id")
+	}
+}
+
 func TestRPCTorrentPauseResumeRemove(t *testing.T) {
 	d, cfg := newTestDaemon(t)
 	magnet := "magnet:?xt=urn:btih:" + strings.Repeat("cc", 20)
