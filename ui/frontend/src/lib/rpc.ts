@@ -60,6 +60,8 @@ export const api = {
 	get: (id: string) => rpc<TorrentInfo>("torrent.get", { id }),
 	peers: (id: string) => rpc<PeerSnap[]>("torrent.peers", { id }),
 	files: (id: string) => rpc<FileEntry[]>("torrent.files", { id }),
+	setFilePriority: (id: string, file_index: number, priority: number) =>
+		rpc<object>("torrent.setFilePriority", { id, file_index, priority }),
 	add: (source: string) => rpc<{ id: string }>("torrent.add", { source }),
 	addFile: (data: string) => rpc<{ id: string }>("torrent.addFile", { data }),
 	addURL: (url: string) => rpc<{ id: string }>("torrent.addURL", { url }),

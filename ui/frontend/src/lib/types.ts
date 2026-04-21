@@ -51,6 +51,8 @@ export interface FileEntry {
 	path: string;
 	length: number;
 	downloaded: number;
+	// 0 = normal, -1 = skip. Missing in older responses → treat as normal.
+	priority: number;
 }
 
 export interface PeerSnap {

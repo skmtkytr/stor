@@ -35,7 +35,11 @@ type TorrentRecord struct {
 	CompletedAt   int64  `json:"completed_at"`
 	TorrentData   []byte `json:"torrent_data"` // raw bencoded .torrent (for resume)
 	Bitfield      []byte `json:"bitfield"`     // which pieces we have
-	Error         string `json:"error,omitempty"`
+	// FilePriorities is indexed by file order (same order as Info.Files for
+	// multi-file, or a single element for single-file). Values: 0 = normal,
+	// -1 = skip. Missing / shorter slice defaults trailing files to normal.
+	FilePriorities []int8 `json:"file_priorities,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 // Store persists torrent records to a JSON file.
@@ -93,6 +97,10 @@ func (s *Store) Save() error {
 		if r.Bitfield != nil {
 			cp.Bitfield = make([]byte, len(r.Bitfield))
 			copy(cp.Bitfield, r.Bitfield)
+		}
+		if r.FilePriorities != nil {
+			cp.FilePriorities = make([]int8, len(r.FilePriorities))
+			copy(cp.FilePriorities, r.FilePriorities)
 		}
 		records = append(records, &cp)
 	}

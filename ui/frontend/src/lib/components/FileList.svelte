@@ -3,6 +3,9 @@
 	import { formatBytes } from "$lib/format";
 	import type { FileEntry } from "$lib/types";
 
+	const PRIORITY_NORMAL = 0;
+	const PRIORITY_SKIP = -1;
+
 	let {
 		torrentId,
 	}: {
@@ -12,6 +15,9 @@
 	let files = $state<FileEntry[]>([]);
 	let error = $state<string | null>(null);
 	let initialized = $state(false);
+	// Track file indices currently being toggled so we don't let refresh() flicker
+	// the button state before the server-confirmed value comes back.
+	let pending = $state<Set<number>>(new Set());
 
 	async function refresh() {
 		try {
@@ -21,6 +27,23 @@
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			initialized = true;
+		}
+	}
+
+	async function togglePriority(index: number, current: number) {
+		const next = current === PRIORITY_SKIP ? PRIORITY_NORMAL : PRIORITY_SKIP;
+		const nextPending = new Set(pending);
+		nextPending.add(index);
+		pending = nextPending;
+		try {
+			await api.setFilePriority(torrentId, index, next);
+			await refresh();
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			const after = new Set(pending);
+			after.delete(index);
+			pending = after;
 		}
 	}
 
@@ -71,27 +94,41 @@
 						<th class="px-3 py-1 text-left font-medium">Path</th>
 						<th class="px-3 py-1 text-left font-medium w-48">Progress</th>
 						<th class="px-3 py-1 text-right font-medium w-24">Size</th>
+						<th class="px-3 py-1 text-center font-medium w-20">Priority</th>
 					</tr>
 				</thead>
 				<tbody>
-					{#each files as f (f.path)}
+					{#each files as f, i (f.path)}
 						{@const percent = pct(f)}
 						{@const done = percent >= 99.99}
-						<tr class="border-b border-zinc-900/80 hover:bg-zinc-900/40">
-							<td class="break-all px-3 py-1 font-mono text-zinc-300">{f.path}</td>
+						{@const skipped = (f.priority ?? 0) === PRIORITY_SKIP}
+						{@const busy = pending.has(i)}
+						<tr class="border-b border-zinc-900/80 hover:bg-zinc-900/40 {skipped ? 'opacity-60' : ''}">
+							<td class="break-all px-3 py-1 font-mono {skipped ? 'text-zinc-500 line-through' : 'text-zinc-300'}">{f.path}</td>
 							<td class="px-3 py-1">
-								<div class="relative h-4 w-full overflow-hidden rounded {done ? 'bg-green-500/15' : 'bg-blue-500/15'}">
+								<div class="relative h-4 w-full overflow-hidden rounded {skipped ? 'bg-zinc-700/20' : done ? 'bg-green-500/15' : 'bg-blue-500/15'}">
 									<div
-										class="absolute inset-y-0 left-0 rounded {done ? 'bg-green-500' : 'bg-blue-500'}"
+										class="absolute inset-y-0 left-0 rounded {skipped ? 'bg-zinc-500' : done ? 'bg-green-500' : 'bg-blue-500'}"
 										style="width: {percent}%; opacity: 0.35;"
 									></div>
-									<div class="relative flex h-full items-center justify-center text-[10px] tabular-nums {done ? 'text-green-300' : 'text-blue-300'}">
+									<div class="relative flex h-full items-center justify-center text-[10px] tabular-nums {skipped ? 'text-zinc-400' : done ? 'text-green-300' : 'text-blue-300'}">
 										{percent.toFixed(1)}%
 									</div>
 								</div>
 							</td>
 							<td class="px-3 py-1 text-right tabular-nums text-zinc-400">
 								{formatBytes(f.length)}
+							</td>
+							<td class="px-3 py-1 text-center">
+								<button
+									type="button"
+									class="rounded px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider transition-colors disabled:opacity-50 {skipped ? 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600' : 'bg-blue-500/20 text-blue-300 hover:bg-blue-500/30'}"
+									disabled={busy}
+									onclick={() => togglePriority(i, f.priority ?? 0)}
+									title={skipped ? "Currently skipped — click to include in downloads" : "Currently normal priority — click to skip"}
+								>
+									{skipped ? "Skip" : "Normal"}
+								</button>
 							</td>
 						</tr>
 					{/each}

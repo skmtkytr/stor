@@ -24,23 +24,50 @@ type PieceQueue struct {
 	// Availability buckets: avail level → set of piece indices.
 	// Enables O(k) Pick where k = number of distinct availability levels.
 	buckets map[int]map[int]bool // availability → {piece indices}
+
+	// skipMask supports the lightweight hot-requeue path: Session can
+	// call UpdateSkipMask mid-download to tell Pick to stop handing out
+	// pieces whose bit is set. Unlike the constructor-time filter in
+	// NewPieceQueueWithSkip — which removes pieces from the map entirely
+	// — this is a dynamic filter. Pieces set in skipMask are still in
+	// pq.pieces and become pickable again when the bit is cleared.
+	skipMask peer.Bitfield
 }
 
 // NewPieceQueue creates a piece queue from a list of pieces to download.
 func NewPieceQueue(pieces []PieceWork) *PieceQueue {
+	return NewPieceQueueWithSkip(pieces, nil)
+}
+
+// NewPieceQueueWithSkip creates a piece queue from a list of pieces, omitting
+// any piece whose bit is set in skipMask. A nil skipMask is equivalent to
+// calling NewPieceQueue directly. Skipped pieces are never handed out by
+// Pick and do not count toward Remaining().
+func NewPieceQueueWithSkip(pieces []PieceWork, skipMask peer.Bitfield) *PieceQueue {
+	filtered := pieces
+	if skipMask != nil {
+		filtered = make([]PieceWork, 0, len(pieces))
+		for _, pw := range pieces {
+			if skipMask.HasPiece(pw.Index) {
+				continue
+			}
+			filtered = append(filtered, pw)
+		}
+	}
+
 	pq := &PieceQueue{
-		pieces:       make(map[int]PieceWork, len(pieces)),
+		pieces:       make(map[int]PieceWork, len(filtered)),
 		availability: make(map[int]int),
 		pending:      make(map[int]bool),
 		done:         make(map[int]bool),
-		totalPieces:  len(pieces),
+		totalPieces:  len(filtered),
 		waitCh:       make(chan struct{}, 1),
 		cancelCh:     make(chan int, 64),
 		buckets:      make(map[int]map[int]bool),
 	}
 	// All pieces start with availability 0
-	bucket0 := make(map[int]bool, len(pieces))
-	for _, pw := range pieces {
+	bucket0 := make(map[int]bool, len(filtered))
+	for _, pw := range filtered {
 		pq.pieces[pw.Index] = pw
 		bucket0[pw.Index] = true
 	}
@@ -105,6 +132,9 @@ func (pq *PieceQueue) Pick(hasPiece func(int) bool) (PieceWork, bool) {
 				continue
 			}
 			if !pq.endgame && pq.pending[idx] {
+				continue
+			}
+			if pq.skipMask != nil && pq.skipMask.HasPiece(idx) {
 				continue
 			}
 			if !hasPiece(idx) {
@@ -234,11 +264,45 @@ func (pq *PieceQueue) maxPieceLen() int {
 	return max
 }
 
-// Remaining returns the number of pieces not yet completed.
+// Remaining returns the number of pieces not yet completed, excluding any
+// currently marked as skipped by UpdateSkipMask.
 func (pq *PieceQueue) Remaining() int {
 	pq.mu.Lock()
 	defer pq.mu.Unlock()
-	return len(pq.pieces)
+	if pq.skipMask == nil {
+		return len(pq.pieces)
+	}
+	n := 0
+	for idx := range pq.pieces {
+		if pq.skipMask.HasPiece(idx) {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// UpdateSkipMask replaces the runtime skip filter. Pieces whose bit is set
+// are excluded from Pick and Remaining until the bit is cleared. Passing
+// nil clears the filter. A defensive copy is taken so the caller may
+// mutate its own slice afterwards.
+//
+// Note: pieces that were removed from the queue by the constructor-time
+// filter in NewPieceQueueWithSkip are not restored by this call — that
+// path requires rebuilding the queue (pause/resume).
+func (pq *PieceQueue) UpdateSkipMask(mask peer.Bitfield) {
+	pq.mu.Lock()
+	if mask == nil {
+		pq.skipMask = nil
+	} else {
+		cp := make(peer.Bitfield, len(mask))
+		copy(cp, mask)
+		pq.skipMask = cp
+	}
+	pq.mu.Unlock()
+	// Wake workers that may have been blocked waiting for work — unskipping
+	// can create new pickable pieces.
+	pq.signal()
 }
 
 // Wait returns a channel that is signaled when new work may be available.
