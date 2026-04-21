@@ -46,9 +46,13 @@
 			case "name": return t.name ?? t.id;
 			case "size": return t.total_bytes ?? 0;
 			case "progress": return Math.round(t.progress.percent ?? 0);
-			case "speed": {
+			case "down": {
 				// Bucket by 100KB/s to avoid jitter from small speed fluctuations
 				const raw = t.state === "downloading" ? (t.progress.down_speed ?? 0) : 0;
+				return Math.round(raw / 102400);
+			}
+			case "up": {
+				const raw = t.progress.up_speed ?? 0;
 				return Math.round(raw / 102400);
 			}
 			case "eta": {
@@ -142,7 +146,8 @@
 		{ id: "name", label: "Name", align: "left" },
 		{ id: "size", label: "Size", align: "right" },
 		{ id: "progress", label: "Progress", align: "left" },
-		{ id: "speed", label: "Speed", align: "right" },
+		{ id: "down", label: "Down", align: "right" },
+		{ id: "up", label: "Up", align: "right" },
 		{ id: "eta", label: "ETA", align: "right" },
 		{ id: "peers", label: "Peers", align: "right" },
 	] as const;
@@ -153,7 +158,8 @@
 		name: "",
 		size: "w-20",
 		progress: "w-48",
-		speed: "w-24",
+		down: "w-24",
+		up: "w-24",
 		eta: "w-20",
 		peers: "w-14",
 	};
