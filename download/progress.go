@@ -2,73 +2,13 @@ package download
 
 import (
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// emaSpeed implements libtorrent-style speed measurement using an
-// Exponential Moving Average (EMA). Bytes are accumulated in a counter
-// and sampled once per second: avg = avg * 0.8 + sample * 0.2.
-// This produces smooth, responsive speed readings.
-type emaSpeed struct {
-	mu      sync.Mutex
-	counter int64   // bytes accumulated since last tick
-	average float64 // EMA of bytes/sec
-	stop    chan struct{}
-}
-
-func newEMASpeed() *emaSpeed {
-	e := &emaSpeed{stop: make(chan struct{})}
-	go e.run()
-	return e
-}
-
-func (e *emaSpeed) run() {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	last := time.Now()
-	for {
-		select {
-		case <-e.stop:
-			return
-		case now := <-ticker.C:
-			elapsed := now.Sub(last).Milliseconds()
-			if elapsed <= 0 {
-				elapsed = 1000
-			}
-			last = now
-
-			e.mu.Lock()
-			sample := float64(e.counter) * 1000.0 / float64(elapsed)
-			e.average = e.average*0.8 + sample*0.2
-			e.counter = 0
-			e.mu.Unlock()
-		}
-	}
-}
-
-func (e *emaSpeed) add(bytes int64) {
-	e.mu.Lock()
-	e.counter += bytes
-	e.mu.Unlock()
-}
-
-func (e *emaSpeed) rate() int64 {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return int64(e.average)
-}
-
-func (e *emaSpeed) close() {
-	select {
-	case <-e.stop:
-	default:
-		close(e.stop)
-	}
-}
-
-// Progress tracks download progress and speed.
+// Progress tracks download progress and speed. Speed fields are written
+// by the shared rateRegistry ticker (see rate.go) — there is no per-
+// Progress goroutine.
 type Progress struct {
 	totalPieces int
 	totalBytes  int64
@@ -76,41 +16,53 @@ type Progress struct {
 	downloaded  atomic.Int64
 	activePeers atomic.Int32
 	startTime   time.Time
-	speed       *emaSpeed
-	upSpeed     *emaSpeed // upload speed from outgoing peer connections
-	uploaded    atomic.Int64
+
+	// Speed tracking: add sites bump *Counter fields; the rate sampler
+	// drains them every second and writes the EMA result into *Rate.
+	downCounter atomic.Int64
+	downRate    atomic.Int64
+	upCounter   atomic.Int64
+	upRate      atomic.Int64
+	unregRate   func() // deregister from rateRegistry on Close
+
+	uploaded atomic.Int64
 }
 
 // NewProgress creates a new progress tracker.
 func NewProgress(totalPieces int, totalBytes int64) *Progress {
-	return &Progress{
+	p := &Progress{
 		totalPieces: totalPieces,
 		totalBytes:  totalBytes,
 		startTime:   time.Now(),
-		speed:       newEMASpeed(),
-		upSpeed:     newEMASpeed(),
 	}
+	reg := globalRateRegistry()
+	unregDown := reg.register(&rateTarget{counter: &p.downCounter, rate: &p.downRate})
+	unregUp := reg.register(&rateTarget{counter: &p.upCounter, rate: &p.upRate})
+	p.unregRate = func() {
+		unregDown()
+		unregUp()
+	}
+	return p
 }
 
-// Close stops the speed ticker goroutines.
+// Close deregisters this Progress from the shared rate sampler. Safe to
+// call multiple times.
 func (p *Progress) Close() {
-	if p.speed != nil {
-		p.speed.close()
-	}
-	if p.upSpeed != nil {
-		p.upSpeed.close()
+	if p.unregRate != nil {
+		p.unregRate()
+		p.unregRate = nil
 	}
 }
 
 // AddUploadBytes records uploaded bytes for speed + total tracking.
 func (p *Progress) AddUploadBytes(n int64) {
-	p.upSpeed.add(n)
+	p.upCounter.Add(n)
 	p.uploaded.Add(n)
 }
 
 // UploadRate returns the current upload speed from outgoing peer connections.
 func (p *Progress) UploadRate() int64 {
-	return p.upSpeed.rate()
+	return p.upRate.Load()
 }
 
 // SetInitial sets the initial completed pieces count for resume.
@@ -133,7 +85,7 @@ func (p *Progress) Add(bytes int) {
 
 // AddBytes records downloaded bytes for speed tracking (called per block).
 func (p *Progress) AddBytes(n int64) {
-	p.speed.add(n)
+	p.downCounter.Add(n)
 }
 
 // PeerConnect increments the active peer count.
@@ -157,7 +109,7 @@ func (p *Progress) String() string {
 		pct = float64(downloaded) / float64(p.totalBytes) * 100
 	}
 
-	speed := p.speed.rate()
+	speed := p.downRate.Load()
 
 	return fmt.Sprintf("\r[%5.1f%%] %d/%d pieces | %s / %s | %s/s | %d peers",
 		pct,
@@ -196,13 +148,10 @@ func (p *Progress) Snap() ProgressSnap {
 
 	var speed int64
 	if completed < p.totalPieces {
-		speed = p.speed.rate()
+		speed = p.downRate.Load()
 	}
 
-	var upSpeed int64
-	if p.upSpeed != nil {
-		upSpeed = p.upSpeed.rate()
-	}
+	upSpeed := p.upRate.Load()
 
 	return ProgressSnap{
 		Downloaded:  downloaded,

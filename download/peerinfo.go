@@ -54,19 +54,18 @@ func (c *Client) Snapshot(numPieces int) PeerSnap {
 	}
 
 	// Prefer the short-window EMA (same 1-second tick + smoothing factor
-	// as the torrent-wide Progress.speed) so per-peer UI rates stay in
-	// sync with the total shown in the top row. Fall back to the
-	// cumulative-over-rechoke-window Speed() for zero-value test clients
-	// that don't initialize an EMA.
+	// as the torrent-wide Progress EMA) so per-peer UI rates stay in
+	// sync with the total shown in the top row. The EMA is written by
+	// the shared rateRegistry ticker into downRate/upRate. Fall back to
+	// the cumulative-over-rechoke-window Speed()/UploadSpeed() for
+	// zero-value test clients that never registered with the rate
+	// sampler.
 	var downRate, upRate float64
-	if c.downEMA != nil {
-		downRate = float64(c.downEMA.rate())
+	if c.unregRate != nil {
+		downRate = float64(c.downRate.Load())
+		upRate = float64(c.upRate.Load())
 	} else {
 		downRate = c.Speed()
-	}
-	if c.upEMA != nil {
-		upRate = float64(c.upEMA.rate())
-	} else {
 		upRate = c.UploadSpeed()
 	}
 
