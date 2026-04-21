@@ -144,10 +144,15 @@ func (c *Client) Speed() float64 {
 	return float64(speed)
 }
 
-// ResetSpeed resets the speed measurement window.
+// ResetSpeed resets the speed measurement window. Both directions are
+// zeroed — otherwise UploadSpeed would keep reporting the lifetime average
+// (cumulative bytes / time-since-start) long after the peer stopped
+// uploading, which is what users see as "UP rate showing for a peer that
+// isn't uploading".
 func (c *Client) ResetSpeed() {
 	c.Speed() // update lastSpeed
 	c.downloaded.Store(0)
+	c.uploaded.Store(0)
 	c.speedMu.Lock()
 	c.speedStart = time.Now()
 	c.speedMu.Unlock()
