@@ -13,6 +13,7 @@ import (
 
 	"github.com/skmtkytr/stor/dht"
 	"github.com/skmtkytr/stor/download"
+	"github.com/skmtkytr/stor/peer"
 	"github.com/skmtkytr/stor/storage"
 	"github.com/skmtkytr/stor/torrent"
 )
@@ -560,11 +561,26 @@ func (e *Engine) SetFilePriority(id string, fileIndex int, priority int8) error 
 		s.record.FilePriorities = grown
 	}
 	s.record.FilePriorities[fileIndex] = priority
+
+	// Hot requeue: if a download is active, push the new skip mask to the
+	// live PieceQueue so the change takes effect without pause/resume.
+	// Pieces already in-flight complete; future Picks honour the new
+	// mask. Pieces that were filtered out at phaseDownload construction
+	// (initially-skipped priorities at resume time) stay excluded — those
+	// still need pause/resume to reappear.
+	pq := s.pq
+	var newMask peer.Bitfield
+	if pq != nil {
+		newMask = computeSkipMaskFromRecord(tf, s.record.FilePriorities)
+	}
 	s.mu.Unlock()
 
+	if pq != nil {
+		pq.UpdateSkipMask(newMask)
+	}
+
 	// Persist immediately so the change survives a crash before the next
-	// periodic save. Hot requeue is intentionally not done: the user
-	// pauses + resumes to apply.
+	// periodic save.
 	e.saveState()
 	return nil
 }

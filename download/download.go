@@ -866,21 +866,22 @@ func DownloadToFile(tf *torrent.TorrentFile, peerID [20]byte, peers []tracker.Pe
 
 // DownloadParams consolidates parameters for a download session.
 type DownloadParams struct {
-	TF          *torrent.TorrentFile
-	PeerID      [20]byte
-	Peers       []tracker.Peer        // initial peers
-	PeerCh      <-chan []tracker.Peer // dynamic peer injection (nil = disabled)
-	PeerSink    chan<- []tracker.Peer // for PEX: discovered peers are sent here (nil = disabled)
-	Path        string
-	Progress    *Progress
-	Cfg         DownloadConfig
-	Have        peer.Bitfield                            // pieces already downloaded (for resume)
-	SkipMask    peer.Bitfield                            // pieces fully inside skipped files; not queued for download
-	OnPiece     func(index int)                          // called when a piece is downloaded (for upload during download)
-	OnRequest   func(index, begin, length uint32) []byte // serve incoming piece requests (set automatically if nil)
-	HaveBF      peer.Bitfield                            // live bitfield updated by OnPiece (for upload-while-downloading)
-	WebSeedURLs []string                                 // BEP 19: HTTP URLs for downloading pieces
-	OnPeerMgr   func(*PeerManager)                       // called once after PeerManager creation (for UI introspection)
+	TF           *torrent.TorrentFile
+	PeerID       [20]byte
+	Peers        []tracker.Peer        // initial peers
+	PeerCh       <-chan []tracker.Peer // dynamic peer injection (nil = disabled)
+	PeerSink     chan<- []tracker.Peer // for PEX: discovered peers are sent here (nil = disabled)
+	Path         string
+	Progress     *Progress
+	Cfg          DownloadConfig
+	Have         peer.Bitfield                            // pieces already downloaded (for resume)
+	SkipMask     peer.Bitfield                            // pieces fully inside skipped files; not queued for download
+	OnPiece      func(index int)                          // called when a piece is downloaded (for upload during download)
+	OnRequest    func(index, begin, length uint32) []byte // serve incoming piece requests (set automatically if nil)
+	HaveBF       peer.Bitfield                            // live bitfield updated by OnPiece (for upload-while-downloading)
+	WebSeedURLs  []string                                 // BEP 19: HTTP URLs for downloading pieces
+	OnPeerMgr    func(*PeerManager)                       // called once after PeerManager creation (for UI introspection)
+	OnPieceQueue func(*PieceQueue)                        // called once after PieceQueue creation (for runtime skip-mask updates)
 }
 
 // DownloadToFileCtx is like DownloadToFile but accepts a context for cancellation.
@@ -992,6 +993,9 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 	}
 
 	pq := NewPieceQueueWithSkip(pieces, p.SkipMask)
+	if p.OnPieceQueue != nil {
+		p.OnPieceQueue(pq)
+	}
 	resultCh, pm := runWorkers(ctx, peers, p.TF.InfoHash, p.PeerID, pq, p.PeerCh, p.PeerSink, p.Progress, p.Cfg, p.OnRequest, p.HaveBF, p.TF, p.WebSeedURLs)
 	if p.OnPeerMgr != nil {
 		p.OnPeerMgr(pm)

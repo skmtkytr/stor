@@ -64,6 +64,7 @@ type Session struct {
 	peerCh      chan []tracker.Peer   // dynamic peer injection channel (active during download)
 	uploader    *download.Uploader    // active during seeding
 	peerMgr     *download.PeerManager // active during downloading (nil when seeding)
+	pq          *download.PieceQueue  // active during downloading; target of hot skip-mask updates
 	listener    *PeerListener         // reference to engine's listener for registration
 
 	// Live have-bitfield used for per-file progress reporting. Updated by
@@ -433,6 +434,10 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		announceCancel()
 		s.mu.Lock()
 		s.peerCh = nil
+		// PieceQueue is only meaningful during the download phase; the
+		// seed phase doesn't consult it. Drop the ref so SetFilePriority
+		// can short-circuit once we leave download.
+		s.pq = nil
 		// Intentionally keep s.peerMgr non-nil: the PeerManager's worker
 		// goroutines remain registered until the session ctx is cancelled,
 		// so PeerList should continue to surface those connections during
@@ -488,6 +493,11 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		OnPeerMgr: func(pm *download.PeerManager) {
 			s.mu.Lock()
 			s.peerMgr = pm
+			s.mu.Unlock()
+		},
+		OnPieceQueue: func(pq *download.PieceQueue) {
+			s.mu.Lock()
+			s.pq = pq
 			s.mu.Unlock()
 		},
 	})
@@ -586,6 +596,7 @@ func (s *Session) phaseSeed(ctx context.Context) error {
 	}
 	s.uploader = nil
 	s.peerMgr = nil
+	s.pq = nil
 	s.mu.Unlock()
 
 	return nil
