@@ -53,6 +53,23 @@ func (c *Client) Snapshot(numPieces int) PeerSnap {
 		progress = float64(have) / float64(numPieces)
 	}
 
+	// Prefer the short-window EMA (same 1-second tick + smoothing factor
+	// as the torrent-wide Progress.speed) so per-peer UI rates stay in
+	// sync with the total shown in the top row. Fall back to the
+	// cumulative-over-rechoke-window Speed() for zero-value test clients
+	// that don't initialize an EMA.
+	var downRate, upRate float64
+	if c.downEMA != nil {
+		downRate = float64(c.downEMA.rate())
+	} else {
+		downRate = c.Speed()
+	}
+	if c.upEMA != nil {
+		upRate = float64(c.upEMA.rate())
+	} else {
+		upRate = c.UploadSpeed()
+	}
+
 	return PeerSnap{
 		Addr:      c.Addr,
 		IPVersion: ipVer,
@@ -61,8 +78,8 @@ func (c *Client) Snapshot(numPieces int) PeerSnap {
 		Encrypted: c.Encrypted,
 		Client:    DecodePeerID(c.RemotePeerID),
 		PeerID:    strings.TrimRight(string(c.RemotePeerID[:]), "\x00"),
-		DownRate:  c.Speed(),
-		UpRate:    c.UploadSpeed(),
+		DownRate:  downRate,
+		UpRate:    upRate,
 		Choked:    choked,
 		Choking:   choking,
 		Progress:  progress,
