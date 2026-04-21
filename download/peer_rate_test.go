@@ -5,17 +5,17 @@ import (
 	"time"
 )
 
-// TestSnapshotUsesEMAWhenPresent verifies that a Client with downEMA/upEMA
-// populated reports the EMA rate in PeerSnap, not the cumulative
-// rechoke-window average. This is what keeps the per-peer Down/Up values
-// in the UI in sync with the torrent-wide EMA shown in the top row.
+// TestSnapshotUsesEMAWhenPresent verifies that a Client registered with
+// the shared rate sampler reports the EMA rate in PeerSnap, not the
+// cumulative rechoke-window average. This is what keeps the per-peer
+// Down/Up values in the UI in sync with the torrent-wide EMA shown in
+// the top row.
 func TestSnapshotUsesEMAWhenPresent(t *testing.T) {
 	c := &Client{
 		Addr:       "1.2.3.4:6881",
 		speedStart: time.Now().Add(-10 * time.Second),
-		downEMA:    newEMASpeed(),
-		upEMA:      newEMASpeed(),
 	}
+	attachRateTargets(c)
 	defer c.Close()
 
 	// Populate cumulative counters with totals that would give the
@@ -24,19 +24,23 @@ func TestSnapshotUsesEMAWhenPresent(t *testing.T) {
 	c.downloaded.Store(10_000_000)
 	c.uploaded.Store(5_000_000)
 
-	// Feed the EMAs at a distinct low rate and wait enough for at least
-	// one EMA tick (1 s) so .rate() leaves zero.
-	c.downEMA.add(100_000)
-	c.upEMA.add(50_000)
-	time.Sleep(1200 * time.Millisecond)
+	// Feed the short-window counters at a distinct low rate and drive a
+	// deterministic tick (while holding the tick lock) so the rate
+	// sampler publishes a non-zero EMA without racing the background
+	// ticker.
+	globalRateRegistry().withTickLock(func() {
+		c.downCounter.Add(100_000)
+		c.upCounter.Add(50_000)
+		globalRateRegistry().tickLocked(1000)
+	})
 
 	snap := c.Snapshot(0)
 
-	if snap.DownRate != float64(c.downEMA.rate()) {
-		t.Errorf("DownRate should equal downEMA.rate(): got %.0f, ema %d", snap.DownRate, c.downEMA.rate())
+	if snap.DownRate != float64(c.downRate.Load()) {
+		t.Errorf("DownRate should equal downRate atomic: got %.0f, want %d", snap.DownRate, c.downRate.Load())
 	}
-	if snap.UpRate != float64(c.upEMA.rate()) {
-		t.Errorf("UpRate should equal upEMA.rate(): got %.0f, ema %d", snap.UpRate, c.upEMA.rate())
+	if snap.UpRate != float64(c.upRate.Load()) {
+		t.Errorf("UpRate should equal upRate atomic: got %.0f, want %d", snap.UpRate, c.upRate.Load())
 	}
 	// Sanity check: the EMA-backed rates must differ from the cumulative
 	// fallbacks, otherwise we wouldn't know the new code path is live.
@@ -48,8 +52,9 @@ func TestSnapshotUsesEMAWhenPresent(t *testing.T) {
 	}
 }
 
-// TestSnapshotFallsBackToSpeedWhenNoEMA keeps the zero-value-Client contract
-// for tests that construct &Client{} directly.
+// TestSnapshotFallsBackToSpeedWhenNoEMA keeps the zero-value-Client
+// contract for tests that construct &Client{} directly without calling
+// attachRateTargets.
 func TestSnapshotFallsBackToSpeedWhenNoEMA(t *testing.T) {
 	c := &Client{
 		Addr:       "1.2.3.4:6881",

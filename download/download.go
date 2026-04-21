@@ -110,16 +110,22 @@ type Client struct {
 	// Speed tracking.
 	// downloaded/uploaded + speedStart drive the rechoke ranking (BEP 3):
 	// cumulative bytes over the last rechoke window, reset by ResetSpeed.
-	// downEMA/upEMA are the short-window rate estimators used for UI
-	// display so per-peer rates match the torrent-wide EMA shown in the
-	// top row (both tick every second with the same smoothing factor).
-	downloaded atomic.Int64
-	uploaded   atomic.Int64
-	speedMu    sync.Mutex
-	speedStart time.Time
-	lastSpeed  atomic.Int64 // bytes/sec
-	downEMA    *emaSpeed    // nil for zero-value test clients; Snapshot falls back to Speed()
-	upEMA      *emaSpeed    // nil for zero-value test clients; Snapshot falls back to UploadSpeed()
+	// downCounter/upCounter accumulate bytes between rate-registry ticks
+	// (the shared 1 Hz sampler snaps and resets them). downRate/upRate
+	// are the short-window EMA estimators written by the registry and
+	// read by Snapshot — same 1-second cadence and 0.8/0.2 smoothing as
+	// the torrent-wide Progress EMA so per-peer UI rates stay in sync
+	// with the top-row total.
+	downloaded  atomic.Int64
+	uploaded    atomic.Int64
+	speedMu     sync.Mutex
+	speedStart  time.Time
+	lastSpeed   atomic.Int64 // bytes/sec
+	downCounter atomic.Int64 // bytes since last tick (fed by DownloadPiece)
+	upCounter   atomic.Int64 // bytes since last tick (fed by handleRequest/upload)
+	downRate    atomic.Int64 // EMA bytes/sec, written by rateRegistry
+	upRate      atomic.Int64 // EMA bytes/sec, written by rateRegistry
+	unregRate   func()       // deregister from rateRegistry on Close; nil for zero-value test clients
 
 	// PEX (BEP 11)
 	pexRemoteID uint8                 // remote's ut_pex message ID (0 = not supported)
@@ -330,8 +336,6 @@ func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int
 		maxPipeline:  DefaultMaxPipeline,
 		Addr:         p.String(),
 		speedStart:   time.Now(),
-		downEMA:      newEMASpeed(),
-		upEMA:        newEMASpeed(),
 		disablePEX:   noPEX,
 		fastExt:      resp.FastExtension,
 		Incoming:     false, // outgoing: we dialed
@@ -339,6 +343,7 @@ func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int
 		Encrypted:    encrypt,
 		RemotePeerID: resp.PeerID,
 	}
+	attachRateTargets(c)
 
 	// BEP 10: send extension handshake if peer supports extensions
 	if resp.Extensions {
@@ -433,13 +438,12 @@ func (c *Client) handleExtended(payload []byte) {
 	}
 }
 
-// Close closes the connection and stops the UI rate estimators.
+// Close closes the connection and deregisters the client from the shared
+// rate sampler. Safe to call multiple times.
 func (c *Client) Close() error {
-	if c.downEMA != nil {
-		c.downEMA.close()
-	}
-	if c.upEMA != nil {
-		c.upEMA.close()
+	if c.unregRate != nil {
+		c.unregRate()
+		c.unregRate = nil
 	}
 	if c.conn == nil {
 		return nil
@@ -587,9 +591,7 @@ func (c *Client) handleRequest(payload []byte) {
 	c.wmu.Unlock()
 	n := int64(len(block))
 	c.uploaded.Add(n)
-	if c.upEMA != nil {
-		c.upEMA.add(n)
-	}
+	c.upCounter.Add(n)
 	if c.progress != nil {
 		c.progress.AddUploadBytes(n)
 	}
@@ -691,9 +693,7 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 			n := int64(len(block))
 			downloaded += int(n)
 			c.downloaded.Add(n)
-			if c.downEMA != nil {
-				c.downEMA.add(n)
-			}
+			c.downCounter.Add(n)
 			if c.progress != nil {
 				c.progress.AddBytes(n)
 			}

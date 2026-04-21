@@ -90,14 +90,13 @@ func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {
 		choking:      true, // start by choking them
 		fastExt:      remoteHS.FastExtension,
 		speedStart:   time.Now(),
-		downEMA:      newEMASpeed(),
-		upEMA:        newEMASpeed(),
 		Incoming:     true,
 		UsingUTP:     isUTP,
 		RemotePeerID: remoteHS.PeerID,
 		// Encrypted: not tracked for incoming — MSE handshake happens before
 		// peer.ReadHandshake in the listener layer (future enhancement)
 	}
+	attachRateTargets(client)
 
 	u.pm.Register(client)
 	defer u.pm.Unregister(client)
@@ -248,9 +247,7 @@ func (u *Uploader) serveLoop(c *Client) {
 			}
 
 			c.uploaded.Add(int64(length))
-			if c.upEMA != nil {
-				c.upEMA.add(int64(length))
-			}
+			c.upCounter.Add(int64(length))
 
 		case peer.MsgCancel:
 			// Ignore cancel for now (we send immediately)
