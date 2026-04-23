@@ -26,7 +26,7 @@ const (
 	// Defaults for configurable parameters.
 	DefaultMaxPipeline = 16
 	DefaultMaxPeers    = 100
-	DefaultDialTimeout = 3 // seconds
+	DefaultDialTimeout = 10 // seconds
 
 	// maxUnexpectedMessages is the limit on unexpected/wrong-index messages
 	// per piece before aborting. Prevents DoS from malicious peers.
@@ -1048,7 +1048,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 	// Use shared global dial semaphore if provided, otherwise create per-torrent.
 	dialSem := cfg.DialSem
 	if dialSem == nil {
-		maxDials := cfg.MaxPeers / 4
+		maxDials := cfg.MaxPeers / 2
 		if maxDials < 10 {
 			maxDials = 10
 		}
