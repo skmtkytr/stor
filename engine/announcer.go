@@ -11,7 +11,10 @@ import (
 	"github.com/skmtkytr/stor/tracker"
 )
 
-const defaultAnnounceInterval = 1800 * time.Second // 30 minutes
+const (
+	defaultAnnounceInterval = 1800 * time.Second // 30 minutes
+	defaultDHTInterval      = 5 * time.Minute    // DHT refresh independent of tracker interval
+)
 
 // Announcer periodically re-announces to trackers and DHT,
 // feeding newly discovered peers into a channel.
@@ -22,6 +25,9 @@ type Announcer struct {
 	numWant int
 	dht     *dhtpkg.DHT
 
+	dhtInterval time.Duration
+	dhtLookupFn func([20]byte) []tracker.Peer // injectable for tests; nil uses real DHT
+
 	peerSink chan<- []tracker.Peer
 
 	// Callbacks for announce params
@@ -31,40 +37,52 @@ type Announcer struct {
 
 // AnnounceConfig holds parameters for creating an Announcer.
 type AnnounceConfig struct {
-	TF         *torrent.TorrentFile
-	PeerID     [20]byte
-	Port       uint16
-	NumWant    int
-	DHT        *dhtpkg.DHT
-	PeerSink   chan<- []tracker.Peer
-	Downloaded func() int64
-	Left       func() int64
+	TF          *torrent.TorrentFile
+	PeerID      [20]byte
+	Port        uint16
+	NumWant     int
+	DHT         *dhtpkg.DHT
+	DHTInterval time.Duration                 // 0 = defaultDHTInterval
+	DHTLookupFn func([20]byte) []tracker.Peer // optional override for testing
+	PeerSink    chan<- []tracker.Peer
+	Downloaded  func() int64
+	Left        func() int64
 }
 
 // NewAnnouncer creates a new announcer.
 func NewAnnouncer(cfg AnnounceConfig) *Announcer {
+	dhtInterval := cfg.DHTInterval
+	if dhtInterval <= 0 {
+		dhtInterval = defaultDHTInterval
+	}
 	return &Announcer{
-		tf:         cfg.TF,
-		peerID:     cfg.PeerID,
-		port:       cfg.Port,
-		numWant:    cfg.NumWant,
-		dht:        cfg.DHT,
-		peerSink:   cfg.PeerSink,
-		downloaded: cfg.Downloaded,
-		left:       cfg.Left,
+		tf:          cfg.TF,
+		peerID:      cfg.PeerID,
+		port:        cfg.Port,
+		numWant:     cfg.NumWant,
+		dht:         cfg.DHT,
+		dhtInterval: dhtInterval,
+		dhtLookupFn: cfg.DHTLookupFn,
+		peerSink:    cfg.PeerSink,
+		downloaded:  cfg.Downloaded,
+		left:        cfg.Left,
 	}
 }
 
 // Run starts the re-announce loop. Blocks until ctx is cancelled.
 // The first announce is done immediately (EventStarted).
+// A separate DHT refresh timer fires every dhtInterval independent of tracker interval.
 func (a *Announcer) Run(ctx context.Context) {
 	interval := a.announce(ctx, tracker.EventStarted)
 	if interval <= 0 {
 		interval = defaultAnnounceInterval
 	}
 
-	timer := time.NewTimer(interval)
-	defer timer.Stop()
+	announceTimer := time.NewTimer(interval)
+	defer announceTimer.Stop()
+
+	dhtTimer := time.NewTimer(a.dhtInterval)
+	defer dhtTimer.Stop()
 
 	for {
 		select {
@@ -74,12 +92,23 @@ func (a *Announcer) Run(ctx context.Context) {
 			a.announce(stopCtx, tracker.EventStopped)
 			cancel()
 			return
-		case <-timer.C:
+		case <-announceTimer.C:
 			interval = a.announce(ctx, tracker.EventNone)
 			if interval <= 0 {
 				interval = defaultAnnounceInterval
 			}
-			timer.Reset(interval)
+			announceTimer.Reset(interval)
+			// Reset DHT timer so we don't double-lookup right after a full announce
+			if !dhtTimer.Stop() {
+				select {
+				case <-dhtTimer.C:
+				default:
+				}
+			}
+			dhtTimer.Reset(a.dhtInterval)
+		case <-dhtTimer.C:
+			a.runDHTLookup(ctx)
+			dhtTimer.Reset(a.dhtInterval)
 		}
 	}
 }
@@ -87,6 +116,33 @@ func (a *Announcer) Run(ctx context.Context) {
 // AnnounceCompleted sends a one-shot completed event to all trackers.
 func (a *Announcer) AnnounceCompleted(ctx context.Context) {
 	a.announce(ctx, tracker.EventCompleted)
+}
+
+// runDHTLookup performs a standalone DHT lookup and sends peers to peerSink.
+func (a *Announcer) runDHTLookup(ctx context.Context) {
+	if a.tf.Info.Private {
+		return
+	}
+	peers := a.lookupDHT(a.tf.InfoHash)
+	if len(peers) == 0 || a.peerSink == nil {
+		return
+	}
+	select {
+	case <-ctx.Done():
+	case a.peerSink <- peers:
+		slog.Debug("dht refresh peers sent", "count", len(peers))
+	}
+}
+
+// lookupDHT calls the injectable function if set, otherwise the real DHT.
+func (a *Announcer) lookupDHT(infoHash [20]byte) []tracker.Peer {
+	if a.dhtLookupFn != nil {
+		return a.dhtLookupFn(infoHash)
+	}
+	if a.dht == nil {
+		return nil
+	}
+	return dhtLookupPeers(a.dht, infoHash)
 }
 
 // announce sends announces to all trackers and DHT in parallel.
@@ -132,17 +188,13 @@ func (a *Announcer) announce(ctx context.Context, event tracker.Event) time.Dura
 	}
 
 	// DHT lookup — skip for private torrents (BEP 27)
-	if a.dht != nil && event != tracker.EventStopped && !a.tf.Info.Private {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			peers := dhtLookupPeers(a.dht, a.tf.InfoHash)
-			if len(peers) > 0 {
-				mu.Lock()
-				allPeers = append(allPeers, peers...)
-				mu.Unlock()
-			}
-		}()
+	if event != tracker.EventStopped && !a.tf.Info.Private {
+		peers := a.lookupDHT(a.tf.InfoHash)
+		if len(peers) > 0 {
+			mu.Lock()
+			allPeers = append(allPeers, peers...)
+			mu.Unlock()
+		}
 	}
 
 	wg.Wait()

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -874,6 +875,118 @@ func TestDeduplicatePeers(t *testing.T) {
 	result := deduplicatePeers(peers)
 	if len(result) != 2 {
 		t.Errorf("dedup: got %d, want 2", len(result))
+	}
+}
+
+// fakePeerDropAfterHandshake creates a listener that accepts connections,
+// completes the BitTorrent handshake, then immediately closes the connection.
+// It counts how many times a connection was accepted.
+func fakePeerDropAfterHandshake(t *testing.T, infoHash [20]byte, connectCount *int, mu *sync.Mutex) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			*connectCount++
+			mu.Unlock()
+			// Complete handshake then drop
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				hs, err := peer.ReadHandshake(c)
+				if err != nil {
+					return
+				}
+				if hs.InfoHash != infoHash {
+					return
+				}
+				_ = peer.WriteHandshake(c, &peer.Handshake{
+					InfoHash: infoHash,
+					PeerID:   [20]byte{'-', 'F', 'K', '0', '0', '0', '2', '-'},
+				})
+				// Immediately close to simulate disconnect
+			}(conn)
+		}
+	}()
+	return ln
+}
+
+// TestRetryPeersIncludesAllSeen verifies that peers injected via peerCh are
+// added to allSeen and retried by the retryPeers goroutine, not just initialPeers.
+func TestRetryPeersIncludesAllSeen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping retry test in short mode")
+	}
+
+	infoHash := [20]byte{0xEE}
+	peerID := [20]byte{'-', 'S', 'T', '0', '0', '0', '1', '-'}
+
+	var mu sync.Mutex
+	connectCount := 0
+
+	// fakePeer that drops connections after handshake
+	ln := fakePeerDropAfterHandshake(t, infoHash, &connectCount, &mu)
+	defer func() { _ = ln.Close() }()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	injectedPeer := tracker.Peer{IP: net.IPv4(127, 0, 0, 1), Port: uint16(addr.Port)}
+
+	// Build a minimal torrent with 1 piece
+	pieceData := make([]byte, 512)
+	pieceHash := sha1.Sum(pieceData)
+	tf := &torrent.TorrentFile{
+		InfoHash: infoHash,
+		Info: torrent.Info{
+			Name:        "retry-test",
+			PieceLength: 512,
+			PieceHashes: [][20]byte{pieceHash},
+			Length:      512,
+		},
+	}
+
+	// peerCh to inject peers dynamically (not in initialPeers)
+	peerCh := make(chan []tracker.Peer, 1)
+
+	pieces := []PieceWork{{Index: 0, Hash: pieceHash, Length: 512}}
+	pq := NewPieceQueueWithSkip(pieces, nil)
+	progress := NewProgress(1, 512)
+
+	cfg := DefaultDownloadConfig()
+	cfg.MaxPeers = 10
+	// Use short retry interval so the test completes quickly
+	cfg.RetryInterval = 300 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Start runWorkers with NO initialPeers
+	go func() {
+		// Inject the peer via peerCh after a short delay
+		time.Sleep(50 * time.Millisecond)
+		peerCh <- []tracker.Peer{injectedPeer}
+		close(peerCh)
+	}()
+
+	resultCh, _ := runWorkers(ctx, nil, infoHash, peerID, pq, peerCh, nil, progress, cfg, nil, nil, tf, nil)
+	// Drain resultCh; it closes when ctx times out (piece never completes since peer drops).
+	for range resultCh {
+	}
+
+	mu.Lock()
+	count := connectCount
+	mu.Unlock()
+
+	// The peer was injected via peerCh (not initialPeers).
+	// After the initial connection drops, retryPeers should retry it.
+	// We expect at least 2 connection attempts (initial + at least 1 retry).
+	if count < 2 {
+		t.Errorf("expected at least 2 connection attempts to peerCh-injected peer, got %d", count)
 	}
 }
 

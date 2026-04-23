@@ -9,7 +9,7 @@ import (
 
 const (
 	// DefaultUnchokeSlots is the number of fastest peers to unchoke.
-	DefaultUnchokeSlots = 4
+	DefaultUnchokeSlots = 8
 	// RechokeInterval is how often to re-evaluate peer speeds.
 	RechokeInterval = 10 * time.Second
 	// OptimisticInterval is how often to rotate the optimistic unchoke slot.
