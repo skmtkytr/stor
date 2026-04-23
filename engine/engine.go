@@ -142,7 +142,7 @@ func New(cfg Config) (*Engine, error) {
 		cfg.ListenPort = 6881
 	}
 	if cfg.MaxPeers <= 0 {
-		cfg.MaxPeers = 100
+		cfg.MaxPeers = download.DefaultMaxPeers
 	}
 	if cfg.MaxPipeline <= 0 {
 		cfg.MaxPipeline = 16

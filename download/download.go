@@ -25,7 +25,7 @@ const (
 
 	// Defaults for configurable parameters.
 	DefaultMaxPipeline = 16
-	DefaultMaxPeers    = 100
+	DefaultMaxPeers    = 500
 	DefaultDialTimeout = 10 // seconds
 
 	// maxUnexpectedMessages is the limit on unexpected/wrong-index messages
