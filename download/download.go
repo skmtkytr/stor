@@ -35,13 +35,14 @@ const (
 
 // DownloadConfig holds tunable parameters for the download engine.
 type DownloadConfig struct {
-	MaxPeers    int           // max concurrent peer connections
-	MaxPipeline int           // outstanding requests per peer
-	DialTimeout int           // peer dial timeout in seconds
-	Encryption  bool          // attempt MSE/PE encryption (default: true)
-	EnableUTP   bool          // try uTP before TCP for peer connections
-	DisablePEX  bool          // BEP 27: do not advertise or use PEX
-	DialSem     chan struct{} // shared global dial semaphore (nil = create per-torrent)
+	MaxPeers      int           // max concurrent peer connections
+	MaxPipeline   int           // outstanding requests per peer
+	DialTimeout   int           // peer dial timeout in seconds
+	Encryption    bool          // attempt MSE/PE encryption (default: true)
+	EnableUTP     bool          // try uTP before TCP for peer connections
+	DisablePEX    bool          // BEP 27: do not advertise or use PEX
+	DialSem       chan struct{} // shared global dial semaphore (nil = create per-torrent)
+	RetryInterval time.Duration // interval between peer retry sweeps (0 = default 60s)
 }
 
 // DefaultDownloadConfig returns default download config.
@@ -1057,6 +1058,12 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 	seen := &sync.Map{}
 	var preferEncrypt atomic.Bool
 
+	// allSeen tracks every peer ever spawned (capped) for retry sweeps.
+	const maxAllSeen = 1000
+	var allSeenMu sync.Mutex
+	var allSeenList []tracker.Peer
+	allSeenSet := make(map[string]struct{})
+
 	var activeWorkers sync.WaitGroup
 
 	spawnWorker := func(p tracker.Peer) {
@@ -1064,6 +1071,12 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 		if _, loaded := seen.LoadOrStore(addr, true); loaded {
 			return
 		}
+		allSeenMu.Lock()
+		if _, exists := allSeenSet[addr]; !exists && len(allSeenList) < maxAllSeen {
+			allSeenSet[addr] = struct{}{}
+			allSeenList = append(allSeenList, p)
+		}
+		allSeenMu.Unlock()
 
 		activeWorkers.Add(1)
 		go func() {
@@ -1182,10 +1195,13 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 
 	// retryPeers goroutine: re-attempt disconnected peers periodically.
 	// Uses a conservative interval to avoid NAT session exhaustion.
+	retryInterval := cfg.RetryInterval
+	if retryInterval <= 0 {
+		retryInterval = 60 * time.Second
+	}
 	retryDone := make(chan struct{})
 	go func() {
 		defer close(retryDone)
-		const retryInterval = 60 * time.Second
 		timer := time.NewTimer(retryInterval)
 		defer timer.Stop()
 		for {
@@ -1198,7 +1214,11 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				}
 				// Only retry if we have few active peers
 				if pm.PeerCount() < cfg.MaxPeers/2 {
-					for _, p := range initialPeers {
+					allSeenMu.Lock()
+					snapshot := make([]tracker.Peer, len(allSeenList))
+					copy(snapshot, allSeenList)
+					allSeenMu.Unlock()
+					for _, p := range snapshot {
 						spawnWorker(p)
 					}
 				}
