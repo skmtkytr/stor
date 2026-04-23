@@ -44,6 +44,41 @@ func TestSanitizeTorrentName(t *testing.T) {
 	}
 }
 
+// TestSessionSnapCompleteReturns100 verifies that a completed torrent with no
+// active progress or uploader (e.g. paused after seeding) reports 100% not 0%.
+func TestSessionSnapCompleteReturns100(t *testing.T) {
+	s := &Session{
+		record: &TorrentRecord{
+			State:      StateComplete,
+			TotalBytes: 1024,
+		},
+	}
+	snap := s.Snap()
+	if snap.Percent != 100 {
+		t.Errorf("Snap().Percent = %v, want 100 for StateComplete", snap.Percent)
+	}
+	if snap.Downloaded != 1024 {
+		t.Errorf("Snap().Downloaded = %v, want 1024 for StateComplete", snap.Downloaded)
+	}
+}
+
+// TestSessionSnapNonCompleteReturns0 verifies non-complete states without
+// progress/uploader still return 0%.
+func TestSessionSnapNonCompleteReturns0(t *testing.T) {
+	for _, state := range []State{StatePaused, StateError, StateMetadata} {
+		s := &Session{
+			record: &TorrentRecord{
+				State:      state,
+				TotalBytes: 1024,
+			},
+		}
+		snap := s.Snap()
+		if snap.Percent != 0 {
+			t.Errorf("state=%s: Snap().Percent = %v, want 0", state, snap.Percent)
+		}
+	}
+}
+
 func TestSessionSnapRace(t *testing.T) {
 	// Verify that Snap() reads s.record.TotalBytes under the lock,
 	// preventing data races with concurrent writers.
