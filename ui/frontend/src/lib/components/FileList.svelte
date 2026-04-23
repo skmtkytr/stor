@@ -2,6 +2,7 @@
 	import { api } from "$lib/rpc";
 	import { formatBytes } from "$lib/format";
 	import type { FileEntry } from "$lib/types";
+	import FileContextMenu from "./FileContextMenu.svelte";
 
 	const PRIORITY_NORMAL = 0;
 	const PRIORITY_SKIP = -1;
@@ -18,6 +19,23 @@
 	// Track file indices currently being toggled so we don't let refresh() flicker
 	// the button state before the server-confirmed value comes back.
 	let pending = $state<Set<number>>(new Set());
+	// Context menu state: index + current priority + screen position.
+	let ctx = $state<{
+		index: number;
+		priority: number;
+		path: string;
+		position: { x: number; y: number };
+	} | null>(null);
+
+	function handleContextMenu(e: MouseEvent, f: FileEntry, i: number) {
+		e.preventDefault();
+		ctx = {
+			index: i,
+			priority: f.priority ?? 0,
+			path: f.path,
+			position: { x: e.clientX, y: e.clientY },
+		};
+	}
 
 	async function refresh() {
 		try {
@@ -103,7 +121,10 @@
 						{@const done = percent >= 99.99}
 						{@const skipped = (f.priority ?? 0) === PRIORITY_SKIP}
 						{@const busy = pending.has(i)}
-						<tr class="border-b border-zinc-900/80 hover:bg-zinc-900/40 {skipped ? 'opacity-60' : ''}">
+						<tr
+							class="border-b border-zinc-900/80 hover:bg-zinc-900/40 {skipped ? 'opacity-60' : ''}"
+							oncontextmenu={(e) => handleContextMenu(e, f, i)}
+						>
 							<td class="break-all px-3 py-1 font-mono {skipped ? 'text-zinc-500 line-through' : 'text-zinc-300'}">{f.path}</td>
 							<td class="px-3 py-1">
 								<div class="relative h-4 w-full overflow-hidden rounded {skipped ? 'bg-zinc-700/20' : done ? 'bg-green-500/15' : 'bg-blue-500/15'}">
@@ -136,4 +157,16 @@
 			</table>
 		{/if}
 	</div>
+
+	{#if ctx}
+		<FileContextMenu
+			torrentId={torrentId}
+			fileIndex={ctx.index}
+			currentPriority={ctx.priority}
+			path={ctx.path}
+			position={ctx.position}
+			onClose={() => (ctx = null)}
+			onApplied={() => refresh()}
+		/>
+	{/if}
 </div>
