@@ -139,9 +139,17 @@ func (s *Session) Snap() download.ProgressSnap {
 		}
 	}
 
+	pct := 0.0
+	downloaded := int64(0)
+	if state == StateComplete {
+		pct = 100
+		downloaded = totalBytes
+	}
 	return download.ProgressSnap{
-		State: string(state),
-		Total: totalBytes,
+		State:      string(state),
+		Total:      totalBytes,
+		Downloaded: downloaded,
+		Percent:    pct,
 	}
 }
 
