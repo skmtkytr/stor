@@ -82,7 +82,7 @@ type Session struct {
 
 // NewSession creates a session from a persisted record.
 func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir, tmpDir string, port uint16, dlCfg download.DownloadConfig, numWant int, d *dhtpkg.DHT, pl *PeerListener) *Session {
-	return &Session{
+	s := &Session{
 		record:      record,
 		peerID:      peerID,
 		downloadDir: downloadDir,
@@ -93,14 +93,16 @@ func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir, tmpDir stri
 		dht:         d,
 		listener:    pl,
 	}
+	s.knownPeers.Store(int32(record.KnownPeers))
+	return s
 }
 
 // Record returns the current record (thread-safe copy of state fields).
 func (s *Session) Record() *TorrentRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	// Return a shallow copy
 	r := *s.record
+	r.KnownPeers = int(s.knownPeers.Load())
 	return &r
 }
 

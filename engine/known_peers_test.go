@@ -118,6 +118,24 @@ func TestKnownPeersCumulativeWithInitial(t *testing.T) {
 	}
 }
 
+// TestKnownPeersPersisted verifies that knownPeers is restored from
+// TorrentRecord on session creation and written back by Record().
+func TestKnownPeersPersisted(t *testing.T) {
+	record := &TorrentRecord{ID: "test", State: StateSeeding, KnownPeers: 42}
+	s := NewSession(record, [20]byte{}, t.TempDir(), "", 0, download.DownloadConfig{}, 0, nil, nil)
+
+	if got := int(s.knownPeers.Load()); got != 42 {
+		t.Errorf("restored knownPeers = %d, want 42", got)
+	}
+
+	// Simulate new peers arriving, then verify Record() captures the latest value.
+	s.knownPeers.Add(8)
+	r := s.Record()
+	if r.KnownPeers != 50 {
+		t.Errorf("Record().KnownPeers = %d, want 50", r.KnownPeers)
+	}
+}
+
 // TestKnownPeersSnapSeedingPath verifies that Snap() includes KnownPeers
 // in the seeding-without-progress path (p == nil, u != nil).
 func TestKnownPeersSnapSeedingPath(t *testing.T) {
