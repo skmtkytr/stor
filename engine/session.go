@@ -267,6 +267,7 @@ func (s *Session) Start(ctx context.Context, onDone func(id string)) {
 			slog.Error("session failed", "id", s.record.ID, "name", s.record.Name, "error", err)
 		}
 		// If context was canceled (pause), state is already set by Pause()
+		s.cancel = nil
 		s.mu.Unlock()
 		if onDone != nil {
 			onDone(s.record.ID)

@@ -357,12 +357,9 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 
 	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.TmpDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht, e.listener)
 	e.sessions[id] = s
-	e.store.Put(record)
-	_ = e.store.Save()
+	e.saveStateLocked()
 
-	// Always start immediately — MaxActive only limits auto-resume from queue
-	slog.Info("starting torrent", "id", id)
-	e.startSession(s)
+	e.startQueuedLocked()
 
 	return id, nil
 }
@@ -907,9 +904,17 @@ func (e *Engine) downloadConfig() download.DownloadConfig {
 func (e *Engine) activeCount() int {
 	count := 0
 	for _, s := range e.sessions {
-		r := s.Record()
-		if r.State == StateDownloading || r.State == StateMetadata || r.State == StateVerifying {
+		s.mu.RLock()
+		state := s.record.State
+		started := s.cancel != nil
+		s.mu.RUnlock()
+		switch state {
+		case StateDownloading, StateMetadata, StateVerifying:
 			count++
+		case StateAdding:
+			if started {
+				count++
+			}
 		}
 	}
 	return count

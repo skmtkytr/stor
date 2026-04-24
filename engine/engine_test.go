@@ -3,6 +3,7 @@ package engine
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -221,6 +222,62 @@ func TestEngineMaxActive(t *testing.T) {
 	eng.SetMaxActive(0) // should clamp to 1
 	if eng.MaxActive() != 1 {
 		t.Errorf("MaxActive after 0: got %d, want 1", eng.MaxActive())
+	}
+}
+
+func TestAddTorrentRespectsMaxActive(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		DownloadDir:     filepath.Join(dir, "downloads"),
+		StatePath:       filepath.Join(dir, "state.json"),
+		ListenPort:      0,
+		MaxActive:       2,
+		DisableDHT:      true,
+		DisableListener: true,
+	}
+	eng, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := eng.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = eng.Stop() })
+
+	// Add MaxActive+1 torrents (each with a unique name so info hashes differ)
+	var ids []string
+	for i := 0; i < 3; i++ {
+		name := fmt.Sprintf("file%d.txt", i)
+		data, _ := buildTestTorrentData(t, name, 256, 256+i)
+		path := filepath.Join(t.TempDir(), "t.torrent")
+		_ = os.WriteFile(path, data, 0o644)
+		id, addErr := eng.AddTorrent(path)
+		if addErr != nil {
+			t.Fatalf("AddTorrent %d: %v", i, addErr)
+		}
+		ids = append(ids, id)
+	}
+
+	// Give goroutines a moment to update state
+	time.Sleep(50 * time.Millisecond)
+
+	active := 0
+	queued := 0
+	for _, id := range ids {
+		info, _ := eng.GetTorrent(id)
+		switch info.State {
+		case StateDownloading, StateMetadata, StateVerifying, StateSeeding:
+			active++
+		case StateAdding:
+			queued++
+		}
+	}
+
+	if active > cfg.MaxActive {
+		t.Errorf("active=%d exceeds MaxActive=%d", active, cfg.MaxActive)
+	}
+	if queued < 1 {
+		t.Errorf("expected at least 1 queued torrent, got 0 (active=%d)", active)
 	}
 }
 
