@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/skmtkytr/stor/storage"
 	"github.com/skmtkytr/stor/torrent"
 	"github.com/skmtkytr/stor/tracker"
+	"github.com/skmtkytr/stor/utp"
 )
 
 // Well-known DHT bootstrap nodes.
@@ -78,6 +80,8 @@ type Session struct {
 	// knownPeers is the cumulative count of peers received from tracker/DHT/PEX.
 	// Written atomically by the download goroutine; read by Snap().
 	knownPeers atomic.Int32
+
+	enableUTP bool // try uTP before TCP for all outgoing connections
 }
 
 // NewSession creates a session from a persisted record.
@@ -92,6 +96,7 @@ func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir, tmpDir stri
 		numWant:     numWant,
 		dht:         d,
 		listener:    pl,
+		enableUTP:   dlCfg.EnableUTP,
 	}
 	s.knownPeers.Store(int32(record.KnownPeers))
 	return s
@@ -398,21 +403,26 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	}
 	savePath := filepath.Join(dlDir, s.tf.Info.Name)
 
-	// Resume: verify existing pieces
-	s.mu.Lock()
-	s.record.State = StateVerifying
-	s.mu.Unlock()
-
+	// Resume: use persisted bitfield if available (clean shutdown), otherwise verify from disk.
 	var haveBitfield peer.Bitfield
-	bf, verified, _ := storage.VerifyPieces(savePath, s.tf, func(checked, total int) {
-		slog.Debug("verifying pieces", "id", s.record.ID, "checked", checked, "total", total)
-	})
-	if verified > 0 {
-		haveBitfield = bf
+	if len(s.record.Bitfield) == (numPieces+7)/8 {
+		haveBitfield = peer.Bitfield(s.record.Bitfield)
+		slog.Info("resume: using persisted bitfield", "id", s.record.ID, "total", numPieces)
+	} else {
 		s.mu.Lock()
-		s.record.Bitfield = []byte(bf)
+		s.record.State = StateVerifying
 		s.mu.Unlock()
-		slog.Info("resume: verified pieces", "id", s.record.ID, "verified", verified, "total", numPieces)
+
+		bf, verified, _ := storage.VerifyPieces(savePath, s.tf, func(checked, total int) {
+			slog.Debug("verifying pieces", "id", s.record.ID, "checked", checked, "total", total)
+		})
+		if verified > 0 {
+			haveBitfield = bf
+			s.mu.Lock()
+			s.record.Bitfield = []byte(bf)
+			s.mu.Unlock()
+			slog.Info("resume: verified pieces", "id", s.record.ID, "verified", verified, "total", numPieces)
+		}
 	}
 
 	s.mu.Lock()
@@ -906,35 +916,65 @@ func (s *Session) fetchMetadataAttempt(ctx context.Context, m *magnet.Magnet) (*
 	defer metaCancel()
 
 	resultCh := make(chan *torrent.TorrentFile, 1)
-	metaSem := make(chan struct{}, 20)
+	metaSem := make(chan struct{}, 50)
 
-	var metaWg sync.WaitGroup
+	var (
+		metaWg        sync.WaitGroup
+		statDialFail  atomic.Int32
+		statNoExt     atomic.Int32
+		statNoMeta    atomic.Int32
+		statFetchFail atomic.Int32
+		statAttempted atomic.Int32
+	)
+
 	go func() {
-		for batch := range peerCh {
-			for _, p := range batch {
-				metaWg.Add(1)
-				go func(p tracker.Peer) {
-					defer metaWg.Done()
-					select {
-					case <-metaCtx.Done():
-						return
-					case metaSem <- struct{}{}:
-						defer func() { <-metaSem }()
-					}
-					tf, err := fetchMetadataFromPeer(metaCtx, p, m.InfoHash, s.peerID)
-					if err != nil {
-						return
-					}
-					select {
-					case resultCh <- tf:
-						metaCancel()
-					default:
-					}
-				}(p)
+		for {
+			select {
+			case <-metaCtx.Done():
+				metaWg.Wait()
+				close(resultCh)
+				return
+			case batch, ok := <-peerCh:
+				if !ok {
+					metaWg.Wait()
+					close(resultCh)
+					return
+				}
+				for _, p := range batch {
+					metaWg.Add(1)
+					go func(p tracker.Peer) {
+						defer metaWg.Done()
+						select {
+						case <-metaCtx.Done():
+							return
+						case metaSem <- struct{}{}:
+							defer func() { <-metaSem }()
+						}
+						statAttempted.Add(1)
+						tf, ferr := fetchMetadataFromPeer(metaCtx, p, m.InfoHash, s.peerID, s.enableUTP)
+						if ferr != nil {
+							msg := ferr.Error()
+							switch {
+							case isDialError(msg):
+								statDialFail.Add(1)
+							case msg == "peer does not support extensions":
+								statNoExt.Add(1)
+							case msg == "peer reported no metadata":
+								statNoMeta.Add(1)
+							default:
+								statFetchFail.Add(1)
+							}
+							return
+						}
+						select {
+						case resultCh <- tf:
+							metaCancel()
+						default:
+						}
+					}(p)
+				}
 			}
 		}
-		metaWg.Wait()
-		close(resultCh)
 	}()
 
 	tf, ok := <-resultCh
@@ -943,7 +983,15 @@ func (s *Session) fetchMetadataAttempt(ctx context.Context, m *magnet.Magnet) (*
 	peers := append([]tracker.Peer(nil), allPeers...)
 	peerMu.Unlock()
 	if !ok {
-		slog.Debug("metadata attempt yielded no result", "id", s.record.ID, "peers_tried", tried)
+		slog.Warn("metadata attempt yielded no result",
+			"id", s.record.ID,
+			"peers_found", tried,
+			"attempted", statAttempted.Load(),
+			"dial_fail", statDialFail.Load(),
+			"no_ext", statNoExt.Load(),
+			"no_meta", statNoMeta.Load(),
+			"fetch_fail", statFetchFail.Load(),
+		)
 		return nil, peers
 	}
 	return tf, peers
@@ -1102,15 +1150,34 @@ func (s *Session) findPeersAttempt(ctx context.Context) []tracker.Peer {
 	return tracker.FilterPrivatePeers(allPeers)
 }
 
-func fetchMetadataFromPeer(ctx context.Context, p tracker.Peer, infoHash, peerID [20]byte) (*torrent.TorrentFile, error) {
+func isDialError(msg string) bool {
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "no route to host") ||
+		strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(msg, "context deadline exceeded")
+}
+
+func fetchMetadataFromPeer(ctx context.Context, p tracker.Peer, infoHash, peerID [20]byte, enableUTP bool) (*torrent.TorrentFile, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
 	}
 
-	dialer := net.Dialer{Timeout: 5 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", p.String())
+	var conn net.Conn
+	var err error
+	if enableUTP {
+		conn, err = utp.DialTimeout(p.String(), 5*time.Second)
+		if err != nil {
+			// uTP failed, fall back to TCP
+			dialer := net.Dialer{Timeout: 5 * time.Second}
+			conn, err = dialer.DialContext(ctx, "tcp", p.String())
+		}
+	} else {
+		dialer := net.Dialer{Timeout: 5 * time.Second}
+		conn, err = dialer.DialContext(ctx, "tcp", p.String())
+	}
 	if err != nil {
 		return nil, err
 	}
