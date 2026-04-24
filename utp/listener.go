@@ -14,6 +14,7 @@ const maxConns = 4096
 type Listener struct {
 	udpConn  *net.UDPConn
 	mu       sync.Mutex
+	writeMu  sync.Mutex       // serializes all WriteToUDP on the shared socket
 	conns    map[uint16]*Conn // connID → Conn
 	acceptCh chan *Conn
 	closed   bool
@@ -35,7 +36,7 @@ func Listen(network, addr string) (*Listener, error) {
 	l := &Listener{
 		udpConn:  udpConn,
 		conns:    make(map[uint16]*Conn),
-		acceptCh: make(chan *Conn, 32),
+		acceptCh: make(chan *Conn, 64),
 		closeCh:  make(chan struct{}),
 	}
 	go l.readLoop()
@@ -102,29 +103,38 @@ func (l *Listener) handlePacket(pkt *Packet, addr *net.UDPAddr) {
 	h := &pkt.Header
 
 	l.mu.Lock()
-	// SYN creates a new connection
+
+	// SYN creates a new connection.
 	if h.Type == StSyn {
+		// Refuse if at capacity.
 		if len(l.conns) >= maxConns {
 			l.mu.Unlock()
-			return // drop SYN: too many connections
+			return
 		}
-		connID := h.ConnID + 1 // we use connID+1 for our replies
+		// Refuse if the accept queue is full — don't SYN-ACK so the client
+		// will time out cleanly instead of becoming a zombie connection.
+		if len(l.acceptCh) >= cap(l.acceptCh) {
+			l.mu.Unlock()
+			return
+		}
+
+		connID := h.ConnID + 1 // server replies with connID+1
 		c := newConn(l.udpConn, addr, connID, 1, h.SeqNr)
+		c.writeMu = &l.writeMu // share listener's write serialization
 		l.conns[h.ConnID] = c
 		l.mu.Unlock()
 
-		// Send SYN-ACK (StState)
-		c.sendAck()
+		c.sendAck() // SYN-ACK
+		c.startRetransmitLoop()
 
-		select {
-		case l.acceptCh <- c:
-		default:
-		}
+		// Capacity was verified under the lock; this send is guaranteed
+		// non-blocking because only this goroutine (readLoop) adds to acceptCh.
+		l.acceptCh <- c
 		return
 	}
 
-	// Route to existing connection
-	// Try connID and connID-1 (initiator uses connID, responder uses connID+1)
+	// Route to existing connection.
+	// Initiator uses connID; responder uses connID+1 — try both.
 	c, ok := l.conns[h.ConnID]
 	if !ok {
 		c, ok = l.conns[h.ConnID-1]
@@ -138,12 +148,15 @@ func (l *Listener) handlePacket(pkt *Packet, addr *net.UDPAddr) {
 	switch h.Type {
 	case StData:
 		c.mu.Lock()
-		c.ackNr = h.SeqNr
+		// Advance ackNr monotonically (wrap-around safe).
+		if wrappingGT(h.SeqNr, c.ackNr) {
+			c.ackNr = h.SeqNr
+		}
 		c.mu.Unlock()
 		if len(pkt.Payload) > 0 {
 			c.deliverData(pkt.Payload)
 		}
-		c.sendAck()
+		c.sendAckFor(h.Timestamp)
 
 	case StState:
 		c.handleAck(h)
@@ -162,6 +175,11 @@ func (l *Listener) handlePacket(pkt *Packet, addr *net.UDPAddr) {
 	}
 }
 
+const (
+	maxSynRetries   = 4
+	synInitialDelay = time.Second
+)
+
 // Dial creates an outgoing uTP connection.
 func Dial(addr string) (net.Conn, error) {
 	return DialTimeout(addr, 10*time.Second)
@@ -174,7 +192,6 @@ func DialTimeout(addr string, timeout time.Duration) (net.Conn, error) {
 		return nil, fmt.Errorf("utp: resolve: %w", err)
 	}
 
-	// Bind to any local port
 	udpConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		return nil, fmt.Errorf("utp: bind: %w", err)
@@ -183,7 +200,6 @@ func DialTimeout(addr string, timeout time.Duration) (net.Conn, error) {
 	connID := randomConnID()
 	c := newConn(udpConn, raddr, connID+1, 1, 0)
 
-	// Send SYN
 	syn := &Packet{
 		Header: Header{
 			Type:      StSyn,
@@ -195,38 +211,71 @@ func DialTimeout(addr string, timeout time.Duration) (net.Conn, error) {
 			AckNr:     0,
 		},
 	}
-	if _, err := udpConn.WriteToUDP(syn.Marshal(), raddr); err != nil {
-		_ = udpConn.Close()
-		return nil, fmt.Errorf("utp: send SYN: %w", err)
-	}
+	synRaw := syn.Marshal()
 
-	// Wait for SYN-ACK
-	_ = udpConn.SetReadDeadline(time.Now().Add(timeout))
+	deadline := time.Now().Add(timeout)
+	retryDelay := synInitialDelay
+	connected := false
 	buf := make([]byte, 65536)
-	for {
-		n, _, readErr := udpConn.ReadFromUDP(buf)
-		if readErr != nil {
+
+	for attempt := 0; attempt < maxSynRetries; attempt++ {
+		if time.Now().After(deadline) {
+			break
+		}
+		if _, err := udpConn.WriteToUDP(synRaw, raddr); err != nil {
 			_ = udpConn.Close()
-			return nil, fmt.Errorf("utp: SYN-ACK timeout: %w", readErr)
+			return nil, fmt.Errorf("utp: send SYN: %w", err)
 		}
-		if n < headerSize {
-			continue
+
+		// Cap per-attempt wait to remaining total time.
+		wait := retryDelay
+		if remaining := time.Until(deadline); wait > remaining {
+			wait = remaining
 		}
-		pkt, parseErr := ParsePacket(buf[:n])
-		if parseErr != nil || pkt.Header.Version != 1 {
-			continue
-		}
-		if pkt.Header.Type == StState {
+		_ = udpConn.SetReadDeadline(time.Now().Add(wait))
+
+		for {
+			n, fromAddr, readErr := udpConn.ReadFromUDP(buf)
+			if readErr != nil {
+				break // deadline elapsed → retry
+			}
+			if n < headerSize {
+				continue
+			}
+			pkt, parseErr := ParsePacket(buf[:n])
+			if parseErr != nil || pkt.Header.Version != 1 {
+				continue
+			}
+			if pkt.Header.Type != StState {
+				continue
+			}
+			// Validate sender and connection ID.
+			if fromAddr.String() != raddr.String() {
+				continue
+			}
+			if pkt.Header.ConnID != connID+1 {
+				continue
+			}
 			c.mu.Lock()
 			c.ackNr = pkt.Header.SeqNr
 			c.mu.Unlock()
+			connected = true
 			break
 		}
+		if connected {
+			break
+		}
+		retryDelay *= 2
 	}
-	_ = udpConn.SetReadDeadline(time.Time{})
-	c.ownsUDP = true // this connection owns the UDP socket
 
-	// Start read loop for this connection
+	if !connected {
+		_ = udpConn.Close()
+		return nil, fmt.Errorf("utp: SYN-ACK timeout after %d attempts", maxSynRetries)
+	}
+
+	_ = udpConn.SetReadDeadline(time.Time{})
+	c.ownsUDP = true
+	c.startRetransmitLoop()
 	go c.clientReadLoop(udpConn)
 
 	return c, nil
@@ -248,17 +297,20 @@ func (c *Conn) clientReadLoop(udpConn *net.UDPConn) {
 			continue
 		}
 
-		switch pkt.Header.Type {
+		h := &pkt.Header
+		switch h.Type {
 		case StData:
 			c.mu.Lock()
-			c.ackNr = pkt.Header.SeqNr
+			if wrappingGT(h.SeqNr, c.ackNr) {
+				c.ackNr = h.SeqNr
+			}
 			c.mu.Unlock()
 			if len(pkt.Payload) > 0 {
 				c.deliverData(pkt.Payload)
 			}
-			c.sendAck()
+			c.sendAckFor(h.Timestamp)
 		case StState:
-			c.handleAck(&pkt.Header)
+			c.handleAck(h)
 		case StFin, StReset:
 			c.mu.Lock()
 			if !c.closed {

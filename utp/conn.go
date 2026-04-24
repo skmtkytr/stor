@@ -11,6 +11,16 @@ import (
 
 var errClosed = errors.New("utp: connection closed")
 
+const maxRetransmits = 4
+
+// sentPkt tracks an unacknowledged sent packet for retransmission.
+type sentPkt struct {
+	raw     []byte
+	seqNr   uint16
+	sentAt  time.Time
+	retries int
+}
+
 // Conn implements net.Conn over uTP.
 type Conn struct {
 	mu            sync.Mutex
@@ -27,20 +37,44 @@ type Conn struct {
 	deadline      time.Time
 	writeDeadline time.Time
 	ownsUDP       bool // true for outgoing (client) connections that own the UDP socket
+
+	// writeMu serializes WriteToUDP calls. Server-side conns share the Listener's
+	// mutex; client-side conns get their own.
+	writeMu *sync.Mutex
+
+	// finAcked is signaled when the remote ACKs our FIN.
+	finAcked chan struct{}
+	finSeqNr uint16 // seqNr of our FIN packet
+
+	// Retransmission buffer: seqNr → pending packet.
+	sendBufMu sync.Mutex
+	sendBuf   map[uint16]*sentPkt
+	rto       time.Duration
 }
 
-// newConn creates a uTP connection.
+// newConn creates a uTP connection. The caller must call startRetransmitLoop
+// after setting c.writeMu to the correct mutex.
 func newConn(udp *net.UDPConn, remote *net.UDPAddr, connID, seqNr, ackNr uint16) *Conn {
 	return &Conn{
-		udpConn: udp,
-		remote:  remote,
-		connID:  connID,
-		seqNr:   seqNr,
-		ackNr:   ackNr,
-		ledbat:  NewLEDBAT(),
-		recvCh:  make(chan []byte, 256),
-		closeCh: make(chan struct{}),
+		udpConn:  udp,
+		remote:   remote,
+		connID:   connID,
+		seqNr:    seqNr,
+		ackNr:    ackNr,
+		ledbat:   NewLEDBAT(),
+		recvCh:   make(chan []byte, 1024),
+		closeCh:  make(chan struct{}),
+		writeMu:  &sync.Mutex{}, // replaced by listener for server-side conns
+		finAcked: make(chan struct{}, 1),
+		sendBuf:  make(map[uint16]*sentPkt),
+		rto:      time.Second,
 	}
+}
+
+// startRetransmitLoop launches the retransmission goroutine. Must be called
+// after writeMu is finalized (i.e., after the listener has set c.writeMu).
+func (c *Conn) startRetransmitLoop() {
+	go c.retransmitLoop()
 }
 
 // Read reads data from the uTP connection.
@@ -93,7 +127,11 @@ func (c *Conn) Write(b []byte) (int, error) {
 		for canSend <= 0 {
 			c.mu.Lock()
 			wd := c.writeDeadline
+			closed := c.closed
 			c.mu.Unlock()
+			if closed {
+				return total, errClosed
+			}
 			if !wd.IsZero() && time.Now().After(wd) {
 				return total, &net.OpError{Op: "write", Net: "utp", Err: errors.New("timeout")}
 			}
@@ -111,22 +149,39 @@ func (c *Conn) Write(b []byte) (int, error) {
 
 		c.mu.Lock()
 		c.seqNr++
+		seq := c.seqNr
+		avail := cap(c.recvCh) - len(c.recvCh)
+		if avail < 0 {
+			avail = 0
+		}
 		pkt := &Packet{
 			Header: Header{
 				Type:      StData,
 				Version:   1,
 				ConnID:    c.connID,
 				Timestamp: utpTimestamp(),
-				WndSize:   uint32(len(c.recvCh)) * mss,
-				SeqNr:     c.seqNr,
+				WndSize:   uint32(avail) * mss,
+				SeqNr:     seq,
 				AckNr:     c.ackNr,
 			},
 			Payload: b[:chunkSize],
 		}
 		c.mu.Unlock()
 
-		_, err := c.udpConn.WriteToUDP(pkt.Marshal(), c.remote)
+		raw := pkt.Marshal()
+
+		// Buffer before sending so retransmitLoop can re-send on loss.
+		c.sendBufMu.Lock()
+		c.sendBuf[seq] = &sentPkt{raw: raw, seqNr: seq, sentAt: time.Now()}
+		c.sendBufMu.Unlock()
+
+		c.writeMu.Lock()
+		_, err := c.udpConn.WriteToUDP(raw, c.remote)
+		c.writeMu.Unlock()
 		if err != nil {
+			c.sendBufMu.Lock()
+			delete(c.sendBuf, seq)
+			c.sendBufMu.Unlock()
 			return total, err
 		}
 
@@ -148,8 +203,8 @@ func (c *Conn) Close() error {
 	c.closed = true
 	close(c.closeCh)
 
-	// Send FIN
 	c.seqNr++
+	c.finSeqNr = c.seqNr
 	pkt := &Packet{
 		Header: Header{
 			Type:      StFin,
@@ -160,10 +215,19 @@ func (c *Conn) Close() error {
 			AckNr:     c.ackNr,
 		},
 	}
+	raw := pkt.Marshal()
 	c.mu.Unlock()
-	_, _ = c.udpConn.WriteToUDP(pkt.Marshal(), c.remote)
-	// Close the underlying UDP socket for outgoing connections (we own it).
-	// Server-side connections share the listener's socket and must not close it.
+
+	c.writeMu.Lock()
+	_, _ = c.udpConn.WriteToUDP(raw, c.remote)
+	c.writeMu.Unlock()
+
+	// Wait for FIN-ACK (best-effort, 500ms timeout).
+	select {
+	case <-c.finAcked:
+	case <-time.After(500 * time.Millisecond):
+	}
+
 	if c.ownsUDP {
 		_ = c.udpConn.Close()
 	}
@@ -180,17 +244,21 @@ func (c *Conn) RemoteAddr() net.Addr {
 	return c.remote
 }
 
-// SetDeadline sets read and write deadlines.
+// SetDeadline sets both read and write deadlines.
 func (c *Conn) SetDeadline(t time.Time) error {
 	c.mu.Lock()
 	c.deadline = t
+	c.writeDeadline = t
 	c.mu.Unlock()
 	return nil
 }
 
 // SetReadDeadline sets the read deadline.
 func (c *Conn) SetReadDeadline(t time.Time) error {
-	return c.SetDeadline(t)
+	c.mu.Lock()
+	c.deadline = t
+	c.mu.Unlock()
+	return nil
 }
 
 // SetWriteDeadline sets the write deadline.
@@ -202,45 +270,132 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 }
 
 // deliverData is called by the listener/muxer when a data packet arrives.
+// It copies the payload and blocks until delivered or connection is closed.
 func (c *Conn) deliverData(payload []byte) {
+	buf := make([]byte, len(payload))
+	copy(buf, payload)
 	select {
-	case c.recvCh <- payload:
-	default:
-		// drop if buffer full
+	case c.recvCh <- buf:
+	case <-c.closeCh:
+		// Connection closed; discard.
 	}
 }
 
-// handleAck processes an incoming ACK.
+// handleAck processes an incoming STATE (ACK) packet.
 func (c *Conn) handleAck(h *Header) {
-	delay := int64(h.TSDiff)
-	c.ledbat.OnAck(delay, mss) // approximate acked bytes
+	// TSDiff is receiver_time − sender_timestamp, giving the one-way delay.
+	// Only update LEDBAT when the sender populated TSDiff (non-zero).
+	if h.TSDiff != 0 {
+		c.ledbat.OnAck(int64(h.TSDiff), mss)
+	}
+
+	// Remove cumulative-ACKed packets from retransmit buffer.
+	c.sendBufMu.Lock()
+	for seq := range c.sendBuf {
+		if wrappingLEQ(seq, h.AckNr) {
+			delete(c.sendBuf, seq)
+		}
+	}
+	c.sendBufMu.Unlock()
+
+	// Signal if remote ACKed our FIN.
 	c.mu.Lock()
-	c.ackNr = h.SeqNr
+	closed := c.closed
+	finSeq := c.finSeqNr
 	c.mu.Unlock()
+	if closed && finSeq != 0 && wrappingLEQ(finSeq, h.AckNr) {
+		select {
+		case c.finAcked <- struct{}{}:
+		default:
+		}
+	}
 }
 
-// sendAck sends a state (ACK) packet.
-func (c *Conn) sendAck() {
+// sendAckFor sends a STATE (ACK) packet. dataTimestamp is the Timestamp field
+// from the incoming DATA packet; the resulting TSDiff lets the remote measure
+// one-way delay. Pass 0 for SYN-ACK and other non-data ACKs.
+func (c *Conn) sendAckFor(dataTimestamp uint32) {
+	now := utpTimestamp()
+	var tsDiff uint32
+	if dataTimestamp != 0 {
+		tsDiff = now - dataTimestamp // uint32 subtraction handles wrap-around
+	}
 	c.mu.Lock()
+	avail := cap(c.recvCh) - len(c.recvCh)
+	if avail < 0 {
+		avail = 0
+	}
 	pkt := &Packet{
 		Header: Header{
-			Type:      StState,
-			Version:   1,
-			ConnID:    c.connID,
-			Timestamp: utpTimestamp(),
-			WndSize:   256 * mss,
+			Type:    StState,
+			Version: 1,
+			ConnID:  c.connID,
+			// Timestamp lets the remote compute TSDiff for its LEDBAT.
+			Timestamp: now,
+			TSDiff:    tsDiff,
+			WndSize:   uint32(avail) * mss,
 			SeqNr:     c.seqNr,
 			AckNr:     c.ackNr,
 		},
 	}
 	c.mu.Unlock()
+	c.writeMu.Lock()
 	_, _ = c.udpConn.WriteToUDP(pkt.Marshal(), c.remote)
+	c.writeMu.Unlock()
+}
+
+// sendAck sends a STATE packet without OWD information (for SYN-ACK etc.).
+func (c *Conn) sendAck() {
+	c.sendAckFor(0)
+}
+
+// retransmitLoop periodically retransmits unacknowledged packets.
+// It exits when closeCh is closed.
+func (c *Conn) retransmitLoop() {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.closeCh:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			c.sendBufMu.Lock()
+			for seq, sp := range c.sendBuf {
+				if now.Sub(sp.sentAt) < c.rto {
+					continue
+				}
+				if sp.retries >= maxRetransmits {
+					delete(c.sendBuf, seq)
+					c.ledbat.OnLoss()
+					continue
+				}
+				c.writeMu.Lock()
+				_, _ = c.udpConn.WriteToUDP(sp.raw, c.remote)
+				c.writeMu.Unlock()
+				sp.sentAt = now
+				sp.retries++
+				c.ledbat.OnTimeout()
+			}
+			c.sendBufMu.Unlock()
+		}
+	}
 }
 
 // --- helpers ---
 
 func utpTimestamp() uint32 {
 	return uint32(time.Now().UnixMicro() & 0xFFFFFFFF)
+}
+
+// wrappingGT reports whether a > b in uint16 wrap-around arithmetic (RFC 793).
+func wrappingGT(a, b uint16) bool {
+	return int16(a-b) > 0
+}
+
+// wrappingLEQ reports whether a <= b in uint16 wrap-around arithmetic.
+func wrappingLEQ(a, b uint16) bool {
+	return !wrappingGT(a, b)
 }
 
 func randomConnID() uint16 {
