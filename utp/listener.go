@@ -121,6 +121,7 @@ func (l *Listener) handlePacket(pkt *Packet, addr *net.UDPAddr) {
 		connID := h.ConnID + 1 // server replies with connID+1
 		c := newConn(l.udpConn, addr, connID, 1, h.SeqNr)
 		c.writeMu = &l.writeMu // share listener's write serialization
+		c.setFirstExpected(h.SeqNr + 1)
 		l.conns[h.ConnID] = c
 		l.mu.Unlock()
 
@@ -147,15 +148,7 @@ func (l *Listener) handlePacket(pkt *Packet, addr *net.UDPAddr) {
 
 	switch h.Type {
 	case StData:
-		c.mu.Lock()
-		// Advance ackNr monotonically (wrap-around safe).
-		if wrappingGT(h.SeqNr, c.ackNr) {
-			c.ackNr = h.SeqNr
-		}
-		c.mu.Unlock()
-		if len(pkt.Payload) > 0 {
-			c.deliverData(pkt.Payload)
-		}
+		c.deliverInOrder(h.SeqNr, pkt.Payload)
 		c.sendAckFor(h.Timestamp)
 
 	case StState:
@@ -259,6 +252,7 @@ func DialTimeout(addr string, timeout time.Duration) (net.Conn, error) {
 			c.mu.Lock()
 			c.ackNr = pkt.Header.SeqNr
 			c.mu.Unlock()
+			c.setFirstExpected(pkt.Header.SeqNr + 1)
 			connected = true
 			break
 		}
@@ -300,14 +294,7 @@ func (c *Conn) clientReadLoop(udpConn *net.UDPConn) {
 		h := &pkt.Header
 		switch h.Type {
 		case StData:
-			c.mu.Lock()
-			if wrappingGT(h.SeqNr, c.ackNr) {
-				c.ackNr = h.SeqNr
-			}
-			c.mu.Unlock()
-			if len(pkt.Payload) > 0 {
-				c.deliverData(pkt.Payload)
-			}
+			c.deliverInOrder(h.SeqNr, pkt.Payload)
 			c.sendAckFor(h.Timestamp)
 		case StState:
 			c.handleAck(h)

@@ -405,6 +405,89 @@ func TestConcurrentWrite(t *testing.T) {
 	}
 }
 
+// TestDeliverInOrder verifies that out-of-order packets are buffered and
+// flushed in seqNr order once the missing segment arrives.
+func TestDeliverInOrder(t *testing.T) {
+	c := &Conn{
+		recvCh:     make(chan []byte, 16),
+		closeCh:    make(chan struct{}),
+		reorderBuf: make(map[uint16][]byte),
+	}
+	c.setFirstExpected(2)
+
+	// Deliver seqNr=3 first (out of order) — should be buffered, not delivered.
+	c.deliverInOrder(3, []byte("third"))
+	if len(c.recvCh) != 0 {
+		t.Fatal("out-of-order packet should not be delivered yet")
+	}
+
+	// Deliver seqNr=2 (in order) — should flush both 2 and 3.
+	c.deliverInOrder(2, []byte("second"))
+	if len(c.recvCh) != 2 {
+		t.Fatalf("expected 2 items in recvCh, got %d", len(c.recvCh))
+	}
+	first := <-c.recvCh
+	second := <-c.recvCh
+	if string(first) != "second" || string(second) != "third" {
+		t.Errorf("order wrong: got %q then %q", first, second)
+	}
+	if c.ackNr != 3 {
+		t.Errorf("ackNr should be 3 after flushing, got %d", c.ackNr)
+	}
+}
+
+// TestDeliverInOrderDuplicate verifies that duplicate packets are discarded.
+func TestDeliverInOrderDuplicate(t *testing.T) {
+	c := &Conn{
+		recvCh:     make(chan []byte, 16),
+		closeCh:    make(chan struct{}),
+		reorderBuf: make(map[uint16][]byte),
+	}
+	c.setFirstExpected(2)
+
+	c.deliverInOrder(2, []byte("hello"))
+	c.deliverInOrder(2, []byte("hello")) // duplicate
+	if len(c.recvCh) != 1 {
+		t.Errorf("duplicate should be discarded: got %d items", len(c.recvCh))
+	}
+}
+
+// TestDeliverInOrderGap verifies a gap of multiple missing seqNrs.
+func TestDeliverInOrderGap(t *testing.T) {
+	c := &Conn{
+		recvCh:     make(chan []byte, 16),
+		closeCh:    make(chan struct{}),
+		reorderBuf: make(map[uint16][]byte),
+	}
+	c.setFirstExpected(1)
+
+	// Buffer 3, 4, 5; then deliver 1, 2 — should flush all five in order.
+	c.deliverInOrder(3, []byte("c"))
+	c.deliverInOrder(5, []byte("e"))
+	c.deliverInOrder(4, []byte("d"))
+	if len(c.recvCh) != 0 {
+		t.Fatal("nothing should be delivered until seqNr=1 arrives")
+	}
+
+	c.deliverInOrder(1, []byte("a"))
+	if len(c.recvCh) != 1 {
+		t.Fatalf("expected 1 item after seqNr=1, got %d", len(c.recvCh))
+	}
+
+	// Delivering seqNr=2 flushes 2,3,4,5 — total 5 in recvCh (1 already there + 4).
+	c.deliverInOrder(2, []byte("b"))
+	if len(c.recvCh) != 5 {
+		t.Fatalf("expected 5 total items after flush, got %d", len(c.recvCh))
+	}
+	want := []string{"a", "b", "c", "d", "e"}
+	for _, w := range want {
+		got := <-c.recvCh
+		if string(got) != w {
+			t.Errorf("want %q, got %q", w, got)
+		}
+	}
+}
+
 func TestMaxConnsConstant(t *testing.T) {
 	if maxConns < 100 {
 		t.Errorf("maxConns too small: %d", maxConns)
