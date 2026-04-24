@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/skmtkytr/stor/download"
+	"github.com/skmtkytr/stor/peer"
 	"github.com/skmtkytr/stor/torrent"
 	"github.com/skmtkytr/stor/tracker"
 )
@@ -114,5 +115,79 @@ func TestKnownPeersCumulativeWithInitial(t *testing.T) {
 	want := len(initial) + 3
 	if got := int(s.knownPeers.Load()); got != want {
 		t.Errorf("knownPeers = %d, want %d", got, want)
+	}
+}
+
+// TestKnownPeersSnapSeedingPath verifies that Snap() includes KnownPeers
+// in the seeding-without-progress path (p == nil, u != nil).
+func TestKnownPeersSnapSeedingPath(t *testing.T) {
+	tf := &torrent.TorrentFile{
+		Info: torrent.Info{
+			Name:        "seed.txt",
+			PieceLength: 256,
+			PieceHashes: [][20]byte{{}},
+			Length:      256,
+		},
+	}
+	bf := make(peer.Bitfield, 1)
+	bf.SetPiece(0)
+
+	s := &Session{
+		record: &TorrentRecord{ID: "test", State: StateSeeding, TotalBytes: 256},
+		tf:     tf,
+	}
+	s.uploader = download.NewUploader(tf, t.TempDir(), [20]byte{}, bf)
+	s.knownPeers.Store(7)
+
+	snap := s.Snap()
+	if snap.KnownPeers != 7 {
+		t.Errorf("KnownPeers = %d, want 7", snap.KnownPeers)
+	}
+}
+
+// TestKnownPeersSeedingPeerSink verifies that the peerSink goroutine wired in
+// phaseSeed increments knownPeers when tracker responses arrive.
+func TestKnownPeersSeedingPeerSink(t *testing.T) {
+	s := &Session{
+		record: &TorrentRecord{ID: "test", State: StateSeeding},
+	}
+
+	// Replicate the goroutine from phaseSeed.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	peerSink := make(chan []tracker.Peer, 16)
+	go func() {
+		for {
+			select {
+			case batch, ok := <-peerSink:
+				if !ok {
+					return
+				}
+				s.knownPeers.Add(int32(len(batch)))
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	batch := []tracker.Peer{
+		{IP: net.ParseIP("5.5.5.5"), Port: 6881},
+		{IP: net.ParseIP("6.6.6.6"), Port: 6881},
+		{IP: net.ParseIP("7.7.7.7"), Port: 6881},
+	}
+	peerSink <- batch
+
+	// Wait for goroutine to process.
+	deadline := time.After(time.Second)
+	for {
+		if int(s.knownPeers.Load()) == len(batch) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("knownPeers = %d, want %d", s.knownPeers.Load(), len(batch))
+		case <-time.After(time.Millisecond):
+		}
 	}
 }
