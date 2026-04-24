@@ -149,6 +149,7 @@ func (s *Session) Snap() download.ProgressSnap {
 			Percent:     100,
 			UpSpeed:     u.TotalUploadSpeed(),
 			ActivePeers: u.PeerCount(),
+			KnownPeers:  int(s.knownPeers.Load()),
 		}
 	}
 
@@ -620,12 +621,29 @@ func (s *Session) phaseSeedDirect(ctx context.Context, savePath string) error {
 func (s *Session) phaseSeed(ctx context.Context) error {
 	slog.Info("seeding started", "id", s.record.ID, "name", s.tf.Info.Name)
 
-	// Announce completed + start seed-phase re-announce
-	announcer := s.newAnnouncer(nil) // no peerSink needed during seeding
-	announcer.AnnounceCompleted(ctx)
+	// Announce completed + start seed-phase re-announce.
+	// Wire up a peerSink so tracker responses update knownPeers even while seeding.
 	seedCtx, seedCancel := context.WithCancel(ctx)
-	go announcer.Run(seedCtx)
 	defer seedCancel()
+
+	peerSink := make(chan []tracker.Peer, 16)
+	go func() {
+		for {
+			select {
+			case batch, ok := <-peerSink:
+				if !ok {
+					return
+				}
+				s.knownPeers.Add(int32(len(batch)))
+			case <-seedCtx.Done():
+				return
+			}
+		}
+	}()
+
+	announcer := s.newAnnouncer(peerSink)
+	announcer.AnnounceCompleted(ctx)
+	go announcer.Run(seedCtx)
 
 	// Block until context is cancelled (pause/stop/shutdown)
 	<-ctx.Done()
