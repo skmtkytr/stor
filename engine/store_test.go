@@ -184,3 +184,44 @@ func TestStoreBitfieldPersistence(t *testing.T) {
 		t.Errorf("bitfield: got %v", r.Bitfield)
 	}
 }
+
+func TestStoreKnownPeersPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	s := NewStore(path)
+
+	// Non-zero value must survive Save→Load.
+	s.Put(&TorrentRecord{ID: "kp-test", KnownPeers: 57})
+	if err := s.Save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	s2 := NewStore(path)
+	if err := s2.Load(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	r, ok := s2.Get("kp-test")
+	if !ok {
+		t.Fatal("kp-test not found after load")
+	}
+	if r.KnownPeers != 57 {
+		t.Errorf("KnownPeers: got %d, want 57", r.KnownPeers)
+	}
+
+	// Zero value: omitempty omits it from JSON; loading must still give 0.
+	s.Put(&TorrentRecord{ID: "kp-zero", KnownPeers: 0})
+	if err := s.Save(); err != nil {
+		t.Fatalf("save zero: %v", err)
+	}
+	s3 := NewStore(path)
+	if err := s3.Load(); err != nil {
+		t.Fatalf("load zero: %v", err)
+	}
+	r2, ok := s3.Get("kp-zero")
+	if !ok {
+		t.Fatal("kp-zero not found after load")
+	}
+	if r2.KnownPeers != 0 {
+		t.Errorf("KnownPeers zero: got %d, want 0", r2.KnownPeers)
+	}
+}

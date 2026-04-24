@@ -118,6 +118,20 @@ func TestKnownPeersCumulativeWithInitial(t *testing.T) {
 	}
 }
 
+// TestKnownPeersSnapStoppedPath verifies that Snap() includes KnownPeers
+// in the stopped/paused path (p == nil, u == nil).
+func TestKnownPeersSnapStoppedPath(t *testing.T) {
+	s := &Session{
+		record: &TorrentRecord{ID: "test", State: StateComplete, TotalBytes: 512},
+	}
+	s.knownPeers.Store(13)
+
+	snap := s.Snap()
+	if snap.KnownPeers != 13 {
+		t.Errorf("KnownPeers = %d, want 13", snap.KnownPeers)
+	}
+}
+
 // TestKnownPeersPersisted verifies that knownPeers is restored from
 // TorrentRecord on session creation and written back by Record().
 func TestKnownPeersPersisted(t *testing.T) {
