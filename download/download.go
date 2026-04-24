@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
@@ -1058,8 +1059,12 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 	seen := &sync.Map{}
 	var preferEncrypt atomic.Bool
 
-	// allSeen tracks every peer ever spawned (capped) for retry sweeps.
-	const maxAllSeen = 1000
+	// allSeen tracks every peer ever spawned for retry sweeps.
+	// Cap at MaxPeers*20 to bound memory while covering large swarms.
+	maxAllSeen := cfg.MaxPeers * 20
+	if maxAllSeen < 5000 {
+		maxAllSeen = 5000
+	}
 	var allSeenMu sync.Mutex
 	var allSeenList []tracker.Peer
 	allSeenSet := make(map[string]struct{})
@@ -1100,6 +1105,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			<-dialSem // release dial slot after connection attempt
 
 			if err != nil {
+				slog.Debug("peer dial failed", "peer", addr, "err", err)
 				return
 			}
 
@@ -1212,14 +1218,21 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				if pq.Remaining() == 0 {
 					return
 				}
-				// Only retry if we have few active peers
+				// Only retry if we have few active peers.
+				// Spawn up to MaxPeers candidates per sweep to bound goroutine
+				// pressure when allSeenList is large.
 				if pm.PeerCount() < cfg.MaxPeers/2 {
 					allSeenMu.Lock()
 					snapshot := make([]tracker.Peer, len(allSeenList))
 					copy(snapshot, allSeenList)
 					allSeenMu.Unlock()
+					limit := cfg.MaxPeers
 					for _, p := range snapshot {
+						if limit <= 0 {
+							break
+						}
 						spawnWorker(p)
+						limit--
 					}
 				}
 				timer.Reset(retryInterval)
