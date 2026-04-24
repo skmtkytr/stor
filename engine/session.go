@@ -99,6 +99,13 @@ func (s *Session) Record() *TorrentRecord {
 	return &r
 }
 
+// isRunning reports whether this session has an active goroutine.
+func (s *Session) isRunning() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cancel != nil
+}
+
 // Snap returns a progress snapshot. Safe to call from any goroutine.
 func (s *Session) Snap() download.ProgressSnap {
 	s.mu.RLock()
