@@ -961,6 +961,9 @@ func (e *Engine) startQueuedLocked() {
 		if active >= e.cfg.MaxActive {
 			break
 		}
+		if s.isRunning() {
+			continue
+		}
 		r := s.Record()
 		slog.Info("starting queued torrent", "id", r.ID, "name", r.Name, "queue_pos", r.QueuePosition)
 		e.startSession(s)
