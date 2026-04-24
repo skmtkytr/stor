@@ -43,6 +43,7 @@ export interface ProgressSnap {
 	down_speed: number;
 	up_speed: number;
 	active_peers: number;
+	known_peers: number;
 	total_pieces: number;
 	done_pieces: number;
 }
@@ -80,6 +81,7 @@ export interface EngineStats {
 	total_torrents: number;
 	max_active: number;
 	total_peers: number;
+	total_known_peers: number;
 	dht_nodes: number;
 	free_space: number;
 	config: EngineConfig;

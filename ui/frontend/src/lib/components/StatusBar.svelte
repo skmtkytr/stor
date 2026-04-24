@@ -21,7 +21,9 @@
 				<span class="text-zinc-400">{s.total_torrents}</span> total
 			</span>
 			<span>
-				Peers: <span class="text-zinc-400">{s.total_peers}</span>
+				Peers: <span class="text-zinc-400">{s.total_peers}</span>{#if s.total_known_peers > 0}<span
+						class="text-zinc-600">/{s.total_known_peers}</span
+					>{/if}
 			</span>
 			<span>
 				DHT: <span class="text-zinc-400">{s.dht_nodes}</span>

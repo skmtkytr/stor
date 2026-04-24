@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/skmtkytr/stor/bencode"
@@ -73,6 +74,10 @@ type Session struct {
 	// goroutine, so mutations happen in that goroutine; snapshots taken by
 	// Files() copy the bytes under s.mu.
 	haveBF peer.Bitfield
+
+	// knownPeers is the cumulative count of peers received from tracker/DHT/PEX.
+	// Written atomically by the download goroutine; read by Snap().
+	knownPeers atomic.Int32
 }
 
 // NewSession creates a session from a persisted record.
@@ -118,6 +123,7 @@ func (s *Session) Snap() download.ProgressSnap {
 	if p != nil {
 		snap := p.Snap()
 		snap.State = string(state)
+		snap.KnownPeers = int(s.knownPeers.Load())
 		// Clear speeds for inactive states
 		if state == StatePaused || state == StateComplete || state == StateError {
 			snap.DownSpeed = 0
@@ -369,6 +375,7 @@ func (s *Session) phaseResolve(ctx context.Context) error {
 		s.cachedPeers = peers
 		slog.Info("peers discovered", "id", s.record.ID, "count", len(peers))
 	}
+	s.knownPeers.Store(int32(len(s.cachedPeers)))
 	return nil
 }
 
@@ -474,6 +481,27 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		peerSink = peerCh
 	}
 
+	// Wrap peerCh: count dynamic peers (from announcer/DHT/PEX) as they arrive.
+	countedPeerCh := make(chan []tracker.Peer, 16)
+	go func() {
+		for {
+			select {
+			case batch, ok := <-peerCh:
+				if !ok {
+					return
+				}
+				s.knownPeers.Add(int32(len(batch)))
+				select {
+				case countedPeerCh <- batch:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	dlCfg := s.dlCfg
 	if s.tf.Info.Private {
 		dlCfg.DisablePEX = true
@@ -488,7 +516,7 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		TF:          s.tf,
 		PeerID:      s.peerID,
 		Peers:       peers,
-		PeerCh:      peerCh,
+		PeerCh:      countedPeerCh,
 		PeerSink:    peerSink,
 		Path:        savePath,
 		Progress:    progress,
