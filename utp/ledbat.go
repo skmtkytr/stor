@@ -155,3 +155,10 @@ func (l *LEDBAT) Cwnd() int {
 	defer l.mu.Unlock()
 	return int(l.cwnd)
 }
+
+// FlightSize returns the number of bytes currently in flight.
+func (l *LEDBAT) FlightSize() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.flightSize
+}

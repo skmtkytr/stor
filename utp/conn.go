@@ -59,6 +59,10 @@ type Conn struct {
 	reorderBuf   map[uint16][]byte // seqNr → payload copy
 	nextExpected uint16            // next seqNr to deliver; also the cumulative ACK point
 	recvInited   bool              // true once nextExpected has been set
+
+	// remoteWnd is the receive-window advertised by the remote peer (bytes).
+	// Write must not have more than remoteWnd bytes in flight at once.
+	remoteWnd uint32
 }
 
 // newConn creates a uTP connection. The caller must call startRetransmitLoop
@@ -78,6 +82,7 @@ func newConn(udp *net.UDPConn, remote *net.UDPAddr, connID, seqNr, ackNr uint16)
 		sendBuf:    make(map[uint16]*sentPkt),
 		rto:        time.Second,
 		reorderBuf: make(map[uint16][]byte),
+		remoteWnd:  256 * mss, // conservative default until first real advertisement
 	}
 }
 
@@ -132,8 +137,9 @@ func (c *Conn) Write(b []byte) (int, error) {
 
 	total := 0
 	for len(b) > 0 {
-		// Wait for congestion window to allow sending
-		canSend := c.ledbat.CanSend()
+		// Wait until both the LEDBAT congestion window and the remote receive
+		// window allow sending.
+		canSend := c.effectiveCanSend()
 		for canSend <= 0 {
 			c.mu.Lock()
 			wd := c.writeDeadline
@@ -146,7 +152,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 				return total, &net.OpError{Op: "write", Net: "utp", Err: errors.New("timeout")}
 			}
 			time.Sleep(time.Millisecond)
-			canSend = c.ledbat.CanSend()
+			canSend = c.effectiveCanSend()
 		}
 
 		chunkSize := mss
@@ -345,8 +351,37 @@ func (c *Conn) deliverInOrder(seqNr uint16, payload []byte) {
 	}
 }
 
+// updateRemoteWnd records the receive window advertised by the remote peer.
+// A minimum of one MSS is enforced to prevent a permanent zero-window deadlock.
+func (c *Conn) updateRemoteWnd(w uint32) {
+	if w < mss {
+		w = mss
+	}
+	c.mu.Lock()
+	c.remoteWnd = w
+	c.mu.Unlock()
+}
+
+// effectiveCanSend returns how many bytes can be sent now, capped by both
+// the LEDBAT congestion window and the remote receive window.
+func (c *Conn) effectiveCanSend() int {
+	cwndAvail := c.ledbat.CanSend()
+	flight := c.ledbat.FlightSize()
+	c.mu.Lock()
+	rw := int(c.remoteWnd)
+	c.mu.Unlock()
+	remoteAvail := rw - flight
+	if remoteAvail < cwndAvail {
+		return remoteAvail
+	}
+	return cwndAvail
+}
+
 // handleAck processes an incoming STATE (ACK) packet.
 func (c *Conn) handleAck(h *Header) {
+	// Update remote receive window from every ACK.
+	c.updateRemoteWnd(h.WndSize)
+
 	// TSDiff is receiver_time − sender_timestamp, giving the one-way delay.
 	// Only update LEDBAT when the sender populated TSDiff (non-zero).
 	if h.TSDiff != 0 {
