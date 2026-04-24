@@ -82,7 +82,7 @@ type Session struct {
 
 // NewSession creates a session from a persisted record.
 func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir, tmpDir string, port uint16, dlCfg download.DownloadConfig, numWant int, d *dhtpkg.DHT, pl *PeerListener) *Session {
-	return &Session{
+	s := &Session{
 		record:      record,
 		peerID:      peerID,
 		downloadDir: downloadDir,
@@ -93,14 +93,16 @@ func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir, tmpDir stri
 		dht:         d,
 		listener:    pl,
 	}
+	s.knownPeers.Store(int32(record.KnownPeers))
+	return s
 }
 
 // Record returns the current record (thread-safe copy of state fields).
 func (s *Session) Record() *TorrentRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	// Return a shallow copy
 	r := *s.record
+	r.KnownPeers = int(s.knownPeers.Load())
 	return &r
 }
 
@@ -149,6 +151,7 @@ func (s *Session) Snap() download.ProgressSnap {
 			Percent:     100,
 			UpSpeed:     u.TotalUploadSpeed(),
 			ActivePeers: u.PeerCount(),
+			KnownPeers:  int(s.knownPeers.Load()),
 		}
 	}
 
@@ -163,6 +166,7 @@ func (s *Session) Snap() download.ProgressSnap {
 		Total:      totalBytes,
 		Downloaded: downloaded,
 		Percent:    pct,
+		KnownPeers: int(s.knownPeers.Load()),
 	}
 }
 
@@ -620,12 +624,29 @@ func (s *Session) phaseSeedDirect(ctx context.Context, savePath string) error {
 func (s *Session) phaseSeed(ctx context.Context) error {
 	slog.Info("seeding started", "id", s.record.ID, "name", s.tf.Info.Name)
 
-	// Announce completed + start seed-phase re-announce
-	announcer := s.newAnnouncer(nil) // no peerSink needed during seeding
-	announcer.AnnounceCompleted(ctx)
+	// Announce completed + start seed-phase re-announce.
+	// Wire up a peerSink so tracker responses update knownPeers even while seeding.
 	seedCtx, seedCancel := context.WithCancel(ctx)
-	go announcer.Run(seedCtx)
 	defer seedCancel()
+
+	peerSink := make(chan []tracker.Peer, 16)
+	go func() {
+		for {
+			select {
+			case batch, ok := <-peerSink:
+				if !ok {
+					return
+				}
+				s.knownPeers.Add(int32(len(batch)))
+			case <-seedCtx.Done():
+				return
+			}
+		}
+	}()
+
+	announcer := s.newAnnouncer(peerSink)
+	announcer.AnnounceCompleted(ctx)
+	go announcer.Run(seedCtx)
 
 	// Block until context is cancelled (pause/stop/shutdown)
 	<-ctx.Done()
@@ -647,7 +668,7 @@ func (s *Session) phaseSeed(ctx context.Context) error {
 }
 
 // newAnnouncer creates an announcer with the session's current state.
-// peerSink may be nil (seeding mode doesn't need dynamic peer injection).
+// peerSink may be nil (e.g. private torrent with PEX disabled, or callers that don't need peer injection).
 func (s *Session) newAnnouncer(peerSink chan<- []tracker.Peer) *Announcer {
 	return NewAnnouncer(AnnounceConfig{
 		TF:       s.tf,

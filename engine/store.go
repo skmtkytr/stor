@@ -40,6 +40,7 @@ type TorrentRecord struct {
 	// -1 = skip. Missing / shorter slice defaults trailing files to normal.
 	FilePriorities []int8 `json:"file_priorities,omitempty"`
 	Error          string `json:"error,omitempty"`
+	KnownPeers     int    `json:"known_peers,omitempty"`
 }
 
 // Store persists torrent records to a JSON file.
