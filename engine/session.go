@@ -166,6 +166,7 @@ func (s *Session) Snap() download.ProgressSnap {
 		Total:      totalBytes,
 		Downloaded: downloaded,
 		Percent:    pct,
+		KnownPeers: int(s.knownPeers.Load()),
 	}
 }
 
@@ -667,7 +668,7 @@ func (s *Session) phaseSeed(ctx context.Context) error {
 }
 
 // newAnnouncer creates an announcer with the session's current state.
-// peerSink may be nil (seeding mode doesn't need dynamic peer injection).
+// peerSink may be nil (e.g. private torrent with PEX disabled, or callers that don't need peer injection).
 func (s *Session) newAnnouncer(peerSink chan<- []tracker.Peer) *Announcer {
 	return NewAnnouncer(AnnounceConfig{
 		TF:       s.tf,

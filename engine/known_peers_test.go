@@ -171,10 +171,12 @@ func TestKnownPeersSeedingPeerSink(t *testing.T) {
 	}
 
 	// Replicate the goroutine from phaseSeed.
+	// doneCh is closed after each batch is processed, allowing deterministic sync.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	peerSink := make(chan []tracker.Peer, 16)
+	doneCh := make(chan struct{}, 16)
 	go func() {
 		for {
 			select {
@@ -183,6 +185,7 @@ func TestKnownPeersSeedingPeerSink(t *testing.T) {
 					return
 				}
 				s.knownPeers.Add(int32(len(batch)))
+				doneCh <- struct{}{}
 			case <-ctx.Done():
 				return
 			}
@@ -196,16 +199,13 @@ func TestKnownPeersSeedingPeerSink(t *testing.T) {
 	}
 	peerSink <- batch
 
-	// Wait for goroutine to process.
-	deadline := time.After(time.Second)
-	for {
-		if int(s.knownPeers.Load()) == len(batch) {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("knownPeers = %d, want %d", s.knownPeers.Load(), len(batch))
-		case <-time.After(time.Millisecond):
-		}
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for peerSink goroutine to process batch")
+	}
+
+	if got := int(s.knownPeers.Load()); got != len(batch) {
+		t.Errorf("knownPeers = %d, want %d", got, len(batch))
 	}
 }
