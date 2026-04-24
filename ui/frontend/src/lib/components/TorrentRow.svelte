@@ -115,9 +115,9 @@
 	</td>
 
 	<!-- Peers -->
-	<td class="px-3 text-right text-xs tabular-nums text-zinc-400">
-		{(torrent.state === "downloading" || torrent.state === "seeding") && torrent.progress.active_peers
-			? torrent.progress.active_peers
-			: ""}
+	<td class="px-3 text-right text-xs tabular-nums text-zinc-400 whitespace-nowrap">
+		{#if torrent.state === "downloading" || torrent.state === "seeding"}
+			<span>{torrent.progress.active_peers ?? 0}</span>{#if torrent.progress.known_peers > 0}<span class="text-zinc-600">/{torrent.progress.known_peers}</span>{/if}
+		{/if}
 	</td>
 </tr>
