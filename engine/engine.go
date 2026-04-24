@@ -96,6 +96,7 @@ type EngineStats struct {
 	TotalTorrents   int          `json:"total_torrents"`
 	MaxActive       int          `json:"max_active"`
 	TotalPeers      int          `json:"total_peers"`
+	TotalKnownPeers int          `json:"total_known_peers"`
 	DHTNodes        int          `json:"dht_nodes"`
 	FreeSpace       int64        `json:"free_space"`
 	Config          EngineConfig `json:"config"`
@@ -606,6 +607,7 @@ func (e *Engine) GetStats() *EngineStats {
 	for _, s := range e.sessions {
 		snap := s.Snap()
 		stats.TotalPeers += int(snap.ActivePeers)
+		stats.TotalKnownPeers += snap.KnownPeers
 		stats.TotalDownloaded += snap.Downloaded
 		stats.TotalUploaded += snap.Uploaded
 		stats.TotalUpSpeed += snap.UpSpeed
