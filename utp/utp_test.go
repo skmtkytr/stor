@@ -3,6 +3,7 @@ package utp
 import (
 	"bytes"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -402,6 +403,44 @@ func TestConcurrentWrite(t *testing.T) {
 		if err := <-errc; err != nil {
 			t.Errorf("concurrent write error: %v", err)
 		}
+	}
+}
+
+// TestRemoteWindowUpdate verifies that updateRemoteWnd sets the field and
+// enforces the minimum-MSS floor.
+func TestRemoteWindowUpdate(t *testing.T) {
+	c := newConn(nil, nil, 1, 1, 0)
+
+	c.updateRemoteWnd(10 * mss)
+	c.mu.Lock()
+	got := c.remoteWnd
+	c.mu.Unlock()
+	if got != 10*mss {
+		t.Errorf("remoteWnd: want %d, got %d", 10*mss, got)
+	}
+
+	// A zero-window advertisement must be clamped to at least one MSS.
+	c.updateRemoteWnd(0)
+	c.mu.Lock()
+	got = c.remoteWnd
+	c.mu.Unlock()
+	if got != mss {
+		t.Errorf("zero-window clamp: want %d, got %d", mss, got)
+	}
+}
+
+// TestEffectiveCanSend verifies that effectiveCanSend is capped by the remote
+// window even when the LEDBAT cwnd would allow more.
+func TestEffectiveCanSend(t *testing.T) {
+	c := newConn(nil, nil, 1, 1, 0)
+	c.writeMu = &sync.Mutex{}
+
+	// Set a small remote window (1 MSS) but leave LEDBAT at its default.
+	c.updateRemoteWnd(uint32(mss))
+
+	avail := c.effectiveCanSend()
+	if avail > mss {
+		t.Errorf("effectiveCanSend %d exceeds remote window %d", avail, mss)
 	}
 }
 

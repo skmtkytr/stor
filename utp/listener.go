@@ -147,6 +147,7 @@ func (l *Listener) handlePacket(pkt *Packet, addr *net.UDPAddr) {
 
 	switch h.Type {
 	case StData:
+		c.updateRemoteWnd(h.WndSize)
 		c.mu.Lock()
 		// Advance ackNr monotonically (wrap-around safe).
 		if wrappingGT(h.SeqNr, c.ackNr) {
@@ -259,6 +260,7 @@ func DialTimeout(addr string, timeout time.Duration) (net.Conn, error) {
 			c.mu.Lock()
 			c.ackNr = pkt.Header.SeqNr
 			c.mu.Unlock()
+			c.updateRemoteWnd(pkt.Header.WndSize)
 			connected = true
 			break
 		}
@@ -300,6 +302,7 @@ func (c *Conn) clientReadLoop(udpConn *net.UDPConn) {
 		h := &pkt.Header
 		switch h.Type {
 		case StData:
+			c.updateRemoteWnd(h.WndSize)
 			c.mu.Lock()
 			if wrappingGT(h.SeqNr, c.ackNr) {
 				c.ackNr = h.SeqNr
