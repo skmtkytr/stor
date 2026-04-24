@@ -3,6 +3,7 @@ package utp
 import (
 	"bytes"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -402,6 +403,127 @@ func TestConcurrentWrite(t *testing.T) {
 		if err := <-errc; err != nil {
 			t.Errorf("concurrent write error: %v", err)
 		}
+	}
+}
+
+// TestDeliverInOrder verifies that out-of-order packets are buffered and
+// flushed in seqNr order once the missing segment arrives.
+func TestDeliverInOrder(t *testing.T) {
+	c := &Conn{
+		recvCh:     make(chan []byte, 16),
+		closeCh:    make(chan struct{}),
+		reorderBuf: make(map[uint16][]byte),
+	}
+	c.setFirstExpected(2)
+
+	// Deliver seqNr=3 first (out of order) — should be buffered, not delivered.
+	c.deliverInOrder(3, []byte("third"))
+	if len(c.recvCh) != 0 {
+		t.Fatal("out-of-order packet should not be delivered yet")
+	}
+
+	// Deliver seqNr=2 (in order) — should flush both 2 and 3.
+	c.deliverInOrder(2, []byte("second"))
+	if len(c.recvCh) != 2 {
+		t.Fatalf("expected 2 items in recvCh, got %d", len(c.recvCh))
+	}
+	first := <-c.recvCh
+	second := <-c.recvCh
+	if string(first) != "second" || string(second) != "third" {
+		t.Errorf("order wrong: got %q then %q", first, second)
+	}
+	if c.ackNr != 3 {
+		t.Errorf("ackNr should be 3 after flushing, got %d", c.ackNr)
+	}
+}
+
+// TestDeliverInOrderDuplicate verifies that duplicate packets are discarded.
+func TestDeliverInOrderDuplicate(t *testing.T) {
+	c := &Conn{
+		recvCh:     make(chan []byte, 16),
+		closeCh:    make(chan struct{}),
+		reorderBuf: make(map[uint16][]byte),
+	}
+	c.setFirstExpected(2)
+
+	c.deliverInOrder(2, []byte("hello"))
+	c.deliverInOrder(2, []byte("hello")) // duplicate
+	if len(c.recvCh) != 1 {
+		t.Errorf("duplicate should be discarded: got %d items", len(c.recvCh))
+	}
+}
+
+// TestDeliverInOrderGap verifies a gap of multiple missing seqNrs.
+func TestDeliverInOrderGap(t *testing.T) {
+	c := &Conn{
+		recvCh:     make(chan []byte, 16),
+		closeCh:    make(chan struct{}),
+		reorderBuf: make(map[uint16][]byte),
+	}
+	c.setFirstExpected(1)
+
+	// Buffer 3, 4, 5; then deliver 1, 2 — should flush all five in order.
+	c.deliverInOrder(3, []byte("c"))
+	c.deliverInOrder(5, []byte("e"))
+	c.deliverInOrder(4, []byte("d"))
+	if len(c.recvCh) != 0 {
+		t.Fatal("nothing should be delivered until seqNr=1 arrives")
+	}
+
+	c.deliverInOrder(1, []byte("a"))
+	if len(c.recvCh) != 1 {
+		t.Fatalf("expected 1 item after seqNr=1, got %d", len(c.recvCh))
+	}
+
+	// Delivering seqNr=2 flushes 2,3,4,5 — total 5 in recvCh (1 already there + 4).
+	c.deliverInOrder(2, []byte("b"))
+	if len(c.recvCh) != 5 {
+		t.Fatalf("expected 5 total items after flush, got %d", len(c.recvCh))
+	}
+	want := []string{"a", "b", "c", "d", "e"}
+	for _, w := range want {
+		got := <-c.recvCh
+		if string(got) != w {
+			t.Errorf("want %q, got %q", w, got)
+		}
+	}
+}
+
+// TestRemoteWindowUpdate verifies that updateRemoteWnd sets the field and
+// enforces the minimum-MSS floor.
+func TestRemoteWindowUpdate(t *testing.T) {
+	c := newConn(nil, nil, 1, 1, 0)
+
+	c.updateRemoteWnd(10 * mss)
+	c.mu.Lock()
+	got := c.remoteWnd
+	c.mu.Unlock()
+	if got != 10*mss {
+		t.Errorf("remoteWnd: want %d, got %d", 10*mss, got)
+	}
+
+	// A zero-window advertisement must be clamped to at least one MSS.
+	c.updateRemoteWnd(0)
+	c.mu.Lock()
+	got = c.remoteWnd
+	c.mu.Unlock()
+	if got != mss {
+		t.Errorf("zero-window clamp: want %d, got %d", mss, got)
+	}
+}
+
+// TestEffectiveCanSend verifies that effectiveCanSend is capped by the remote
+// window even when the LEDBAT cwnd would allow more.
+func TestEffectiveCanSend(t *testing.T) {
+	c := newConn(nil, nil, 1, 1, 0)
+	c.writeMu = &sync.Mutex{}
+
+	// Set a small remote window (1 MSS) but leave LEDBAT at its default.
+	c.updateRemoteWnd(uint32(mss))
+
+	avail := c.effectiveCanSend()
+	if avail > mss {
+		t.Errorf("effectiveCanSend %d exceeds remote window %d", avail, mss)
 	}
 }
 

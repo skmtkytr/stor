@@ -11,7 +11,10 @@ import (
 
 var errClosed = errors.New("utp: connection closed")
 
-const maxRetransmits = 4
+const (
+	maxRetransmits = 4
+	reorderBufMax  = 64 // max out-of-order packets held for reassembly
+)
 
 // sentPkt tracks an unacknowledged sent packet for retransmission.
 type sentPkt struct {
@@ -50,24 +53,36 @@ type Conn struct {
 	sendBufMu sync.Mutex
 	sendBuf   map[uint16]*sentPkt
 	rto       time.Duration
+
+	// In-order reassembly: packets that arrived out-of-order wait here until
+	// all preceding seqNrs have been delivered.
+	reorderBuf   map[uint16][]byte // seqNr → payload copy
+	nextExpected uint16            // next seqNr to deliver; also the cumulative ACK point
+	recvInited   bool              // true once nextExpected has been set
+
+	// remoteWnd is the receive-window advertised by the remote peer (bytes).
+	// Write must not have more than remoteWnd bytes in flight at once.
+	remoteWnd uint32
 }
 
 // newConn creates a uTP connection. The caller must call startRetransmitLoop
 // after setting c.writeMu to the correct mutex.
 func newConn(udp *net.UDPConn, remote *net.UDPAddr, connID, seqNr, ackNr uint16) *Conn {
 	return &Conn{
-		udpConn:  udp,
-		remote:   remote,
-		connID:   connID,
-		seqNr:    seqNr,
-		ackNr:    ackNr,
-		ledbat:   NewLEDBAT(),
-		recvCh:   make(chan []byte, 1024),
-		closeCh:  make(chan struct{}),
-		writeMu:  &sync.Mutex{}, // replaced by listener for server-side conns
-		finAcked: make(chan struct{}, 1),
-		sendBuf:  make(map[uint16]*sentPkt),
-		rto:      time.Second,
+		udpConn:    udp,
+		remote:     remote,
+		connID:     connID,
+		seqNr:      seqNr,
+		ackNr:      ackNr,
+		ledbat:     NewLEDBAT(),
+		recvCh:     make(chan []byte, 1024),
+		closeCh:    make(chan struct{}),
+		writeMu:    &sync.Mutex{}, // replaced by listener for server-side conns
+		finAcked:   make(chan struct{}, 1),
+		sendBuf:    make(map[uint16]*sentPkt),
+		rto:        time.Second,
+		reorderBuf: make(map[uint16][]byte),
+		remoteWnd:  256 * mss, // conservative default until first real advertisement
 	}
 }
 
@@ -122,8 +137,9 @@ func (c *Conn) Write(b []byte) (int, error) {
 
 	total := 0
 	for len(b) > 0 {
-		// Wait for congestion window to allow sending
-		canSend := c.ledbat.CanSend()
+		// Wait until both the LEDBAT congestion window and the remote receive
+		// window allow sending.
+		canSend := c.effectiveCanSend()
 		for canSend <= 0 {
 			c.mu.Lock()
 			wd := c.writeDeadline
@@ -136,7 +152,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 				return total, &net.OpError{Op: "write", Net: "utp", Err: errors.New("timeout")}
 			}
 			time.Sleep(time.Millisecond)
-			canSend = c.ledbat.CanSend()
+			canSend = c.effectiveCanSend()
 		}
 
 		chunkSize := mss
@@ -269,20 +285,103 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-// deliverData is called by the listener/muxer when a data packet arrives.
-// It copies the payload and blocks until delivered or connection is closed.
-func (c *Conn) deliverData(payload []byte) {
-	buf := make([]byte, len(payload))
-	copy(buf, payload)
-	select {
-	case c.recvCh <- buf:
-	case <-c.closeCh:
-		// Connection closed; discard.
+// setFirstExpected initialises the in-order reassembly state. Must be called
+// once, after the remote's initial seqNr is known (i.e. after SYN or SYN-ACK).
+func (c *Conn) setFirstExpected(seqNr uint16) {
+	c.mu.Lock()
+	c.nextExpected = seqNr
+	c.recvInited = true
+	c.mu.Unlock()
+}
+
+// deliverInOrder enforces in-order delivery of incoming data packets.
+// Out-of-order packets are buffered (up to reorderBufMax); duplicates are
+// discarded. ackNr is advanced to the highest consecutive seqNr delivered.
+func (c *Conn) deliverInOrder(seqNr uint16, payload []byte) {
+	var buf []byte
+	if len(payload) > 0 {
+		buf = make([]byte, len(payload))
+		copy(buf, payload)
 	}
+
+	c.mu.Lock()
+	if !c.recvInited {
+		// Fallback: initialise from the first packet seen.
+		c.nextExpected = seqNr
+		c.recvInited = true
+	}
+
+	var toDeliver [][]byte
+	switch {
+	case seqNr == c.nextExpected:
+		c.nextExpected++
+		if buf != nil {
+			toDeliver = append(toDeliver, buf)
+		}
+		// Flush any consecutive buffered packets.
+		for {
+			p, ok := c.reorderBuf[c.nextExpected]
+			if !ok {
+				break
+			}
+			delete(c.reorderBuf, c.nextExpected)
+			c.nextExpected++
+			if len(p) > 0 {
+				toDeliver = append(toDeliver, p)
+			}
+		}
+		c.ackNr = c.nextExpected - 1
+
+	case wrappingGT(seqNr, c.nextExpected):
+		// Out-of-order: buffer up to reorderBufMax; drop beyond that.
+		if len(c.reorderBuf) < reorderBufMax {
+			c.reorderBuf[seqNr] = buf
+		}
+		// ackNr stays at the last consecutive seqNr (no cumulative advance).
+		// else: duplicate or old seqNr — discard silently.
+	}
+	c.mu.Unlock()
+
+	for _, data := range toDeliver {
+		select {
+		case c.recvCh <- data:
+		case <-c.closeCh:
+			return
+		}
+	}
+}
+
+// updateRemoteWnd records the receive window advertised by the remote peer.
+// A minimum of one MSS is enforced to prevent a permanent zero-window deadlock.
+func (c *Conn) updateRemoteWnd(w uint32) {
+	if w < mss {
+		w = mss
+	}
+	c.mu.Lock()
+	c.remoteWnd = w
+	c.mu.Unlock()
+}
+
+// effectiveCanSend returns how many bytes can be sent now, capped by both
+// the LEDBAT congestion window and the remote receive window.
+func (c *Conn) effectiveCanSend() int {
+	cwndAvail := c.ledbat.CanSend()
+	flight := c.ledbat.FlightSize()
+	c.mu.Lock()
+	rw := int(c.remoteWnd)
+	c.mu.Unlock()
+	remoteAvail := rw - flight
+	if remoteAvail < cwndAvail {
+		return remoteAvail
+	}
+	return cwndAvail
 }
 
 // handleAck processes an incoming STATE (ACK) packet.
 func (c *Conn) handleAck(h *Header) {
+	// Update remote receive window from every ACK.
+	c.updateRemoteWnd(h.WndSize)
+
 	// TSDiff is receiver_time − sender_timestamp, giving the one-way delay.
 	// Only update LEDBAT when the sender populated TSDiff (non-zero).
 	if h.TSDiff != 0 {
