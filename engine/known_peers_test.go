@@ -136,7 +136,7 @@ func TestKnownPeersSnapStoppedPath(t *testing.T) {
 // TorrentRecord on session creation and written back by Record().
 func TestKnownPeersPersisted(t *testing.T) {
 	record := &TorrentRecord{ID: "test", State: StateSeeding, KnownPeers: 42}
-	s := NewSession(record, [20]byte{}, t.TempDir(), "", 0, download.DownloadConfig{}, 0, nil, nil)
+	s := NewSession(record, [20]byte{}, t.TempDir(), "", 0, download.DownloadConfig{}, 0, nil, nil, nil)
 
 	if got := int(s.knownPeers.Load()); got != 42 {
 		t.Errorf("restored knownPeers = %d, want 42", got)
