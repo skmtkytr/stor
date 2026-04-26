@@ -3,6 +3,19 @@
 	import { formatBytes, formatSpeed } from "$lib/format";
 
 	const seedingCount = $derived(torrents.list.filter((t) => t.state === "seeding").length);
+
+	const liveLabel: Record<string, string> = {
+		idle: "idle",
+		connecting: "connecting",
+		open: "live",
+		closed: "offline",
+	};
+	const liveColor: Record<string, string> = {
+		idle: "text-zinc-500",
+		connecting: "text-yellow-400",
+		open: "text-emerald-400",
+		closed: "text-red-400",
+	};
 </script>
 
 <footer class="flex items-center justify-between border-t border-zinc-800 bg-zinc-900 px-3 py-1 text-xs text-zinc-500">
@@ -27,6 +40,12 @@
 			</span>
 			<span>
 				DHT: <span class="text-zinc-400">{s.dht_nodes}</span>
+			</span>
+			<span title="Live event stream connection state">
+				<span class="text-zinc-600">·</span>
+				<span class={liveColor[torrents.liveState] ?? "text-zinc-500"}>
+					&bull; {liveLabel[torrents.liveState] ?? torrents.liveState}
+				</span>
 			</span>
 		</div>
 		<div class="flex items-center gap-4 tabular-nums">
