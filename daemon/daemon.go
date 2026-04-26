@@ -107,9 +107,16 @@ func New(eng *engine.Engine, cfg Config) *Daemon {
 		mux.Handle("GET /debug/pprof/trace", d.authMiddleware(http.HandlerFunc(pprof.Trace)))
 	}
 
-	// Web UI (no auth — static files only, API key entered in browser)
+	// Web UI (no auth — static files only, API key entered in browser).
+	// Filenames under /_app/immutable/ used to be content-hashed by Vite
+	// (auto cache-bust). We removed the hashes so ui/dist diffs stay
+	// readable in git, which means stable URLs may serve stale content
+	// after an upgrade. no-cache + must-revalidate forces conditional
+	// revalidation on every load — embed.FS exposes Last-Modified set to
+	// the binary's build time, so a fresh stor returns 200 with the new
+	// body and an unchanged stor returns 304 (cheap, ~200B).
 	uiFS, _ := fs.Sub(ui.FS, "dist")
-	mux.Handle("GET /", http.FileServerFS(uiFS))
+	mux.Handle("GET /", uiCacheControl(http.FileServerFS(uiFS)))
 
 	d.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
@@ -193,6 +200,43 @@ func (d *Daemon) logMiddleware(next http.Handler) http.Handler {
 			"duration_ms", duration.Milliseconds(),
 		)
 	})
+}
+
+// uiETag is a process-lifetime ETag for static UI assets. We can't derive
+// one from embed.FS (file mtimes are zero), so we use the daemon start
+// time formatted weakly. It is constant for the life of the process and
+// changes after restart (typically: after an upgrade), which is exactly
+// when browsers should re-fetch.
+var uiETag = fmt.Sprintf(`W/"%d"`, time.Now().UnixNano())
+
+// uiCacheControl wraps the static UI handler. We deliberately serve stable
+// (un-hashed) filenames under /_app/immutable/, so without revalidation a
+// browser that cached app.js from version A might keep using it after the
+// daemon upgrades to version B. Add a process-wide ETag so the browser
+// can revalidate cheaply (304 with no body) — without ETag/Last-Modified
+// the no-cache directive forces a full re-download on every reload, which
+// defeats the purpose.
+func uiCacheControl(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isUIPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		w.Header().Set("ETag", uiETag)
+		// If-None-Match honoured manually because http.FileServerFS over
+		// embed.FS does not (it drives 304s off Last-Modified, which is
+		// zero here).
+		if match := r.Header.Get("If-None-Match"); match != "" && match == uiETag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isUIPath(p string) bool {
+	return p == "/" || p == "/index.html" || strings.HasPrefix(p, "/_app/")
 }
 
 // handleAdd is a simplified endpoint for adding torrents (for Chrome extension).
