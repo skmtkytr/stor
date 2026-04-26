@@ -11,6 +11,7 @@
 	import StatusBar from "$lib/components/StatusBar.svelte";
 	import SettingsDialog from "$lib/components/SettingsDialog.svelte";
 	import Notifications from "$lib/components/Notifications.svelte";
+	import NotificationPanel from "$lib/components/NotificationPanel.svelte";
 
 	let settingsOpen = $state(false);
 	let activeFilter = $state("all");
@@ -54,4 +55,5 @@
 	</div>
 	<SettingsDialog bind:open={settingsOpen} />
 	<Notifications />
+	<NotificationPanel />
 {/if}

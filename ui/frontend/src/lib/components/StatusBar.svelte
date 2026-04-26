@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { torrents } from "$lib/stores/torrents.svelte";
+	import { notifications } from "$lib/stores/notifications.svelte";
 	import { formatBytes, formatSpeed } from "$lib/format";
 
 	const seedingCount = $derived(torrents.list.filter((t) => t.state === "seeding").length);
@@ -62,6 +63,29 @@
 				UL: <span class="text-emerald-300">{formatSpeed(s.total_up_speed)}</span>
 				<span class="text-zinc-500">({formatBytes(s.total_uploaded)})</span>
 			</span>
+			<button
+				class="relative ml-1 flex items-center text-zinc-400 hover:text-zinc-100"
+				onclick={() => notifications.togglePanel()}
+				title="Notifications"
+				aria-label="Open notifications panel ({notifications.unreadCount} unread)"
+			>
+				<svg
+					xmlns="http://www.w3.org/2000/svg"
+					viewBox="0 0 16 16"
+					fill="currentColor"
+					class="h-3.5 w-3.5"
+					aria-hidden="true"
+				>
+					<path d="M8 1.5a.75.75 0 0 0-.75.75v.516A4.5 4.5 0 0 0 3.5 7v2.293L2.22 10.57a.75.75 0 0 0 .53 1.28h10.5a.75.75 0 0 0 .53-1.28L12.5 9.293V7a4.5 4.5 0 0 0-3.75-4.234V2.25A.75.75 0 0 0 8 1.5zM6.5 13a1.5 1.5 0 1 0 3 0h-3z" />
+				</svg>
+				{#if notifications.unreadCount > 0}
+					<span
+						class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-red-500 px-1 text-[9px] font-semibold leading-none text-white"
+					>
+						{notifications.unreadCount > 99 ? "99+" : notifications.unreadCount}
+					</span>
+				{/if}
+			</button>
 		</div>
 	{:else}
 		<span>Connecting...</span>

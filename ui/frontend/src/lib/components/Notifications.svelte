@@ -17,7 +17,7 @@
 </script>
 
 <div class="pointer-events-none fixed bottom-12 right-4 z-50 flex w-80 flex-col gap-2">
-	{#each notifications.items as n (n.id)}
+	{#each notifications.toasts as n (n.id)}
 		<div
 			class="pointer-events-auto rounded border px-3 py-2 text-xs shadow-lg {kindStyles[n.kind] ??
 				kindStyles.info}"
@@ -34,7 +34,7 @@
 				</div>
 				<button
 					class="text-zinc-500 hover:text-zinc-200"
-					onclick={() => notifications.dismiss(n.id)}
+					onclick={() => notifications.dismissToast(n.id)}
 					aria-label="Dismiss notification"
 				>
 					&times;
