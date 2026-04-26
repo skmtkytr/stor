@@ -67,11 +67,12 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case ev, ok := <-sub.C:
-			if !ok {
-				// Bus closed (or our ctx ended and the bus closed our channel).
-				return
-			}
+		case <-sub.Done():
+			// Bus closed (engine shutdown). The subscription ctx-watcher
+			// also ends the sub on r.Context().Done(), so this case fires
+			// only when the bus terminates while a client is connected.
+			return
+		case ev := <-sub.C:
 			if err := writeSSEEvent(w, ev); err != nil {
 				return
 			}
