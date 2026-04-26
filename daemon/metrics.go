@@ -178,4 +178,48 @@ func (d *Daemon) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	writeMetric(w, "go_gc_duration_seconds_count",
 		"Total number of GC cycles.",
 		kindCounter, []sample{{value: float64(memStats.NumGC)}})
+
+	// Event bus counters (always present; values are zero until events are
+	// published or dropped). HELP/TYPE lines are emitted unconditionally so
+	// scrapers can register the metrics on first scrape.
+	d.writeEventMetrics(w)
+}
+
+// writeEventMetrics renders the event bus counters as Prometheus families.
+// Both families are always emitted, even when empty, so a scraper can
+// register them on the first scrape.
+func (d *Daemon) writeEventMetrics(w http.ResponseWriter) {
+	if d.counters == nil {
+		return
+	}
+	pub, drop := d.counters.snapshot()
+
+	pubSamples := make([]sample, 0, len(pub))
+	for typ, n := range pub {
+		pubSamples = append(pubSamples, sample{
+			labels: map[string]string{"type": string(typ)},
+			value:  float64(n),
+		})
+	}
+	// Stable order: sort by label value so output is deterministic.
+	sort.Slice(pubSamples, func(i, j int) bool {
+		return pubSamples[i].labels["type"] < pubSamples[j].labels["type"]
+	})
+	writeMetric(w, "stor_events_published_total",
+		"Total number of events published on the engine bus, labeled by type.",
+		kindCounter, pubSamples)
+
+	dropSamples := make([]sample, 0, len(drop))
+	for name, n := range drop {
+		dropSamples = append(dropSamples, sample{
+			labels: map[string]string{"subscriber": name},
+			value:  float64(n),
+		})
+	}
+	sort.Slice(dropSamples, func(i, j int) bool {
+		return dropSamples[i].labels["subscriber"] < dropSamples[j].labels["subscriber"]
+	})
+	writeMetric(w, "stor_events_dropped_total",
+		"Total number of events dropped because a subscriber's buffer was full, labeled by subscriber name.",
+		kindCounter, dropSamples)
 }

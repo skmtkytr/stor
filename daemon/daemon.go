@@ -10,24 +10,71 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/skmtkytr/stor/engine"
+	"github.com/skmtkytr/stor/events"
 	"github.com/skmtkytr/stor/ui"
 )
 
 // Daemon is the HTTP server that exposes the engine via JSON-RPC and serves the Web UI.
 type Daemon struct {
-	engine *engine.Engine
-	server *http.Server
-	cfg    Config
+	engine   *engine.Engine
+	server   *http.Server
+	cfg      Config
+	counters *eventCounters
+}
+
+// eventCounters tracks per-type publish and per-subscriber drop counts,
+// surfaced via /metrics. Hooks are installed on the engine bus in Start and
+// removed in Stop.
+type eventCounters struct {
+	mu        sync.RWMutex
+	published map[events.Type]int64
+	dropped   map[string]int64
+}
+
+func newEventCounters() *eventCounters {
+	return &eventCounters{
+		published: make(map[events.Type]int64),
+		dropped:   make(map[string]int64),
+	}
+}
+
+func (c *eventCounters) onPublish(ev events.Event) {
+	c.mu.Lock()
+	c.published[ev.Type]++
+	c.mu.Unlock()
+}
+
+func (c *eventCounters) onDrop(sub *events.Subscription, _ events.Event) {
+	c.mu.Lock()
+	c.dropped[sub.Name()]++
+	c.mu.Unlock()
+}
+
+// snapshot returns a stable copy for /metrics rendering.
+func (c *eventCounters) snapshot() (map[events.Type]int64, map[string]int64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	pub := make(map[events.Type]int64, len(c.published))
+	for k, v := range c.published {
+		pub[k] = v
+	}
+	drop := make(map[string]int64, len(c.dropped))
+	for k, v := range c.dropped {
+		drop[k] = v
+	}
+	return pub, drop
 }
 
 // New creates a new daemon.
 func New(eng *engine.Engine, cfg Config) *Daemon {
 	d := &Daemon{
-		engine: eng,
-		cfg:    cfg,
+		engine:   eng,
+		cfg:      cfg,
+		counters: newEventCounters(),
 	}
 
 	mux := http.NewServeMux()
@@ -38,6 +85,10 @@ func New(eng *engine.Engine, cfg Config) *Daemon {
 	mux.Handle("POST /api/rpc", d.authMiddleware(rpc))
 	mux.Handle("POST /api/add", d.authMiddleware(http.HandlerFunc(d.handleAdd)))
 	mux.Handle("GET /api/torrents", d.authMiddleware(http.HandlerFunc(d.handleListTorrents)))
+	// SSE event stream. Long-lived; chunked write timeout would kill it,
+	// so the server below sets WriteTimeout to 0 for this path implicitly
+	// via the global handler — see comment near http.Server below.
+	mux.Handle("GET /api/events", d.authMiddleware(http.HandlerFunc(d.handleEvents)))
 
 	// Observability (opt-in via config; always behind API key auth).
 	// /metrics serves Prometheus text format; /debug/pprof/* serves the
@@ -74,14 +125,33 @@ func New(eng *engine.Engine, cfg Config) *Daemon {
 
 // Start starts the HTTP server.
 func (d *Daemon) Start() error {
+	d.installEventHooks()
 	return d.server.ListenAndServe()
 }
 
 // Stop gracefully shuts down the server.
 func (d *Daemon) Stop() error {
+	d.uninstallEventHooks()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return d.server.Shutdown(ctx)
+}
+
+// installEventHooks wires the event-counter hooks into the engine bus.
+func (d *Daemon) installEventHooks() {
+	if d.engine == nil || d.counters == nil {
+		return
+	}
+	d.engine.Bus().SetHooks(d.counters.onPublish, d.counters.onDrop)
+}
+
+// uninstallEventHooks clears the hooks so the daemon's counters do not
+// outlive the daemon itself.
+func (d *Daemon) uninstallEventHooks() {
+	if d.engine == nil {
+		return
+	}
+	d.engine.Bus().SetHooks(nil, nil)
 }
 
 // statusWriter wraps http.ResponseWriter to capture the status code.
@@ -94,6 +164,11 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.code = code
 	w.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap exposes the underlying ResponseWriter so http.NewResponseController
+// can find Flusher / Hijacker / SetWriteDeadline implementations on it.
+// Without this, SSE handlers see "feature not supported" from rc.Flush().
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // logMiddleware logs every HTTP request with method, path, status, and duration.
 func (d *Daemon) logMiddleware(next http.Handler) http.Handler {
