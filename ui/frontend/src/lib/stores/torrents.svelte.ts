@@ -147,16 +147,12 @@ class TorrentStore {
 				);
 			}),
 		);
-		this.busUnsubs.push(
-			bus.on("torrent.stalled", (ev) => {
-				const t = this.list.find((x) => x.id === ev.torrent_id);
-				notifications.push(
-					"warn",
-					"Torrent stalled",
-					`${t?.name ?? ev.torrent_id ?? ""} (${ev.payload.duration_seconds}s with no peers)`,
-				);
-			}),
-		);
+		// torrent.stalled is intentionally NOT surfaced to the activity log:
+		// the current detector treats "no peer ever connected (warmup)" the
+		// same as "peers all dropped (real stall)", so newly added torrents
+		// reliably trigger a false alarm 30 seconds in. The bus event still
+		// flows to SSE / Prometheus consumers — only the user-facing toast
+		// is suppressed until the detector grows a proper warmup gate.
 		this.busUnsubs.push(
 			bus.on("storage.moved", (ev) => {
 				const t = this.list.find((x) => x.id === ev.torrent_id);
