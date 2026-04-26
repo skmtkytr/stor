@@ -92,6 +92,109 @@ type Session struct {
 	// Production code leaves this nil; tests inject a stub to drive the
 	// failure-event code path without a live DHT.
 	dhtGetPeersFn func([20]byte) ([]string, error)
+
+	// completedFiles tracks per-file FileCompleted emission so the bus
+	// receives at most one event per file. Keyed by file index in
+	// info.Files (or 0 for single-file torrents). Only mutated from the
+	// download goroutine via OnPiece, but reads happen under s.mu.
+	completedFiles map[int]bool
+}
+
+// fileRangeEntry caches the [firstPiece, lastPiece] piece range that covers a
+// file plus its display metadata. Used by emitFileCompleted to avoid a fresh
+// torrent walk on every piece completion.
+type fileRangeEntry struct {
+	index      int
+	path       string
+	size       int64
+	firstPiece int
+	lastPiece  int
+}
+
+// computeFileRanges returns one entry per file (single-file torrents
+// produce a single entry covering the whole torrent). Pure / read-only.
+func computeFileRanges(tf *torrent.TorrentFile) []fileRangeEntry {
+	if tf == nil || tf.Info.PieceLength <= 0 {
+		return nil
+	}
+	pieceLen := tf.Info.PieceLength
+	numPieces := len(tf.Info.PieceHashes)
+	if numPieces <= 0 {
+		return nil
+	}
+
+	rangeFor := func(start, length int64) (int, int) {
+		if length <= 0 {
+			// Zero-length file: clamp to a single piece for safety.
+			first := int(start / pieceLen)
+			if first >= numPieces {
+				first = numPieces - 1
+			}
+			return first, first
+		}
+		first := int(start / pieceLen)
+		last := int((start + length - 1) / pieceLen)
+		if last >= numPieces {
+			last = numPieces - 1
+		}
+		return first, last
+	}
+
+	if len(tf.Info.Files) == 0 {
+		first, last := rangeFor(0, tf.Info.Length)
+		return []fileRangeEntry{{
+			index: 0, path: tf.Info.Name, size: tf.Info.Length,
+			firstPiece: first, lastPiece: last,
+		}}
+	}
+
+	out := make([]fileRangeEntry, 0, len(tf.Info.Files))
+	var offset int64
+	for i, f := range tf.Info.Files {
+		first, last := rangeFor(offset, f.Length)
+		out = append(out, fileRangeEntry{
+			index:      i,
+			path:       filepath.ToSlash(filepath.Join(f.Path...)),
+			size:       f.Length,
+			firstPiece: first,
+			lastPiece:  last,
+		})
+		offset += f.Length
+	}
+	return out
+}
+
+// collectNewlyCompletedFiles inspects the supplied piece-completion
+// bitfield, marks any fully-covered files in s.completedFiles, and returns
+// the entries that just transitioned from incomplete → complete. Caller
+// must hold s.mu (write). The returned slice is freshly allocated so the
+// caller can publish events on the bus *after* releasing the lock.
+func (s *Session) collectNewlyCompletedFiles(ranges []fileRangeEntry, bf peer.Bitfield) []fileRangeEntry {
+	if len(ranges) == 0 || len(bf) == 0 {
+		return nil
+	}
+	var done []fileRangeEntry
+	for _, fr := range ranges {
+		if s.completedFiles[fr.index] {
+			continue
+		}
+		complete := true
+		for p := fr.firstPiece; p <= fr.lastPiece; p++ {
+			if !bf.HasPiece(p) {
+				complete = false
+				break
+			}
+		}
+		if !complete {
+			continue
+		}
+		if s.completedFiles == nil {
+			s.completedFiles = make(map[int]bool, len(ranges))
+		}
+		s.completedFiles[fr.index] = true
+		done = append(done, fr)
+	}
+	return done
 }
 
 // NewSession creates a session from a persisted record.
@@ -506,6 +609,20 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		haveBitfield = peer.Bitfield(s.record.Bitfield)
 		slog.Info("resume: using persisted bitfield", "id", s.record.ID, "total", numPieces)
 	} else {
+		// If a stored bitfield exists but doesn't match expectations, the
+		// fastresume artefact is rejected and we fall back to verifying
+		// from disk. Emit a distinct event so observers (UI, metrics) can
+		// distinguish a clean first-run verify from a recovery verify.
+		if s.bus != nil && len(s.record.Bitfield) > 0 {
+			s.bus.Publish(events.Event{
+				Type:      events.TypeFastresumeRejected,
+				TorrentID: s.record.ID,
+				Payload: events.FastresumeRejectedPayload{
+					Reason: "bitfield size mismatch",
+					Detail: fmt.Sprintf("have=%d expected=%d", len(s.record.Bitfield), (numPieces+7)/8),
+				},
+			})
+		}
 		s.setState(StateVerifying)
 
 		bf, verified, _ := storage.VerifyPieces(savePath, s.tf, func(checked, total int) {
@@ -642,6 +759,32 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	// Priority changes take effect on next pause→resume; we don't hot-requeue.
 	skipMask := computeSkipMaskFromRecord(s.tf, s.record.FilePriorities)
 
+	// Pre-compute file→piece ranges once so OnPiece can emit FileCompleted
+	// events without a fresh torrent walk per piece.
+	fileRanges := computeFileRanges(s.tf)
+	// Reset completedFiles for this download lifecycle. A resumed torrent
+	// could have already-complete files in its persisted bitfield; emit
+	// events for those during the first OnPiece pass via emitFileCompleted
+	// below (we seed completedFiles from the resume bitfield to *suppress*
+	// the events — the user already knows about them).
+	s.mu.Lock()
+	s.completedFiles = make(map[int]bool, len(fileRanges))
+	if haveBitfield != nil {
+		for _, fr := range fileRanges {
+			complete := true
+			for p := fr.firstPiece; p <= fr.lastPiece; p++ {
+				if !haveBitfield.HasPiece(p) {
+					complete = false
+					break
+				}
+			}
+			if complete {
+				s.completedFiles[fr.index] = true
+			}
+		}
+	}
+	s.mu.Unlock()
+
 	dlErr := download.DownloadWithParams(ctx, download.DownloadParams{
 		TF:          s.tf,
 		PeerID:      s.peerID,
@@ -664,6 +807,13 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 			have := popCount(uploadBF)
 			bus := s.bus
 			id := s.record.ID
+			// Determine which files (if any) just transitioned to fully
+			// downloaded by this piece. We mutate s.completedFiles under
+			// s.mu so concurrent readers (Files, future API) see a
+			// consistent view, but publish on the bus *after* releasing
+			// the lock to avoid the well-known "publish under lock"
+			// deadlock.
+			newlyDone := s.collectNewlyCompletedFiles(fileRanges, uploadBF)
 			s.mu.Unlock()
 			up.SetPiece(index)
 			if bus != nil {
@@ -676,6 +826,17 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 						Total: numPieces,
 					},
 				})
+				for _, fr := range newlyDone {
+					bus.Publish(events.Event{
+						Type:      events.TypeFileCompleted,
+						TorrentID: id,
+						Payload: events.FileCompletedPayload{
+							Index: fr.index,
+							Path:  fr.path,
+							Size:  fr.size,
+						},
+					})
+				}
 			}
 		},
 		OnPeerMgr: func(pm *download.PeerManager) {
@@ -709,6 +870,16 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		slog.Info("moving completed download", "id", s.record.ID, "from", savePath, "to", finalPath)
 		if err := os.Rename(savePath, finalPath); err != nil {
 			return fmt.Errorf("session: move to download dir: %w", err)
+		}
+		if s.bus != nil {
+			s.bus.Publish(events.Event{
+				Type:      events.TypeStorageMoved,
+				TorrentID: s.record.ID,
+				Payload: events.StorageMovedPayload{
+					From: savePath,
+					To:   finalPath,
+				},
+			})
 		}
 		savePath = finalPath
 		// Recreate uploader with new path

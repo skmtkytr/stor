@@ -113,7 +113,10 @@ export type EventType =
 	| "metadata_attempt.failed"
 	| "dht.lookup_failed"
 	| "torrent.stalled"
-	| "torrent.stall_cleared";
+	| "torrent.stall_cleared"
+	| "storage.moved"
+	| "torrent.fastresume_rejected"
+	| "file.completed";
 
 export interface TorrentAddedPayload {
 	source: string;
@@ -196,6 +199,22 @@ export interface StallClearedPayload {
 	stalled_for_seconds: number;
 }
 
+export interface StorageMovedPayload {
+	from: string;
+	to: string;
+}
+
+export interface FastresumeRejectedPayload {
+	reason: string;
+	detail?: string;
+}
+
+export interface FileCompletedPayload {
+	index: number;
+	path: string;
+	size: number;
+}
+
 export interface EventPayloadMap {
 	"torrent.added": TorrentAddedPayload;
 	"torrent.removed": TorrentRemovedPayload;
@@ -224,6 +243,9 @@ export interface EventPayloadMap {
 	"dht.lookup_failed": DHTLookupFailedPayload;
 	"torrent.stalled": StalledPayload;
 	"torrent.stall_cleared": StallClearedPayload;
+	"storage.moved": StorageMovedPayload;
+	"torrent.fastresume_rejected": FastresumeRejectedPayload;
+	"file.completed": FileCompletedPayload;
 }
 
 export interface Event<T extends EventType = EventType> {

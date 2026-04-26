@@ -142,9 +142,11 @@ func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {
 	}
 	if initMsg != nil {
 		if err := initMsg.Write(w); err != nil {
+			client.SetDisconnectReason(classifyDownloadError(err))
 			return
 		}
 		if err := w.Flush(); err != nil {
+			client.SetDisconnectReason(classifyDownloadError(err))
 			return
 		}
 	}
@@ -159,6 +161,7 @@ func (u *Uploader) serveLoop(c *Client) {
 		mw, err := storage.NewMultiFileWriter(u.filePath, u.tf)
 		if err != nil {
 			slog.Error("upload: open multi-file dir failed", "path", u.filePath, "error", err)
+			c.SetDisconnectReason("storage_open_failed")
 			return
 		}
 		defer func() { _ = mw.Close() }()
@@ -167,6 +170,7 @@ func (u *Uploader) serveLoop(c *Client) {
 		f, err := os.Open(u.filePath)
 		if err != nil {
 			slog.Error("upload: open file failed", "path", u.filePath, "error", err)
+			c.SetDisconnectReason("storage_open_failed")
 			return
 		}
 		defer func() { _ = f.Close() }()
@@ -179,6 +183,7 @@ func (u *Uploader) serveLoop(c *Client) {
 	for {
 		msg, err := peer.ReadMessage(c.r)
 		if err != nil {
+			c.SetDisconnectReason(classifyDownloadError(err))
 			return // peer disconnected
 		}
 		if msg == nil {
@@ -209,6 +214,7 @@ func (u *Uploader) serveLoop(c *Client) {
 			index, begin, length, err := peer.ParseRequest(msg.Payload)
 			if err != nil {
 				slog.Debug("upload: bad request", "addr", c.Addr, "error", err)
+				c.SetDisconnectReason("protocol_error: bad request: " + err.Error())
 				return
 			}
 
@@ -216,10 +222,12 @@ func (u *Uploader) serveLoop(c *Client) {
 			numPieces := uint32(len(u.tf.Info.PieceHashes))
 			if index >= numPieces {
 				slog.Debug("upload: invalid piece index", "addr", c.Addr, "index", index, "numPieces", numPieces)
+				c.SetDisconnectReason("protocol_error: invalid piece index")
 				return
 			}
 			if length > 32*1024 { // max 32KiB per block
 				slog.Debug("upload: request too large", "addr", c.Addr, "length", length)
+				c.SetDisconnectReason("protocol_error: request too large")
 				return
 			}
 
@@ -227,6 +235,7 @@ func (u *Uploader) serveLoop(c *Client) {
 			offset := int64(index)*pieceLen + int64(begin)
 			if offset < 0 || offset+int64(length) > totalSize {
 				slog.Debug("upload: request out of bounds", "addr", c.Addr)
+				c.SetDisconnectReason("protocol_error: request out of bounds")
 				return
 			}
 
@@ -234,15 +243,18 @@ func (u *Uploader) serveLoop(c *Client) {
 			n, err := r.ReadAt(block, offset)
 			if err != nil || n != int(length) {
 				slog.Debug("upload: read failed", "addr", c.Addr, "error", err)
+				c.SetDisconnectReason("read_failed")
 				return
 			}
 
 			// Send piece
 			pieceMsg := peer.NewPieceMessage(index, begin, block)
 			if err := pieceMsg.Write(c.w); err != nil {
+				c.SetDisconnectReason(classifyDownloadError(err))
 				return
 			}
 			if err := c.w.Flush(); err != nil {
+				c.SetDisconnectReason(classifyDownloadError(err))
 				return
 			}
 
