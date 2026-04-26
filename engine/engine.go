@@ -13,6 +13,7 @@ import (
 
 	"github.com/skmtkytr/stor/dht"
 	"github.com/skmtkytr/stor/download"
+	"github.com/skmtkytr/stor/events"
 	"github.com/skmtkytr/stor/peer"
 	"github.com/skmtkytr/stor/storage"
 	"github.com/skmtkytr/stor/torrent"
@@ -123,7 +124,15 @@ type Engine struct {
 
 	// Tracks running session goroutines so Stop can drain them.
 	sessionWG sync.WaitGroup
+
+	// Observation event bus. Always non-nil.
+	bus *events.Bus
 }
+
+// Bus returns the engine's event bus. Subscribers receive observation events
+// (state transitions, peer connect/disconnect, tracker replies, piece
+// completion, etc.) until they cancel their context or the engine stops.
+func (e *Engine) Bus() *events.Bus { return e.bus }
 
 // startSession launches a session, tracking it so Stop can wait for it.
 func (e *Engine) startSession(s *Session) {
@@ -188,6 +197,7 @@ func New(cfg Config) (*Engine, error) {
 		dialSem:  dialSem,
 		ctx:      ctx,
 		cancel:   cancel,
+		bus:      events.New(),
 	}
 
 	return e, nil
@@ -309,6 +319,8 @@ func (e *Engine) Stop() error {
 	e.sessionWG.Wait()
 
 	e.saveState()
+	// Close the bus after sessions drain so any final emissions land.
+	e.bus.Close()
 	slog.Info("engine stopped, state saved")
 	return nil
 }
