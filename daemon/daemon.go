@@ -107,9 +107,16 @@ func New(eng *engine.Engine, cfg Config) *Daemon {
 		mux.Handle("GET /debug/pprof/trace", d.authMiddleware(http.HandlerFunc(pprof.Trace)))
 	}
 
-	// Web UI (no auth — static files only, API key entered in browser)
+	// Web UI (no auth — static files only, API key entered in browser).
+	// Filenames under /_app/immutable/ used to be content-hashed by Vite
+	// (auto cache-bust). We removed the hashes so ui/dist diffs stay
+	// readable in git, which means stable URLs may serve stale content
+	// after an upgrade. no-cache + must-revalidate forces conditional
+	// revalidation on every load — embed.FS exposes Last-Modified set to
+	// the binary's build time, so a fresh stor returns 200 with the new
+	// body and an unchanged stor returns 304 (cheap, ~200B).
 	uiFS, _ := fs.Sub(ui.FS, "dist")
-	mux.Handle("GET /", http.FileServerFS(uiFS))
+	mux.Handle("GET /", uiCacheControl(http.FileServerFS(uiFS)))
 
 	d.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
@@ -192,6 +199,22 @@ func (d *Daemon) logMiddleware(next http.Handler) http.Handler {
 			"status", sw.code,
 			"duration_ms", duration.Milliseconds(),
 		)
+	})
+}
+
+// uiCacheControl wraps the static UI handler. It forces conditional
+// revalidation on every request because we deliberately serve stable
+// (un-hashed) filenames under /_app/immutable/ — without revalidation,
+// a browser that cached app.js from version A might keep using it after
+// the daemon upgrades to version B and cause subtle breakage. Revalidation
+// is cheap: embed.FS exposes the binary's build time as Last-Modified, so
+// an unchanged stor responds 304 with no body.
+func uiCacheControl(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/_app/") || r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

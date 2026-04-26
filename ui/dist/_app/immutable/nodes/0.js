@@ -1,0 +1,1 @@
+import{$ as e,B as t,C as n,L as r,N as i,S as a,_ as o,h as s}from"../chunks/index-client.js";import"../chunks/disclose-version.js";var c=e({prerender:()=>!0,ssr:()=>!1});function l(e,c){var l=n();s(`12qhfyh`,e=>{i(()=>{r.title=`stor`})}),o(t(l),()=>c.children),a(e,l)}export{l as component,c as universal};
