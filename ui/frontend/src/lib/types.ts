@@ -46,6 +46,9 @@ export interface ProgressSnap {
 	known_peers: number;
 	total_pieces: number;
 	done_pieces: number;
+	// Most recent tracker failure (Deluge status_message parity). Empty
+	// when the most recent announce on any tracker succeeded.
+	last_tracker_error?: string;
 }
 
 export interface FileEntry {

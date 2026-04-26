@@ -38,6 +38,13 @@ type Announcer struct {
 	// Observation. May be nil (e.g. in tests that build an Announcer directly).
 	bus       *events.Bus
 	torrentID string
+
+	// onTrackerError is invoked once per tracker per announce round when the
+	// announce fails. onTrackerOK is invoked when at least one tracker
+	// succeeded. Used by Session to maintain a per-torrent last-error string
+	// surfaced via Snap (Deluge status_message parity).
+	onTrackerError func(tracker, errMsg string)
+	onTrackerOK    func()
 }
 
 // AnnounceConfig holds parameters for creating an Announcer.
@@ -56,6 +63,10 @@ type AnnounceConfig struct {
 	// Observation hooks. Bus may be nil; TorrentID is included on every emitted event.
 	Bus       *events.Bus
 	TorrentID string
+
+	// Optional per-tracker status callbacks (Deluge status_message parity).
+	OnTrackerError func(tracker, errMsg string)
+	OnTrackerOK    func()
 }
 
 // NewAnnouncer creates a new announcer.
@@ -65,18 +76,20 @@ func NewAnnouncer(cfg AnnounceConfig) *Announcer {
 		dhtInterval = defaultDHTInterval
 	}
 	return &Announcer{
-		tf:          cfg.TF,
-		peerID:      cfg.PeerID,
-		port:        cfg.Port,
-		numWant:     cfg.NumWant,
-		dht:         cfg.DHT,
-		dhtInterval: dhtInterval,
-		dhtLookupFn: cfg.DHTLookupFn,
-		peerSink:    cfg.PeerSink,
-		downloaded:  cfg.Downloaded,
-		left:        cfg.Left,
-		bus:         cfg.Bus,
-		torrentID:   cfg.TorrentID,
+		tf:             cfg.TF,
+		peerID:         cfg.PeerID,
+		port:           cfg.Port,
+		numWant:        cfg.NumWant,
+		dht:            cfg.DHT,
+		dhtInterval:    dhtInterval,
+		dhtLookupFn:    cfg.DHTLookupFn,
+		peerSink:       cfg.PeerSink,
+		downloaded:     cfg.Downloaded,
+		left:           cfg.Left,
+		bus:            cfg.Bus,
+		torrentID:      cfg.TorrentID,
+		onTrackerError: cfg.OnTrackerError,
+		onTrackerOK:    cfg.OnTrackerOK,
 	}
 }
 
@@ -204,6 +217,9 @@ func (a *Announcer) announce(ctx context.Context, event tracker.Event) time.Dura
 						},
 					})
 				}
+				if a.onTrackerError != nil {
+					a.onTrackerError(tr, err.Error())
+				}
 				return
 			}
 			mu.Lock()
@@ -215,6 +231,9 @@ func (a *Announcer) announce(ctx context.Context, event tracker.Event) time.Dura
 				}
 			}
 			mu.Unlock()
+			if a.onTrackerOK != nil {
+				a.onTrackerOK()
+			}
 			// Emit reply outside the mu critical section.
 			if a.bus != nil && len(resp.Peers) > 0 {
 				a.bus.Publish(events.Event{

@@ -113,6 +113,15 @@
 						{torrent.error || "-"}
 					</span>
 				</div>
+				<div class="flex justify-between gap-4">
+					<span class="text-zinc-500">Tracker</span>
+					<span
+						class="truncate {p.last_tracker_error ? 'text-yellow-400' : 'text-emerald-400'}"
+						title={p.last_tracker_error ?? "all trackers OK"}
+					>
+						{p.last_tracker_error || "OK"}
+					</span>
+				</div>
 			</div>
 		{:else if active === "details"}
 			<div class="space-y-1.5 px-4 py-3 text-xs">

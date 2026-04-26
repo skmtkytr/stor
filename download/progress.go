@@ -134,6 +134,12 @@ type ProgressSnap struct {
 	TotalPieces   int     `json:"total_pieces"`
 	DonePieces    int     `json:"done_pieces"`
 	VerifyPercent float64 `json:"verify_percent,omitempty"`
+	// LastTrackerError is the most recent tracker failure message since the
+	// last successful announce on any tracker. Empty when the most recent
+	// announce succeeded (or none has happened yet). Mirrors Deluge's
+	// per-torrent status_message pattern: errors stay attached to the
+	// torrent so the user can inspect them in the detail pane.
+	LastTrackerError string `json:"last_tracker_error,omitempty"`
 }
 
 // Snap returns a serializable snapshot of the current progress.
