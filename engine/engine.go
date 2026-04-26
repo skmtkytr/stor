@@ -467,11 +467,14 @@ func (e *Engine) PauseTorrent(id string) error {
 	}
 
 	slog.Info("pausing torrent", "id", id)
-	s.Pause()
+	// Emit the *requested* event at the API entry point. The *confirmed*
+	// TypeTorrentPaused fires later from setState() once the state actually
+	// transitions to StatePaused (Deluge `on_alert_torrent_paused` parity).
 	e.bus.Publish(events.Event{
-		Type:      events.TypeTorrentPaused,
+		Type:      events.TypeTorrentPauseRequested,
 		TorrentID: id,
 	})
+	s.Pause()
 	e.saveState()
 	e.startQueued()
 	return nil
@@ -493,17 +496,19 @@ func (e *Engine) ResumeTorrent(id string) error {
 	}
 
 	slog.Info("resuming torrent", "id", id, "previous_state", r.State)
+	// Emit the *requested* event at the API entry point. The *confirmed*
+	// TypeTorrentResumed fires later from setState() once the state actually
+	// transitions out of StatePaused into StateDownloading (Deluge
+	// `on_alert_torrent_resumed` parity).
+	e.bus.Publish(events.Event{
+		Type:      events.TypeTorrentResumeRequested,
+		TorrentID: id,
+	})
+
 	s.mu.Lock()
 	s.record.Error = ""
 	s.mu.Unlock()
 	s.setState(StateAdding)
-
-	// Emit TypeTorrentResumed before launching the session so subscribers see
-	// it ahead of any state transitions the new session goroutine emits.
-	e.bus.Publish(events.Event{
-		Type:      events.TypeTorrentResumed,
-		TorrentID: id,
-	})
 
 	if e.activeCount() < e.cfg.MaxActive {
 		e.startSession(s)

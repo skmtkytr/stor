@@ -98,6 +98,8 @@ export type EventType =
 	| "torrent.removed"
 	| "torrent.paused"
 	| "torrent.resumed"
+	| "torrent.pause_requested"
+	| "torrent.resume_requested"
 	| "torrent.state_changed"
 	| "metadata.fetched"
 	| "tracker.reply"
@@ -197,8 +199,17 @@ export interface StallClearedPayload {
 export interface EventPayloadMap {
 	"torrent.added": TorrentAddedPayload;
 	"torrent.removed": TorrentRemovedPayload;
+	// Confirmed: emitted AFTER state actually transitions (Deluge alert parity).
+	// Receiving this means the engine has acknowledged the new state, not just
+	// that the API was called. The naive "API entry" semantics live in the
+	// *_requested events below.
 	"torrent.paused": Record<string, never>;
 	"torrent.resumed": Record<string, never>;
+	// Requested: emitted at API entry as soon as PauseTorrent / ResumeTorrent
+	// is called. Use these for optimistic UI updates; reconcile with the
+	// confirmed event for authoritative state.
+	"torrent.pause_requested": Record<string, never>;
+	"torrent.resume_requested": Record<string, never>;
 	"torrent.state_changed": StateChangedPayload;
 	"metadata.fetched": MetadataFetchedPayload;
 	"tracker.reply": AnnounceReplyPayload;

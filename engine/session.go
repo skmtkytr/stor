@@ -113,11 +113,22 @@ func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir, tmpDir stri
 	return s
 }
 
-// setState mutates s.record.State and, if it actually changes, publishes a
-// TypeStateChanged event after releasing the lock. Centralising state
-// transitions through this helper guarantees we never emit while holding
-// s.mu (a known deadlock source: subscribers running on the same goroutine
-// would re-enter Session methods).
+// setState mutates s.record.State and, if it actually changes, publishes
+// events after releasing the lock. Centralising state transitions through
+// this helper guarantees we never emit while holding s.mu (a known deadlock
+// source: subscribers running on the same goroutine would re-enter Session
+// methods).
+//
+// Always emits TypeStateChanged on a real transition. Additionally emits
+// the *confirmation* events:
+//   - TypeTorrentPaused when entering StatePaused from any other state
+//   - TypeTorrentResumed on the first transition out of StatePaused
+//     (typically paused → adding, since ResumeTorrent re-queues through
+//     StateAdding before reaching downloading)
+//
+// These complement the *requested* events emitted at API entry points
+// (PauseTorrent / ResumeTorrent in engine.go) — Deluge alert parity.
+// No-op self-transitions (newState == oldState) emit nothing.
 func (s *Session) setState(newState State) {
 	s.mu.Lock()
 	old := s.record.State
@@ -130,14 +141,30 @@ func (s *Session) setState(newState State) {
 	id := s.record.ID
 	s.mu.Unlock()
 
-	if bus != nil {
+	if bus == nil {
+		return
+	}
+
+	bus.Publish(events.Event{
+		Type:      events.TypeStateChanged,
+		TorrentID: id,
+		Payload: events.StateChangedPayload{
+			From: string(old),
+			To:   string(newState),
+		},
+	})
+
+	// Confirmation events: fire AFTER state has actually flipped.
+	switch {
+	case newState == StatePaused && old != StatePaused:
 		bus.Publish(events.Event{
-			Type:      events.TypeStateChanged,
+			Type:      events.TypeTorrentPaused,
 			TorrentID: id,
-			Payload: events.StateChangedPayload{
-				From: string(old),
-				To:   string(newState),
-			},
+		})
+	case old == StatePaused && newState != StatePaused:
+		bus.Publish(events.Event{
+			Type:      events.TypeTorrentResumed,
+			TorrentID: id,
 		})
 	}
 }

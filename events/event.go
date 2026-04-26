@@ -29,6 +29,12 @@ const (
 	TypeDHTLookupFailed       Type = "dht.lookup_failed"
 	TypeStalled               Type = "torrent.stalled"
 	TypeStallCleared          Type = "torrent.stall_cleared"
+	// Request-vs-confirm split (Deluge parity):
+	//   *Requested = API was called (intent recorded)
+	//   Paused/Resumed = state actually transitioned (confirmation)
+	// Both are emitted; consumers can pick which semantic they need.
+	TypeTorrentPauseRequested  Type = "torrent.pause_requested"
+	TypeTorrentResumeRequested Type = "torrent.resume_requested"
 )
 
 // Event is a single observation published to the bus.
