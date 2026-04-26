@@ -98,6 +98,12 @@ type Session struct {
 	// info.Files (or 0 for single-file torrents). Only mutated from the
 	// download goroutine via OnPiece, but reads happen under s.mu.
 	completedFiles map[int]bool
+
+	// lastTrackerError mirrors Deluge's status_message: it holds the most
+	// recent tracker failure since the last successful announce. Cleared
+	// the moment any tracker succeeds. Read by Snap; written by the
+	// Announcer's per-tracker callbacks. Protected by s.mu.
+	lastTrackerError string
 }
 
 // fileRangeEntry caches the [firstPiece, lastPiece] piece range that covers a
@@ -308,12 +314,14 @@ func (s *Session) Snap() download.ProgressSnap {
 	u := s.uploader
 	state := s.record.State
 	totalBytes := s.record.TotalBytes
+	lastTrackerErr := s.lastTrackerError
 	s.mu.RUnlock()
 
 	if p != nil {
 		snap := p.Snap()
 		snap.State = string(state)
 		snap.KnownPeers = int(s.knownPeers.Load())
+		snap.LastTrackerError = lastTrackerErr
 		// Clear speeds for inactive states
 		if state == StatePaused || state == StateComplete || state == StateError {
 			snap.DownSpeed = 0
@@ -333,13 +341,14 @@ func (s *Session) Snap() download.ProgressSnap {
 	// Seeding without download progress (resumed as seeder)
 	if u != nil {
 		return download.ProgressSnap{
-			State:       string(state),
-			Total:       totalBytes,
-			Downloaded:  totalBytes,
-			Percent:     100,
-			UpSpeed:     u.TotalUploadSpeed(),
-			ActivePeers: u.PeerCount(),
-			KnownPeers:  int(s.knownPeers.Load()),
+			State:            string(state),
+			Total:            totalBytes,
+			Downloaded:       totalBytes,
+			Percent:          100,
+			UpSpeed:          u.TotalUploadSpeed(),
+			ActivePeers:      u.PeerCount(),
+			KnownPeers:       int(s.knownPeers.Load()),
+			LastTrackerError: lastTrackerErr,
 		}
 	}
 
@@ -350,11 +359,12 @@ func (s *Session) Snap() download.ProgressSnap {
 		downloaded = totalBytes
 	}
 	return download.ProgressSnap{
-		State:      string(state),
-		Total:      totalBytes,
-		Downloaded: downloaded,
-		Percent:    pct,
-		KnownPeers: int(s.knownPeers.Load()),
+		State:            string(state),
+		Total:            totalBytes,
+		Downloaded:       downloaded,
+		Percent:          pct,
+		KnownPeers:       int(s.knownPeers.Load()),
+		LastTrackerError: lastTrackerErr,
 	}
 }
 
@@ -1015,6 +1025,19 @@ func (s *Session) newAnnouncer(peerSink chan<- []tracker.Peer) *Announcer {
 				return snap.Total - snap.Downloaded
 			}
 			return 0 // seeding: nothing left
+		},
+		// Per-tracker status hooks (Deluge status_message parity).
+		// OnTrackerError records the latest failure; OnTrackerOK clears it
+		// the moment any tracker round succeeds.
+		OnTrackerError: func(tr, errMsg string) {
+			s.mu.Lock()
+			s.lastTrackerError = fmt.Sprintf("%s: %s", tr, errMsg)
+			s.mu.Unlock()
+		},
+		OnTrackerOK: func() {
+			s.mu.Lock()
+			s.lastTrackerError = ""
+			s.mu.Unlock()
 		},
 	})
 }

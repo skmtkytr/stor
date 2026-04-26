@@ -10,7 +10,7 @@
 	import TorrentDetailPanel from "$lib/components/TorrentDetailPanel.svelte";
 	import StatusBar from "$lib/components/StatusBar.svelte";
 	import SettingsDialog from "$lib/components/SettingsDialog.svelte";
-	import Notifications from "$lib/components/Notifications.svelte";
+	import ActivityLog from "$lib/components/ActivityLog.svelte";
 
 	let settingsOpen = $state(false);
 	let activeFilter = $state("all");
@@ -53,5 +53,5 @@
 		<StatusBar />
 	</div>
 	<SettingsDialog bind:open={settingsOpen} />
-	<Notifications />
+	<ActivityLog />
 {/if}

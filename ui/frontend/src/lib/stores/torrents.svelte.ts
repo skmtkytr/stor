@@ -126,19 +126,54 @@ class TorrentStore {
 		}));
 		this.busUnsubs.push(bus.on("metadata.fetched", () => this.scheduleRefresh()));
 
-		// Surface tracker / session errors as toasts.
+		// Tracker errors are intentionally NOT logged here: they recur on
+		// every announce interval per failing tracker (often once a minute
+		// across many trackers), which floods the activity log with noise.
+		// The current per-torrent failure is exposed instead via
+		// progress.last_tracker_error, shown in the detail pane (Deluge
+		// status_message parity).
 		this.busUnsubs.push(
-			bus.on("tracker.error", (ev) => {
+			bus.on("session.error", (ev) => {
+				notifications.push("error", "Session error", ev.payload.error);
+			}),
+		);
+		this.busUnsubs.push(
+			bus.on("torrent.fastresume_rejected", (ev) => {
+				const t = this.list.find((x) => x.id === ev.torrent_id);
 				notifications.push(
 					"warn",
-					`Tracker error: ${ev.payload.tracker}`,
-					ev.payload.error,
+					"Fastresume rejected",
+					`${t?.name ?? ev.torrent_id ?? ""}: ${ev.payload.reason}`,
 				);
 			}),
 		);
 		this.busUnsubs.push(
-			bus.on("session.error", (ev) => {
-				notifications.push("error", "Session error", ev.payload.error);
+			bus.on("torrent.stalled", (ev) => {
+				const t = this.list.find((x) => x.id === ev.torrent_id);
+				notifications.push(
+					"warn",
+					"Torrent stalled",
+					`${t?.name ?? ev.torrent_id ?? ""} (${ev.payload.duration_seconds}s with no peers)`,
+				);
+			}),
+		);
+		this.busUnsubs.push(
+			bus.on("storage.moved", (ev) => {
+				const t = this.list.find((x) => x.id === ev.torrent_id);
+				notifications.push(
+					"info",
+					"Files moved",
+					`${t?.name ?? ev.torrent_id ?? ""} → ${ev.payload.to}`,
+				);
+			}),
+		);
+		this.busUnsubs.push(
+			bus.on("file.completed", (ev) => {
+				notifications.push(
+					"info",
+					"File completed",
+					`${ev.payload.path} (${ev.payload.size} bytes)`,
+				);
 			}),
 		);
 

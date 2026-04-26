@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { formatBytes, formatSpeed, formatETA, formatRatio, formatUnixDate } from "./format";
+import {
+	formatBytes,
+	formatSpeed,
+	formatETA,
+	formatRatio,
+	formatUnixDate,
+	formatRelativeTime,
+} from "./format";
 
 describe("formatBytes", () => {
 	test("bytes", () => {
@@ -108,5 +115,29 @@ describe("formatUnixDate", () => {
 		expect(typeof s).toBe("string");
 		expect(s.length).toBeGreaterThan(0);
 		expect(s).not.toBe("-");
+	});
+});
+
+describe("formatRelativeTime", () => {
+	const now = 1_700_000_000_000;
+	test("just now (< 5s)", () => {
+		expect(formatRelativeTime(now - 1_000, now)).toBe("just now");
+		expect(formatRelativeTime(now - 4_999, now)).toBe("just now");
+	});
+	test("seconds", () => {
+		expect(formatRelativeTime(now - 30_000, now)).toBe("30s ago");
+	});
+	test("minutes", () => {
+		expect(formatRelativeTime(now - 90_000, now)).toBe("1m ago");
+		expect(formatRelativeTime(now - 5 * 60_000, now)).toBe("5m ago");
+	});
+	test("hours", () => {
+		expect(formatRelativeTime(now - 2 * 3600_000, now)).toBe("2h ago");
+	});
+	test("days", () => {
+		expect(formatRelativeTime(now - 3 * 86400_000, now)).toBe("3d ago");
+	});
+	test("future timestamp clamps to just now", () => {
+		expect(formatRelativeTime(now + 60_000, now)).toBe("just now");
 	});
 });
