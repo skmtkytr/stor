@@ -1,13 +1,14 @@
 // Live event bus client.
 //
-// Connects to the daemon's SSE endpoint at `/api/events` and fans out typed
-// events to subscribers. The native EventSource already auto-reconnects, but
-// it does so with no backoff and re-throws transport errors silently. This
-// wrapper layers explicit exponential backoff on top so a long-down daemon
-// doesn't get hammered, and exposes a typed pub/sub API that mirrors the Go
-// `events` package one-to-one.
+// Connects to the daemon's SSE endpoint at `/api/events` over fetch +
+// ReadableStream (NOT EventSource) so we can send the same
+// `Authorization: Bearer <apiKey>` header that the rest of the UI uses.
+// Browser EventSource cannot set custom headers, which is the only reason
+// we don't use it. The wire format is still standard SSE; we just parse
+// it ourselves.
 
 import type { AnyEvent, Event, EventType, EventPayloadMap } from "./types";
+import { getApiKey } from "./rpc";
 
 type Listener<T extends EventType> = (ev: Event<T>) => void;
 type AnyListener = (ev: AnyEvent) => void;
@@ -24,30 +25,35 @@ export interface EventBusOptions {
 	/** Maximum backoff delay in ms. */
 	maxBackoffMs?: number;
 	/**
-	 * EventSource constructor override (for tests). Falls back to the global
-	 * `EventSource` when omitted.
+	 * fetch override (for tests). Defaults to the global fetch.
+	 * Pass `null` to explicitly disable (simulates SSR / unavailable env).
 	 */
-	eventSourceCtor?: typeof EventSource;
+	fetchImpl?: typeof fetch | null;
+	/** API key resolver (for tests). Defaults to getApiKey from rpc. */
+	apiKeyFn?: () => string;
 }
 
 /**
- * Typed wrapper over EventSource. Single connection, fan-out to N listeners,
- * with exponential backoff on disconnect.
+ * Typed wrapper over fetch+ReadableStream that consumes an SSE-formatted
+ * response. Single connection, fan-out to N listeners, with exponential
+ * backoff on disconnect. Sends Authorization: Bearer so the daemon's
+ * auth middleware accepts the request.
  */
 export class EventBus {
 	state: ConnectionState = "idle";
 	lastError: string | null = null;
 
-	private source: EventSource | null = null;
 	private readonly url: string;
 	private readonly types: EventType[];
 	private readonly initialBackoff: number;
 	private readonly maxBackoff: number;
-	private readonly EventSourceCtor: typeof EventSource;
+	private readonly fetchImpl: typeof fetch | null;
+	private readonly apiKeyFn: () => string;
 
 	private backoffMs: number;
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private stopped = false;
+	private abortController: AbortController | null = null;
 
 	private readonly typed = new Map<EventType, Set<Listener<EventType>>>();
 	private readonly anyListeners = new Set<AnyListener>();
@@ -59,25 +65,27 @@ export class EventBus {
 		this.initialBackoff = opts.initialBackoffMs ?? 500;
 		this.maxBackoff = opts.maxBackoffMs ?? 30_000;
 		this.backoffMs = this.initialBackoff;
-		// Defer to the global EventSource at call time so SSR (where it's
-		// undefined) doesn't blow up at module load.
-		this.EventSourceCtor =
-			opts.eventSourceCtor ??
-			(typeof EventSource !== "undefined"
-				? EventSource
-				: (undefined as unknown as typeof EventSource));
+		// Distinguish "not provided" (use environment) from explicit `null`
+		// ("disable, simulate SSR"): only the former falls back to the global.
+		this.fetchImpl =
+			opts.fetchImpl !== undefined
+				? opts.fetchImpl
+				: typeof fetch !== "undefined"
+					? fetch.bind(globalThis)
+					: null;
+		this.apiKeyFn = opts.apiKeyFn ?? getApiKey;
 	}
 
 	/** Open the connection if not already open. Idempotent. */
 	start(): void {
 		if (this.stopped) this.stopped = false;
-		if (this.source) return;
-		if (!this.EventSourceCtor) {
-			this.lastError = "EventSource is not available in this environment";
+		if (this.abortController) return;
+		if (!this.fetchImpl) {
+			this.lastError = "fetch is not available in this environment";
 			this.setState("closed");
 			return;
 		}
-		this.connect();
+		void this.connect();
 	}
 
 	/** Close the connection and stop reconnecting. */
@@ -87,16 +95,14 @@ export class EventBus {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = null;
 		}
-		if (this.source) {
-			this.source.close();
-			this.source = null;
+		if (this.abortController) {
+			this.abortController.abort();
+			this.abortController = null;
 		}
 		this.setState("closed");
 	}
 
-	/**
-	 * Subscribe to a single event type. Returns an unsubscribe function.
-	 */
+	/** Subscribe to a single event type. Returns an unsubscribe function. */
 	on<T extends EventType>(type: T, listener: Listener<T>): () => void {
 		let set = this.typed.get(type);
 		if (!set) {
@@ -125,67 +131,117 @@ export class EventBus {
 
 	// --- internals ------------------------------------------------------
 
-	private connect(): void {
+	private async connect(): Promise<void> {
 		this.setState("connecting");
+		const ac = new AbortController();
+		this.abortController = ac;
 		const url = this.buildUrl();
-		const src = new this.EventSourceCtor(url, { withCredentials: false });
-		this.source = src;
+		const apiKey = this.apiKeyFn().trim();
 
-		src.onopen = () => {
-			this.backoffMs = this.initialBackoff;
-			this.lastError = null;
-			this.setState("open");
-		};
-
-		src.onerror = () => {
-			// EventSource will keep retrying on its own, but our policy is to
-			// reset the connection and apply explicit exponential backoff so a
-			// dead daemon doesn't generate a tight reconnect loop.
-			this.lastError = "connection lost";
+		let res: Response;
+		try {
+			res = await this.fetchImpl!(url, {
+				method: "GET",
+				headers: {
+					Accept: "text/event-stream",
+					"Cache-Control": "no-cache",
+					...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+				},
+				signal: ac.signal,
+				cache: "no-store",
+			});
+		} catch (err) {
+			if (ac.signal.aborted) return;
+			this.lastError = `connect failed: ${(err as Error).message}`;
 			this.scheduleReconnect();
-		};
-
-		// Bind one listener per event type (browsers only fire `message` for
-		// frames without an explicit `event:` field; our server always sets it).
-		const handler = (raw: MessageEvent) => this.dispatch(raw);
-		const types = this.types.length > 0 ? this.types : allEventTypes;
-		for (const t of types) {
-			src.addEventListener(t, handler as EventListener);
+			return;
 		}
-		// Also catch the default channel as a safety net.
-		src.onmessage = handler;
+
+		if (res.status === 401 || res.status === 403) {
+			// Auth failure — don't auto-retry. The user has to re-authenticate
+			// (rpc.ts owns the API key lifecycle); they should call start()
+			// again afterwards.
+			this.lastError = `unauthorized (${res.status})`;
+			this.abortController = null;
+			this.setState("closed");
+			return;
+		}
+
+		if (!res.ok || !res.body) {
+			this.lastError = `connect failed: HTTP ${res.status}`;
+			this.scheduleReconnect();
+			return;
+		}
+
+		this.backoffMs = this.initialBackoff;
+		this.lastError = null;
+		this.setState("open");
+
+		try {
+			await this.readStream(res.body);
+			if (!this.stopped) {
+				// Stream ended cleanly (server closed connection). Reconnect.
+				this.lastError = "stream ended";
+				this.scheduleReconnect();
+			}
+		} catch (err) {
+			if (ac.signal.aborted) return;
+			this.lastError = `stream error: ${(err as Error).message}`;
+			this.scheduleReconnect();
+		}
 	}
 
-	private scheduleReconnect(): void {
-		if (this.stopped) return;
-		if (this.source) {
-			this.source.close();
-			this.source = null;
+	private async readStream(body: ReadableStream<Uint8Array>): Promise<void> {
+		const reader = body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = "";
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) return;
+			buffer += decoder.decode(value, { stream: true });
+			// SSE events are separated by a blank line. Our server only
+			// emits LF, so we don't need to normalize CRLF here.
+			let sepIdx: number;
+			while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
+				const raw = buffer.slice(0, sepIdx);
+				buffer = buffer.slice(sepIdx + 2);
+				this.dispatchFrame(raw);
+			}
 		}
-		this.setState("closed");
-		const delay = this.backoffMs;
-		this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoff);
-		this.reconnectTimer = setTimeout(() => {
-			this.reconnectTimer = null;
-			if (!this.stopped) this.connect();
-		}, delay);
 	}
 
-	private dispatch(raw: MessageEvent): void {
+	private dispatchFrame(frame: string): void {
+		// A frame may contain multiple `data:` lines (per the SSE spec they
+		// are joined by \n) plus advisory `event:`, `id:`, `retry:` fields,
+		// and `:` comments (e.g. ": keepalive"). The event type is carried
+		// inside the JSON payload, so we only need the data lines.
+		const dataLines: string[] = [];
+		for (const line of frame.split("\n")) {
+			if (line === "" || line.startsWith(":")) continue;
+			const idx = line.indexOf(":");
+			const field = idx < 0 ? line : line.slice(0, idx);
+			let value = idx < 0 ? "" : line.slice(idx + 1);
+			if (value.startsWith(" ")) value = value.slice(1);
+			if (field === "data") dataLines.push(value);
+		}
+		if (dataLines.length === 0) return;
+		const data = dataLines.join("\n");
 		let parsed: AnyEvent;
 		try {
-			parsed = JSON.parse(raw.data) as AnyEvent;
+			parsed = JSON.parse(data) as AnyEvent;
 		} catch {
 			return;
 		}
 		if (!parsed || typeof parsed.type !== "string") return;
+		this.fanOut(parsed);
+	}
 
-		// Fan out to typed listeners.
-		const set = this.typed.get(parsed.type);
+	private fanOut(ev: AnyEvent): void {
+		const set = this.typed.get(ev.type);
 		if (set) {
 			for (const l of set) {
 				try {
-					l(parsed);
+					l(ev);
 				} catch {
 					/* listener errors must not break the bus */
 				}
@@ -193,11 +249,26 @@ export class EventBus {
 		}
 		for (const l of this.anyListeners) {
 			try {
-				l(parsed);
+				l(ev);
 			} catch {
 				/* ignore */
 			}
 		}
+	}
+
+	private scheduleReconnect(): void {
+		if (this.stopped) return;
+		if (this.abortController) {
+			this.abortController.abort();
+			this.abortController = null;
+		}
+		this.setState("closed");
+		const delay = this.backoffMs;
+		this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoff);
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = null;
+			if (!this.stopped) void this.connect();
+		}, delay);
 	}
 
 	private setState(s: ConnectionState): void {
@@ -218,22 +289,6 @@ export class EventBus {
 		return `${this.url}${sep}types=${this.types.map(encodeURIComponent).join(",")}`;
 	}
 }
-
-const allEventTypes: EventType[] = [
-	"torrent.added",
-	"torrent.removed",
-	"torrent.paused",
-	"torrent.resumed",
-	"torrent.state_changed",
-	"metadata.fetched",
-	"tracker.reply",
-	"tracker.error",
-	"dht.reply",
-	"peer.connected",
-	"peer.disconnected",
-	"piece.complete",
-	"session.error",
-];
 
 // Re-export for ergonomic typing in subscribers.
 export type { Event, EventType, EventPayloadMap };
