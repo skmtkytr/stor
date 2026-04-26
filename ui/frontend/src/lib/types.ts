@@ -106,7 +106,12 @@ export type EventType =
 	| "peer.connected"
 	| "peer.disconnected"
 	| "piece.complete"
-	| "session.error";
+	| "session.error"
+	| "peer_search.failed"
+	| "metadata_attempt.failed"
+	| "dht.lookup_failed"
+	| "torrent.stalled"
+	| "torrent.stall_cleared";
 
 export interface TorrentAddedPayload {
 	source: string;
@@ -164,6 +169,31 @@ export interface SessionErrorPayload {
 	error: string;
 }
 
+export interface PeerSearchFailedPayload {
+	attempt_count: number;
+	next_retry_in_seconds: number;
+	error?: string;
+}
+
+export interface MetadataAttemptFailedPayload {
+	attempt_count: number;
+	next_retry_in_seconds: number;
+	error?: string;
+}
+
+export interface DHTLookupFailedPayload {
+	error: string;
+}
+
+export interface StalledPayload {
+	duration_seconds: number;
+	reason?: string;
+}
+
+export interface StallClearedPayload {
+	stalled_for_seconds: number;
+}
+
 export interface EventPayloadMap {
 	"torrent.added": TorrentAddedPayload;
 	"torrent.removed": TorrentRemovedPayload;
@@ -178,6 +208,11 @@ export interface EventPayloadMap {
 	"peer.disconnected": PeerDisconnectedPayload;
 	"piece.complete": PieceCompletePayload;
 	"session.error": SessionErrorPayload;
+	"peer_search.failed": PeerSearchFailedPayload;
+	"metadata_attempt.failed": MetadataAttemptFailedPayload;
+	"dht.lookup_failed": DHTLookupFailedPayload;
+	"torrent.stalled": StalledPayload;
+	"torrent.stall_cleared": StallClearedPayload;
 }
 
 export interface Event<T extends EventType = EventType> {
