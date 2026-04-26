@@ -18,6 +18,7 @@ import (
 	"github.com/skmtkytr/stor/bencode"
 	dhtpkg "github.com/skmtkytr/stor/dht"
 	"github.com/skmtkytr/stor/download"
+	"github.com/skmtkytr/stor/events"
 	"github.com/skmtkytr/stor/magnet"
 	"github.com/skmtkytr/stor/peer"
 	"github.com/skmtkytr/stor/storage"
@@ -82,10 +83,14 @@ type Session struct {
 	knownPeers atomic.Int32
 
 	enableUTP bool // try uTP before TCP for all outgoing connections
+
+	// bus is the engine event bus. May be nil for tests that build a Session
+	// directly via &Session{}; setState and other emitters must guard for nil.
+	bus *events.Bus
 }
 
 // NewSession creates a session from a persisted record.
-func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir, tmpDir string, port uint16, dlCfg download.DownloadConfig, numWant int, d *dhtpkg.DHT, pl *PeerListener) *Session {
+func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir, tmpDir string, port uint16, dlCfg download.DownloadConfig, numWant int, d *dhtpkg.DHT, pl *PeerListener, bus *events.Bus) *Session {
 	s := &Session{
 		record:      record,
 		peerID:      peerID,
@@ -97,9 +102,52 @@ func NewSession(record *TorrentRecord, peerID [20]byte, downloadDir, tmpDir stri
 		dht:         d,
 		listener:    pl,
 		enableUTP:   dlCfg.EnableUTP,
+		bus:         bus,
 	}
 	s.knownPeers.Store(int32(record.KnownPeers))
 	return s
+}
+
+// setState mutates s.record.State and, if it actually changes, publishes a
+// TypeStateChanged event after releasing the lock. Centralising state
+// transitions through this helper guarantees we never emit while holding
+// s.mu (a known deadlock source: subscribers running on the same goroutine
+// would re-enter Session methods).
+func (s *Session) setState(newState State) {
+	s.mu.Lock()
+	old := s.record.State
+	if old == newState {
+		s.mu.Unlock()
+		return
+	}
+	s.record.State = newState
+	bus := s.bus
+	id := s.record.ID
+	s.mu.Unlock()
+
+	if bus != nil {
+		bus.Publish(events.Event{
+			Type:      events.TypeStateChanged,
+			TorrentID: id,
+			Payload: events.StateChangedPayload{
+				From: string(old),
+				To:   string(newState),
+			},
+		})
+	}
+}
+
+// popCount returns the number of set bits in the bitfield.
+func popCount(bf peer.Bitfield) int {
+	n := 0
+	for _, b := range bf {
+		// Brian Kernighan's bit count
+		for b != 0 {
+			b &= b - 1
+			n++
+		}
+	}
+	return n
 }
 
 // Record returns the current record (thread-safe copy of state fields).
@@ -281,16 +329,20 @@ func (s *Session) Start(ctx context.Context, onDone func(id string)) {
 		defer cancel()
 		slog.Info("session started", "id", s.record.ID, "source", s.record.Source)
 		err := s.run(ctx)
+		var transitionedToError bool
 		s.mu.Lock()
 		if err != nil && !errors.Is(err, context.Canceled) {
 			s.err = err
-			s.record.State = StateError
 			s.record.Error = err.Error()
+			transitionedToError = s.record.State != StateError
 			slog.Error("session failed", "id", s.record.ID, "name", s.record.Name, "error", err)
 		}
 		// If context was canceled (pause), state is already set by Pause()
 		s.cancel = nil
 		s.mu.Unlock()
+		if transitionedToError {
+			s.setState(StateError)
+		}
 		if onDone != nil {
 			onDone(s.record.ID)
 		}
@@ -300,14 +352,18 @@ func (s *Session) Start(ctx context.Context, onDone func(id string)) {
 // Pause cancels the running download.
 func (s *Session) Pause() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.cancel != nil {
 		s.cancel()
 		s.cancel = nil
 	}
+	var shouldTransition bool
 	switch s.record.State {
 	case StateDownloading, StateMetadata, StateSeeding, StateVerifying, StateAdding:
-		s.record.State = StatePaused
+		shouldTransition = true
+	}
+	s.mu.Unlock()
+	if shouldTransition {
+		s.setState(StatePaused)
 	}
 }
 
@@ -331,9 +387,9 @@ func (s *Session) run(ctx context.Context) error {
 		if _, err := os.Stat(savePath); err == nil {
 			slog.Info("resuming as seeder", "id", s.record.ID, "name", s.tf.Info.Name)
 			s.mu.Lock()
-			s.record.State = StateSeeding
 			s.record.SavePath = savePath
 			s.mu.Unlock()
+			s.setState(StateSeeding)
 			return s.phaseSeedDirect(ctx, savePath)
 		}
 		// File missing — need to re-download
@@ -354,6 +410,17 @@ func (s *Session) phaseResolve(ctx context.Context) error {
 			return err
 		}
 		slog.Info("metadata resolved", "id", s.record.ID, "name", s.tf.Info.Name, "pieces", len(s.tf.Info.PieceHashes))
+		if s.bus != nil {
+			s.bus.Publish(events.Event{
+				Type:      events.TypeMetadataFetched,
+				TorrentID: s.record.ID,
+				Payload: events.MetadataFetchedPayload{
+					Name:       s.tf.Info.Name,
+					NumPieces:  len(s.tf.Info.PieceHashes),
+					TotalBytes: storage.TotalSize(s.tf),
+				},
+			})
+		}
 	}
 
 	// Validate torrent name to prevent path traversal attacks.
@@ -370,9 +437,7 @@ func (s *Session) phaseResolve(ctx context.Context) error {
 		return nil
 	}
 
-	s.mu.Lock()
-	s.record.State = StateDownloading
-	s.mu.Unlock()
+	s.setState(StateDownloading)
 
 	if len(s.cachedPeers) > 0 {
 		slog.Info("using cached peers", "id", s.record.ID, "count", len(s.cachedPeers))
@@ -409,9 +474,7 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		haveBitfield = peer.Bitfield(s.record.Bitfield)
 		slog.Info("resume: using persisted bitfield", "id", s.record.ID, "total", numPieces)
 	} else {
-		s.mu.Lock()
-		s.record.State = StateVerifying
-		s.mu.Unlock()
+		s.setState(StateVerifying)
 
 		bf, verified, _ := storage.VerifyPieces(savePath, s.tf, func(checked, total int) {
 			slog.Debug("verifying pieces", "id", s.record.ID, "checked", checked, "total", total)
@@ -425,9 +488,7 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		}
 	}
 
-	s.mu.Lock()
-	s.record.State = StateDownloading
-	s.mu.Unlock()
+	s.setState(StateDownloading)
 
 	// Progress
 	progress := download.NewProgress(numPieces, tl)
@@ -545,13 +606,33 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 			// Persist the have-bitfield so a resume picks up where we
 			// left off without re-verifying already-downloaded pieces.
 			s.record.Bitfield = append(s.record.Bitfield[:0], uploadBF...)
+			have := popCount(uploadBF)
+			bus := s.bus
+			id := s.record.ID
 			s.mu.Unlock()
 			up.SetPiece(index)
+			if bus != nil {
+				bus.Publish(events.Event{
+					Type:      events.TypePieceComplete,
+					TorrentID: id,
+					Payload: events.PieceCompletePayload{
+						Index: index,
+						Have:  have,
+						Total: numPieces,
+					},
+				})
+			}
 		},
 		OnPeerMgr: func(pm *download.PeerManager) {
 			s.mu.Lock()
 			s.peerMgr = pm
+			bus := s.bus
+			id := s.record.ID
 			s.mu.Unlock()
+			// Inject observation hooks; the download package itself stays free
+			// of any engine/events dependency.
+			pm.Bus = bus
+			pm.TorrentID = id
 		},
 		OnPieceQueue: func(pq *download.PieceQueue) {
 			s.mu.Lock()
@@ -589,10 +670,10 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
-	s.record.State = StateSeeding
 	s.record.CompletedAt = time.Now().Unix()
 	s.record.SavePath = savePath
 	s.mu.Unlock()
+	s.setState(StateSeeding)
 
 	slog.Info("download complete", "id", s.record.ID, "name", s.tf.Info.Name, "save_path", savePath)
 	return nil
@@ -666,13 +747,14 @@ func (s *Session) phaseSeed(ctx context.Context) error {
 		s.listener.Unregister(s.tf.InfoHash)
 	}
 	s.mu.Lock()
-	if s.record.State == StateSeeding {
-		s.record.State = StateComplete
-	}
+	shouldComplete := s.record.State == StateSeeding
 	s.uploader = nil
 	s.peerMgr = nil
 	s.pq = nil
 	s.mu.Unlock()
+	if shouldComplete {
+		s.setState(StateComplete)
+	}
 
 	return nil
 }
@@ -681,12 +763,14 @@ func (s *Session) phaseSeed(ctx context.Context) error {
 // peerSink may be nil (e.g. private torrent with PEX disabled, or callers that don't need peer injection).
 func (s *Session) newAnnouncer(peerSink chan<- []tracker.Peer) *Announcer {
 	return NewAnnouncer(AnnounceConfig{
-		TF:       s.tf,
-		PeerID:   s.peerID,
-		Port:     s.port,
-		NumWant:  s.numWant,
-		DHT:      s.dht,
-		PeerSink: peerSink,
+		TF:        s.tf,
+		PeerID:    s.peerID,
+		Port:      s.port,
+		NumWant:   s.numWant,
+		DHT:       s.dht,
+		PeerSink:  peerSink,
+		Bus:       s.bus,
+		TorrentID: s.record.ID,
 		Downloaded: func() int64 {
 			s.mu.RLock()
 			p := s.progress
@@ -750,9 +834,7 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 	}
 
 	// Must be a magnet URI
-	s.mu.Lock()
-	s.record.State = StateMetadata
-	s.mu.Unlock()
+	s.setState(StateMetadata)
 
 	m, err := magnet.Parse(s.record.Source)
 	if err != nil {

@@ -5,6 +5,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/skmtkytr/stor/events"
 )
 
 const (
@@ -24,6 +26,12 @@ type PeerManager struct {
 	peers          []*Client
 	unchokeSlots   int
 	optimisticPeer *Client
+
+	// Observation hooks. Both fields are public and may be set after
+	// construction (the engine layer injects them via OnPeerMgr to keep
+	// this package free of an engine-side dependency). Bus may stay nil.
+	Bus       *events.Bus
+	TorrentID string
 }
 
 // NewPeerManager creates a new peer manager.
@@ -39,23 +47,73 @@ func NewPeerManager(unchokeSlots int) *PeerManager {
 // Register adds a peer to management. Called when a peer connects.
 func (pm *PeerManager) Register(c *Client) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
 	pm.peers = append(pm.peers, c)
+	bus := pm.Bus
+	id := pm.TorrentID
+	pm.mu.Unlock()
+
+	if bus != nil {
+		bus.Publish(events.Event{
+			Type:      events.TypePeerConnected,
+			TorrentID: id,
+			Payload: events.PeerConnectedPayload{
+				Addr:      c.Addr,
+				Direction: peerDirection(c),
+				Transport: peerTransport(c),
+			},
+		})
+	}
 }
 
 // Unregister removes a peer from management. Called when a peer disconnects.
 func (pm *PeerManager) Unregister(c *Client) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
+	removed := false
 	for i, p := range pm.peers {
 		if p == c {
 			pm.peers = append(pm.peers[:i], pm.peers[i+1:]...)
 			if pm.optimisticPeer == c {
 				pm.optimisticPeer = nil
 			}
-			return
+			removed = true
+			break
 		}
 	}
+	bus := pm.Bus
+	id := pm.TorrentID
+	pm.mu.Unlock()
+
+	if removed && bus != nil {
+		bus.Publish(events.Event{
+			Type:      events.TypePeerDisconnected,
+			TorrentID: id,
+			Payload: events.PeerDisconnectedPayload{
+				Addr: c.Addr,
+			},
+		})
+	}
+}
+
+// peerDirection returns "in" / "out" / "" for the given client.
+func peerDirection(c *Client) string {
+	if c == nil {
+		return ""
+	}
+	if c.Incoming {
+		return "in"
+	}
+	return "out"
+}
+
+// peerTransport returns "utp" / "tcp" / "" for the given client.
+func peerTransport(c *Client) string {
+	if c == nil {
+		return ""
+	}
+	if c.UsingUTP {
+		return "utp"
+	}
+	return "tcp"
 }
 
 // Run starts the choking algorithm loop. Blocks until ctx is cancelled.

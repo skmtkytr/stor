@@ -7,6 +7,7 @@ import (
 	"time"
 
 	dhtpkg "github.com/skmtkytr/stor/dht"
+	"github.com/skmtkytr/stor/events"
 	"github.com/skmtkytr/stor/torrent"
 	"github.com/skmtkytr/stor/tracker"
 )
@@ -33,6 +34,10 @@ type Announcer struct {
 	// Callbacks for announce params
 	downloaded func() int64
 	left       func() int64
+
+	// Observation. May be nil (e.g. in tests that build an Announcer directly).
+	bus       *events.Bus
+	torrentID string
 }
 
 // AnnounceConfig holds parameters for creating an Announcer.
@@ -47,6 +52,10 @@ type AnnounceConfig struct {
 	PeerSink    chan<- []tracker.Peer
 	Downloaded  func() int64
 	Left        func() int64
+
+	// Observation hooks. Bus may be nil; TorrentID is included on every emitted event.
+	Bus       *events.Bus
+	TorrentID string
 }
 
 // NewAnnouncer creates a new announcer.
@@ -66,6 +75,8 @@ func NewAnnouncer(cfg AnnounceConfig) *Announcer {
 		peerSink:    cfg.PeerSink,
 		downloaded:  cfg.Downloaded,
 		left:        cfg.Left,
+		bus:         cfg.Bus,
+		torrentID:   cfg.TorrentID,
 	}
 }
 
@@ -124,7 +135,17 @@ func (a *Announcer) runDHTLookup(ctx context.Context) {
 		return
 	}
 	peers := a.lookupDHT(a.tf.InfoHash)
-	if len(peers) == 0 || a.peerSink == nil {
+	if len(peers) == 0 {
+		return
+	}
+	if a.bus != nil {
+		a.bus.Publish(events.Event{
+			Type:      events.TypeDHTReply,
+			TorrentID: a.torrentID,
+			Payload:   events.DHTReplyPayload{NumPeers: len(peers)},
+		})
+	}
+	if a.peerSink == nil {
 		return
 	}
 	select {
@@ -173,6 +194,16 @@ func (a *Announcer) announce(ctx context.Context, event tracker.Event) time.Dura
 			resp, err := tracker.Announce(req)
 			if err != nil {
 				slog.Debug("announce failed", "tracker", tr, "error", err)
+				if a.bus != nil {
+					a.bus.Publish(events.Event{
+						Type:      events.TypeAnnounceError,
+						TorrentID: a.torrentID,
+						Payload: events.AnnounceErrorPayload{
+							Tracker: tr,
+							Error:   err.Error(),
+						},
+					})
+				}
 				return
 			}
 			mu.Lock()
@@ -184,6 +215,18 @@ func (a *Announcer) announce(ctx context.Context, event tracker.Event) time.Dura
 				}
 			}
 			mu.Unlock()
+			// Emit reply outside the mu critical section.
+			if a.bus != nil && len(resp.Peers) > 0 {
+				a.bus.Publish(events.Event{
+					Type:      events.TypeAnnounceReply,
+					TorrentID: a.torrentID,
+					Payload: events.AnnounceReplyPayload{
+						Tracker:         tr,
+						NumPeers:        len(resp.Peers),
+						IntervalSeconds: int(resp.Interval),
+					},
+				})
+			}
 		}(tr)
 	}
 
@@ -194,6 +237,13 @@ func (a *Announcer) announce(ctx context.Context, event tracker.Event) time.Dura
 			mu.Lock()
 			allPeers = append(allPeers, peers...)
 			mu.Unlock()
+			if a.bus != nil {
+				a.bus.Publish(events.Event{
+					Type:      events.TypeDHTReply,
+					TorrentID: a.torrentID,
+					Payload:   events.DHTReplyPayload{NumPeers: len(peers)},
+				})
+			}
 		}
 	}
 

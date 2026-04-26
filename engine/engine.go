@@ -261,7 +261,7 @@ func (e *Engine) Start() error {
 	records := e.store.All()
 	slog.Info("restoring sessions", "count", len(records))
 	for _, r := range records {
-		s := NewSession(r, e.peerID, e.cfg.DownloadDir, e.cfg.TmpDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht, e.listener)
+		s := NewSession(r, e.peerID, e.cfg.DownloadDir, e.cfg.TmpDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht, e.listener, e.bus)
 
 		e.sessions[r.ID] = s
 
@@ -338,14 +338,15 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 	}
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	if _, exists := e.sessions[id]; exists {
+		e.mu.Unlock()
 		slog.Debug("torrent already exists", "id", id)
 		return id, nil // already exists
 	}
 
 	if len(e.sessions) >= MaxSessions {
+		e.mu.Unlock()
 		return "", fmt.Errorf("engine: session limit reached (%d)", MaxSessions)
 	}
 
@@ -368,11 +369,24 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 		}
 	}
 
-	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.TmpDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht, e.listener)
+	s := NewSession(record, e.peerID, e.cfg.DownloadDir, e.cfg.TmpDir, e.cfg.ListenPort, e.downloadConfig(), e.cfg.NumWant, e.dht, e.listener, e.bus)
 	e.sessions[id] = s
 	e.saveStateLocked()
 
 	e.startQueuedLocked()
+	emittedName := record.Name
+	e.mu.Unlock()
+
+	// Emit TypeTorrentAdded after releasing e.mu so subscribers can call back
+	// into Engine without a self-deadlock.
+	e.bus.Publish(events.Event{
+		Type:      events.TypeTorrentAdded,
+		TorrentID: id,
+		Payload: events.TorrentAddedPayload{
+			Source: source,
+			Name:   emittedName,
+		},
+	})
 
 	return id, nil
 }
@@ -432,6 +446,12 @@ func (e *Engine) RemoveTorrent(id string, deleteFiles bool) error {
 		}
 	}
 
+	e.bus.Publish(events.Event{
+		Type:      events.TypeTorrentRemoved,
+		TorrentID: id,
+		Payload:   events.TorrentRemovedPayload{DeletedFiles: deleteFiles},
+	})
+
 	e.startQueued()
 	return nil
 }
@@ -448,6 +468,10 @@ func (e *Engine) PauseTorrent(id string) error {
 
 	slog.Info("pausing torrent", "id", id)
 	s.Pause()
+	e.bus.Publish(events.Event{
+		Type:      events.TypeTorrentPaused,
+		TorrentID: id,
+	})
 	e.saveState()
 	e.startQueued()
 	return nil
@@ -470,9 +494,16 @@ func (e *Engine) ResumeTorrent(id string) error {
 
 	slog.Info("resuming torrent", "id", id, "previous_state", r.State)
 	s.mu.Lock()
-	s.record.State = StateAdding
 	s.record.Error = ""
 	s.mu.Unlock()
+	s.setState(StateAdding)
+
+	// Emit TypeTorrentResumed before launching the session so subscribers see
+	// it ahead of any state transitions the new session goroutine emits.
+	e.bus.Publish(events.Event{
+		Type:      events.TypeTorrentResumed,
+		TorrentID: id,
+	})
 
 	if e.activeCount() < e.cfg.MaxActive {
 		e.startSession(s)
@@ -941,6 +972,13 @@ func (e *Engine) onSessionDone(id string) {
 	if ok {
 		r := s.Record()
 		slog.Info("session done", "id", id, "name", r.Name, "state", r.State, "error", r.Error)
+		if r.State == StateError {
+			e.bus.Publish(events.Event{
+				Type:      events.TypeSessionError,
+				TorrentID: id,
+				Payload:   events.SessionErrorPayload{Error: r.Error},
+			})
+		}
 	}
 	e.saveState()
 	e.startQueued()
