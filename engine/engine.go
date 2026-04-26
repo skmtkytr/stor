@@ -14,6 +14,7 @@ import (
 	"github.com/skmtkytr/stor/dht"
 	"github.com/skmtkytr/stor/download"
 	"github.com/skmtkytr/stor/events"
+	"github.com/skmtkytr/stor/magnet"
 	"github.com/skmtkytr/stor/peer"
 	"github.com/skmtkytr/stor/storage"
 	"github.com/skmtkytr/stor/torrent"
@@ -383,6 +384,18 @@ func (e *Engine) AddTorrent(source string) (string, error) {
 			record.Name = tf.Info.Name
 			record.TorrentData = data
 			record.TotalBytes = storage.TotalSize(tf)
+		}
+	}
+
+	// For magnet URIs, use the dn= (display name) parameter as a placeholder
+	// until the real name lands with the metadata. Most magnet links from
+	// indexers carry dn=, so the user sees the torrent's intended filename
+	// immediately instead of "Unknown" / blank for the duration of the
+	// metadata fetch. resolveMetadata overwrites record.Name with
+	// tf.Info.Name once it parses the info dict.
+	if record.Name == "" {
+		if m, mErr := magnet.Parse(source); mErr == nil && m.DisplayName != "" {
+			record.Name = m.DisplayName
 		}
 	}
 
