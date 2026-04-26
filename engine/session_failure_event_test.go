@@ -38,8 +38,9 @@ func TestEventPeerSearchFailed(t *testing.T) {
 	}()
 
 	// Wait long enough for the first attempt + emit, but cancel before the
-	// 30s peerSearchInitial backoff actually elapses. The emit happens
-	// before the time.After in findPeers so we are guaranteed to see it.
+	// peerSearchInitial backoff actually elapses. The emit happens before
+	// the time.After in findPeers so we are guaranteed to see it
+	// regardless of the backoff value.
 	time.Sleep(150 * time.Millisecond)
 	cancel()
 	<-done
@@ -187,3 +188,18 @@ func TestEventDHTLookupFailed(t *testing.T) {
 type dhtTestError struct{ msg string }
 
 func (e *dhtTestError) Error() string { return e.msg }
+
+// TestRetryConstantsAreFast guards the magnet-resolution UX promise:
+// initial backoff after a failed peer or metadata search must stay short
+// (< 10s) so a magnet that misses on its first attempt recovers quickly.
+// Regressions here are very visible to the user (multi-second freeze
+// after adding a magnet) so we lock the value in.
+func TestRetryConstantsAreFast(t *testing.T) {
+	const max = 10 * time.Second
+	if metadataRetryInitial > max {
+		t.Errorf("metadataRetryInitial = %v; should be <= %v for snappy magnet resolution", metadataRetryInitial, max)
+	}
+	if peerSearchInitial > max {
+		t.Errorf("peerSearchInitial = %v; should be <= %v", peerSearchInitial, max)
+	}
+}

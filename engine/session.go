@@ -39,10 +39,17 @@ var dhtBootstrapNodes = []string{
 // behavior: don't fail the torrent when peers/metadata are temporarily
 // unavailable — keep trying with exponential backoff until the user
 // pauses or removes the torrent.
+//
+// Initial backoff is intentionally short (3s) so a magnet that fails its
+// very first attempt — common when DHT is still warming up or the first
+// few peers don't yet have metadata — recovers within seconds rather
+// than waiting half a minute. The exponential ramp still tops out at
+// 5 minutes so a torrent with no available peers doesn't hammer the
+// network indefinitely.
 const (
-	metadataRetryInitial = 30 * time.Second
+	metadataRetryInitial = 3 * time.Second
 	metadataRetryMax     = 5 * time.Minute
-	peerSearchInitial    = 30 * time.Second
+	peerSearchInitial    = 3 * time.Second
 	peerSearchMax        = 5 * time.Minute
 	metadataAttemptTTL   = 60 * time.Second
 )
@@ -1261,7 +1268,10 @@ func (s *Session) fetchMetadataAttempt(ctx context.Context, m *magnet.Magnet) (*
 	defer metaCancel()
 
 	resultCh := make(chan *torrent.TorrentFile, 1)
-	metaSem := make(chan struct{}, 50)
+	// 100 concurrent metadata fetch goroutines. libtorrent typically runs
+	// 100+ in parallel; the previous 50 throttled magnet resolution when
+	// many peers were available but only a fraction served metadata.
+	metaSem := make(chan struct{}, 100)
 
 	var (
 		metaWg        sync.WaitGroup
