@@ -127,6 +127,10 @@ type Engine struct {
 
 	// Observation event bus. Always non-nil.
 	bus *events.Bus
+
+	// Best-effort NAT port mapping for incoming peer connections.
+	// Nil when DisableListener is set.
+	portmap *PortMapper
 }
 
 // Bus returns the engine's event bus. Subscribers receive observation events
@@ -254,6 +258,13 @@ func (e *Engine) Start() error {
 			e.listener = pl
 			go pl.Run()
 			slog.Info("peer listener started", "addr", pl.Addr(), "utp", e.cfg.EnableUTP)
+
+			// Best-effort NAT port mapping. Runs asynchronously so a slow
+			// or absent IGD never blocks daemon startup. Without this,
+			// users behind NAT only ever make outbound connections, which
+			// roughly halves discoverable peers.
+			e.portmap = NewPortMapper(e.cfg.ListenPort)
+			e.portmap.Start(e.ctx)
 		}
 	}
 
@@ -303,6 +314,12 @@ func (e *Engine) Stop() error {
 
 	if e.listener != nil {
 		_ = e.listener.Close()
+	}
+
+	// Tear down the NAT mapping before exiting so the gateway frees the
+	// external port. Best-effort with a short internal timeout.
+	if e.portmap != nil {
+		e.portmap.Stop()
 	}
 
 	if e.dht != nil {
