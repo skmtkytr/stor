@@ -35,6 +35,11 @@ const (
 	// Both are emitted; consumers can pick which semantic they need.
 	TypeTorrentPauseRequested  Type = "torrent.pause_requested"
 	TypeTorrentResumeRequested Type = "torrent.resume_requested"
+
+	// Phase 4 (Deluge coverage parity).
+	TypeStorageMoved       Type = "storage.moved"
+	TypeFastresumeRejected Type = "torrent.fastresume_rejected"
+	TypeFileCompleted      Type = "file.completed"
 )
 
 // Event is a single observation published to the bus.
@@ -137,4 +142,27 @@ type StalledPayload struct {
 // reconnects to at least one peer.
 type StallClearedPayload struct {
 	StalledForSeconds int `json:"stalled_for_seconds"`
+}
+
+// StorageMovedPayload is emitted after a completed torrent is renamed from
+// the working tmp directory into the final download directory.
+type StorageMovedPayload struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// FastresumeRejectedPayload is emitted when a persisted resume artefact
+// (e.g. the on-disk bitfield) cannot be trusted and the session falls back
+// to verifying pieces from disk.
+type FastresumeRejectedPayload struct {
+	Reason string `json:"reason"`           // short tag, e.g. "bitfield size mismatch"
+	Detail string `json:"detail,omitempty"` // free-form context (sizes, paths)
+}
+
+// FileCompletedPayload is emitted exactly once per file when every piece
+// covering that file has been downloaded.
+type FileCompletedPayload struct {
+	Index int    `json:"index"` // file index (matches info.files order)
+	Path  string `json:"path"`  // forward-slash relative path
+	Size  int64  `json:"size"`  // file length in bytes
 }

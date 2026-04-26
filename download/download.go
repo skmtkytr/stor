@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -143,6 +144,36 @@ type Client struct {
 	disablePEX bool      // BEP 27: suppress PEX for private torrents
 	fastExt    bool      // BEP 6: peer supports fast extension
 	progress   *Progress // for block-level speed tracking (nil in legacy mode)
+
+	// disconnectReason is the last reason recorded for this client's
+	// disconnection. Read by PeerManager.Unregister to populate the
+	// PeerDisconnected event. Protected by reasonMu so concurrent setters
+	// (worker goroutine vs handshake-time failures) don't race.
+	reasonMu         sync.Mutex
+	disconnectReason string
+}
+
+// SetDisconnectReason records why this client disconnected. The first
+// non-empty reason wins; later calls are no-ops so we don't overwrite a
+// specific failure (e.g. "protocol_error: ...") with a generic "normal"
+// from a deferred Close.
+func (c *Client) SetDisconnectReason(reason string) {
+	if reason == "" {
+		return
+	}
+	c.reasonMu.Lock()
+	if c.disconnectReason == "" {
+		c.disconnectReason = reason
+	}
+	c.reasonMu.Unlock()
+}
+
+// DisconnectReason returns the recorded reason, or "" if none was set.
+func (c *Client) DisconnectReason() string {
+	c.reasonMu.Lock()
+	r := c.disconnectReason
+	c.reasonMu.Unlock()
+	return r
 }
 
 // Speed returns the current download speed in bytes/sec.
@@ -1112,6 +1143,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			// Acquire peer slot for established connection
 			select {
 			case <-ctx.Done():
+				client.SetDisconnectReason("normal")
 				_ = client.Close()
 				return
 			case sem <- struct{}{}:
@@ -1120,6 +1152,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			numPieces := len(tf.Info.PieceHashes)
 			// Validate bitfield size to reject DoS-sized bitfields
 			if err := client.ValidateBitfield(numPieces); err != nil {
+				client.SetDisconnectReason("protocol_error: " + err.Error())
 				_ = client.Close()
 				return
 			}
@@ -1152,6 +1185,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 			for {
 				select {
 				case <-ctx.Done():
+					client.SetDisconnectReason("normal")
 					return
 				default:
 				}
@@ -1160,6 +1194,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				if !ok {
 					select {
 					case <-ctx.Done():
+						client.SetDisconnectReason("normal")
 						return
 					case <-pq.Wait():
 						continue
@@ -1174,6 +1209,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				data, release, err := client.DownloadPiece(pw)
 				if err != nil {
 					pq.Return(pw)
+					client.SetDisconnectReason(classifyDownloadError(err))
 					return
 				}
 
@@ -1193,6 +1229,7 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 					if release != nil {
 						release()
 					}
+					client.SetDisconnectReason("normal")
 					return
 				}
 			}
@@ -1319,6 +1356,31 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 	}()
 
 	return resultCh, pm
+}
+
+// classifyDownloadError maps a DownloadPiece error to a short reason tag
+// used in the PeerDisconnected event payload. The mapping favours stable
+// short tags ("timeout", "choked_out", "protocol_error: ...") so UI / log
+// consumers can group related disconnects without parsing free-form text.
+func classifyDownloadError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "i/o timeout"), strings.Contains(msg, "deadline exceeded"):
+		return "timeout"
+	case strings.Contains(msg, "peer choked"):
+		return "choked_out"
+	case strings.Contains(msg, "hash mismatch"),
+		strings.Contains(msg, "rejected piece"),
+		strings.Contains(msg, "out of bounds"),
+		strings.Contains(msg, "too many unexpected messages"):
+		return "protocol_error: " + msg
+	case strings.Contains(msg, "EOF"), strings.Contains(msg, "connection reset"), strings.Contains(msg, "broken pipe"):
+		return "peer_closed"
+	}
+	return "unknown"
 }
 
 func deduplicatePeers(peers []tracker.Peer) []tracker.Peer {

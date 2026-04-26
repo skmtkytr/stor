@@ -84,11 +84,16 @@ func (pm *PeerManager) Unregister(c *Client) {
 	pm.mu.Unlock()
 
 	if removed && bus != nil {
+		reason := c.DisconnectReason()
+		if reason == "" {
+			reason = "unknown"
+		}
 		bus.Publish(events.Event{
 			Type:      events.TypePeerDisconnected,
 			TorrentID: id,
 			Payload: events.PeerDisconnectedPayload{
-				Addr: c.Addr,
+				Addr:   c.Addr,
+				Reason: reason,
 			},
 		})
 	}
