@@ -24,15 +24,33 @@ func NewRecorder() *Recorder {
 	return &Recorder{done: make(chan struct{})}
 }
 
-// Drain consumes from sub.C until it closes, appending each event.
+// Drain consumes from sub.C until sub.Done() fires, appending each event.
+// Any events still buffered in sub.C when Done fires are also drained.
 // Run this in a goroutine.
 func (r *Recorder) Drain(sub *Subscription) {
-	for ev := range sub.C {
-		r.mu.Lock()
-		r.events = append(r.events, ev)
-		r.mu.Unlock()
+	defer close(r.done)
+	for {
+		select {
+		case ev := <-sub.C:
+			r.appendEvent(ev)
+		case <-sub.Done():
+			// Drain anything still buffered, then exit.
+			for {
+				select {
+				case ev := <-sub.C:
+					r.appendEvent(ev)
+				default:
+					return
+				}
+			}
+		}
 	}
-	close(r.done)
+}
+
+func (r *Recorder) appendEvent(ev Event) {
+	r.mu.Lock()
+	r.events = append(r.events, ev)
+	r.mu.Unlock()
 }
 
 // Events returns a copy of the recorded events so far.

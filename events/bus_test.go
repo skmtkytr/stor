@@ -94,12 +94,9 @@ func TestBusCtxCancelUnsubscribes(t *testing.T) {
 	cancel()
 
 	select {
-	case _, ok := <-sub.C:
-		if ok {
-			t.Error("expected channel to be closed after ctx cancel")
-		}
+	case <-sub.Done():
 	case <-time.After(time.Second):
-		t.Fatal("channel never closed after ctx cancel")
+		t.Fatal("Done() never fired after ctx cancel")
 	}
 
 	// Publish must not panic with a stale subscription gone.
@@ -114,12 +111,9 @@ func TestBusCloseUnblocksSubscribers(t *testing.T) {
 	b.Close()
 
 	select {
-	case _, ok := <-sub.C:
-		if ok {
-			t.Error("expected channel to be closed by Bus.Close")
-		}
+	case <-sub.Done():
 	case <-time.After(time.Second):
-		t.Fatal("channel not closed after Bus.Close")
+		t.Fatal("Done() not fired after Bus.Close")
 	}
 
 	// Idempotent close.
@@ -133,8 +127,10 @@ func TestBusSubscribeAfterClose(t *testing.T) {
 	b.Close()
 	ctx := context.Background()
 	sub := b.Subscribe(ctx, SubscribeOptions{Buffer: 1})
-	if _, ok := <-sub.C; ok {
-		t.Error("expected immediately-closed channel for post-close Subscribe")
+	select {
+	case <-sub.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected Done() to fire immediately for post-close Subscribe")
 	}
 }
 
@@ -197,6 +193,69 @@ func TestBusHooks(t *testing.T) {
 	if got := dropCount.Load(); got < 3 {
 		t.Errorf("drop hook called %d times, want >= 3", got)
 	}
+}
+
+// TestBusPublishCancelRace hammers Publish from many goroutines while
+// subscribers' contexts are concurrently cancelled. With C-close semantics
+// this would panic with "send on closed channel"; under done-signal
+// semantics it must complete cleanly and not panic.
+func TestBusPublishCancelRace(t *testing.T) {
+	b := New()
+	defer b.Close()
+
+	const publishers = 8
+	const subscribers = 16
+	const eventsPerPub = 200
+
+	var wg sync.WaitGroup
+	for i := range subscribers {
+		ctx, cancel := context.WithCancel(context.Background())
+		_ = b.Subscribe(ctx, SubscribeOptions{Buffer: 4, Name: "s"})
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			// Stagger cancellations across the publish window.
+			time.Sleep(time.Duration(idx) * 100 * time.Microsecond)
+			cancel()
+		}(i)
+	}
+
+	for range publishers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range eventsPerPub {
+				b.Publish(Event{Type: TypePieceComplete})
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestBusCloseDuringPublishRace is the same race test, but driven by
+// Bus.Close instead of per-subscription ctx cancel.
+func TestBusCloseDuringPublishRace(t *testing.T) {
+	b := New()
+
+	for range 16 {
+		_ = b.Subscribe(context.Background(), SubscribeOptions{Buffer: 4})
+	}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 200 {
+				b.Publish(Event{Type: TypePieceComplete})
+			}
+		}()
+	}
+
+	// Race Close against the storm of Publishers.
+	time.Sleep(100 * time.Microsecond)
+	b.Close()
+	wg.Wait()
 }
 
 func TestRecorder(t *testing.T) {
