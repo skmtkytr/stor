@@ -11,19 +11,24 @@ import "time"
 type Type string
 
 const (
-	TypeTorrentAdded     Type = "torrent.added"
-	TypeTorrentRemoved   Type = "torrent.removed"
-	TypeTorrentPaused    Type = "torrent.paused"
-	TypeTorrentResumed   Type = "torrent.resumed"
-	TypeStateChanged     Type = "torrent.state_changed"
-	TypeMetadataFetched  Type = "metadata.fetched"
-	TypeAnnounceReply    Type = "tracker.reply"
-	TypeAnnounceError    Type = "tracker.error"
-	TypeDHTReply         Type = "dht.reply"
-	TypePeerConnected    Type = "peer.connected"
-	TypePeerDisconnected Type = "peer.disconnected"
-	TypePieceComplete    Type = "piece.complete"
-	TypeSessionError     Type = "session.error"
+	TypeTorrentAdded          Type = "torrent.added"
+	TypeTorrentRemoved        Type = "torrent.removed"
+	TypeTorrentPaused         Type = "torrent.paused"
+	TypeTorrentResumed        Type = "torrent.resumed"
+	TypeStateChanged          Type = "torrent.state_changed"
+	TypeMetadataFetched       Type = "metadata.fetched"
+	TypeAnnounceReply         Type = "tracker.reply"
+	TypeAnnounceError         Type = "tracker.error"
+	TypeDHTReply              Type = "dht.reply"
+	TypePeerConnected         Type = "peer.connected"
+	TypePeerDisconnected      Type = "peer.disconnected"
+	TypePieceComplete         Type = "piece.complete"
+	TypeSessionError          Type = "session.error"
+	TypePeerSearchFailed      Type = "peer_search.failed"
+	TypeMetadataAttemptFailed Type = "metadata_attempt.failed"
+	TypeDHTLookupFailed       Type = "dht.lookup_failed"
+	TypeStalled               Type = "torrent.stalled"
+	TypeStallCleared          Type = "torrent.stall_cleared"
 )
 
 // Event is a single observation published to the bus.
@@ -89,4 +94,41 @@ type PieceCompletePayload struct {
 
 type SessionErrorPayload struct {
 	Error string `json:"error"`
+}
+
+// PeerSearchFailedPayload is emitted when a tracker/DHT peer search round
+// returned zero usable peers and the session is about to back off and retry.
+type PeerSearchFailedPayload struct {
+	AttemptCount int    `json:"attempt_count"`
+	NextRetryIn  int    `json:"next_retry_in_seconds"`
+	Error        string `json:"error,omitempty"`
+}
+
+// MetadataAttemptFailedPayload is emitted when one round of magnet metadata
+// fetch (tracker + DHT + ut_metadata exchange across discovered peers) failed
+// to produce a parsed TorrentFile.
+type MetadataAttemptFailedPayload struct {
+	AttemptCount int    `json:"attempt_count"`
+	NextRetryIn  int    `json:"next_retry_in_seconds"`
+	Error        string `json:"error,omitempty"`
+}
+
+// DHTLookupFailedPayload is emitted when a DHT GetPeers call returned an
+// error (timeout, no responses, etc.).
+type DHTLookupFailedPayload struct {
+	Error string `json:"error"`
+}
+
+// StalledPayload is emitted when a downloading session has been stuck at zero
+// connected peers for the configured detection window. It is fired exactly
+// once per stall episode; recovery emits StallCleared.
+type StalledPayload struct {
+	DurationSeconds int    `json:"duration_seconds"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+// StallClearedPayload is emitted when a previously-stalled session
+// reconnects to at least one peer.
+type StallClearedPayload struct {
+	StalledForSeconds int `json:"stalled_for_seconds"`
 }

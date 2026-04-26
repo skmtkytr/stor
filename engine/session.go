@@ -87,6 +87,11 @@ type Session struct {
 	// bus is the engine event bus. May be nil for tests that build a Session
 	// directly via &Session{}; setState and other emitters must guard for nil.
 	bus *events.Bus
+
+	// dhtGetPeersFn, when non-nil, replaces s.dht.GetPeers in dhtLookup.
+	// Production code leaves this nil; tests inject a stub to drive the
+	// failure-event code path without a live DHT.
+	dhtGetPeersFn func([20]byte) ([]string, error)
 }
 
 // NewSession creates a session from a persisted record.
@@ -522,6 +527,28 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 		s.listener.Register(s.tf.InfoHash, s)
 	}
 
+	// --- Stall detector ---
+	// Watches PeerCount() during the download phase. Emits TypeStalled when
+	// 0 peers persists for stallThreshold, TypeStallCleared on recovery.
+	// Stops automatically when ctx is cancelled (Pause / Stop) or when the
+	// download phase exits (cleanup calls stallCancel).
+	stallCtx, stallCancel := context.WithCancel(ctx)
+	go func() {
+		(&stallDetector{
+			bus:       s.bus,
+			torrentID: s.record.ID,
+			peers: func() int {
+				s.mu.RLock()
+				pm := s.peerMgr
+				s.mu.RUnlock()
+				if pm == nil {
+					return 0
+				}
+				return pm.PeerCount()
+			},
+		}).run(stallCtx)
+	}()
+
 	// --- Cleanup on exit (error or success) ---
 	// Note: we do NOT close peerCh here. Closing it while workers are still
 	// running causes "send on closed channel" panics from PEX (handleExtended).
@@ -530,6 +557,7 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	// The channel will be GC'd once all references are gone.
 	cleanup := func() {
 		announceCancel()
+		stallCancel()
 		s.mu.Lock()
 		s.peerCh = nil
 		// PieceQueue is only meaningful during the download phase; the
@@ -867,6 +895,20 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 		slog.Warn("metadata fetch attempt failed, retrying",
 			"id", s.record.ID, "attempt", attempt, "next_in", backoff,
 		)
+		if s.bus != nil {
+			s.bus.Publish(events.Event{
+				Type:      events.TypeMetadataAttemptFailed,
+				TorrentID: s.record.ID,
+				Payload: events.MetadataAttemptFailedPayload{
+					AttemptCount: attempt,
+					NextRetryIn:  int(backoff / time.Second),
+					// fetchMetadataAttempt swallows per-peer errors and
+					// reports aggregated counters via slog; surfacing a single
+					// representative error string is not meaningful here.
+					Error: "",
+				},
+			})
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -1074,6 +1116,25 @@ func (s *Session) fetchMetadataAttempt(ctx context.Context, m *magnet.Magnet) (*
 			"no_meta", statNoMeta.Load(),
 			"fetch_fail", statFetchFail.Load(),
 		)
+		if s.bus != nil {
+			// AttemptCount and NextRetryIn live in the outer resolveMetadata
+			// loop; this inner emit signals a single metadata round failed.
+			// TODO: thread attempt number through fetchMetadataAttempt args
+			// if a future consumer needs it.
+			errMsg := fmt.Sprintf("attempted=%d dial_fail=%d no_ext=%d no_meta=%d fetch_fail=%d peers_found=%d",
+				statAttempted.Load(), statDialFail.Load(), statNoExt.Load(),
+				statNoMeta.Load(), statFetchFail.Load(), tried,
+			)
+			s.bus.Publish(events.Event{
+				Type:      events.TypeMetadataAttemptFailed,
+				TorrentID: s.record.ID,
+				Payload: events.MetadataAttemptFailedPayload{
+					AttemptCount: 0,
+					NextRetryIn:  0,
+					Error:        errMsg,
+				},
+			})
+		}
 		return nil, peers
 	}
 	return tf, peers
@@ -1084,13 +1145,27 @@ func (s *Session) fetchMetadataAttempt(ctx context.Context, m *magnet.Magnet) (*
 // start), returns nil — we never spin up a temporary DHT just for one
 // lookup, since that would leak DNS / Bootstrap latency into every magnet
 // add and leave goroutines running past Stop().
+//
+// Tests inject dhtGetPeersFn to bypass the real DHT. Production code paths
+// leave dhtGetPeersFn nil and fall through to s.dht.GetPeers.
 func (s *Session) dhtLookup(infoHash [20]byte) []tracker.Peer {
-	if s.dht == nil {
-		return nil
+	getPeers := s.dhtGetPeersFn
+	if getPeers == nil {
+		if s.dht == nil {
+			return nil
+		}
+		getPeers = s.dht.GetPeers
 	}
-	peerAddrs, err := s.dht.GetPeers(infoHash)
+	peerAddrs, err := getPeers(infoHash)
 	if err != nil {
 		slog.Debug("dht GetPeers failed", "info_hash", hex.EncodeToString(infoHash[:]), "error", err)
+		if s.bus != nil {
+			s.bus.Publish(events.Event{
+				Type:      events.TypeDHTLookupFailed,
+				TorrentID: s.record.ID,
+				Payload:   events.DHTLookupFailedPayload{Error: err.Error()},
+			})
+		}
 		return nil
 	}
 	return parsePeerAddrs(peerAddrs)
@@ -1152,6 +1227,19 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 		slog.Warn("no peers found, retrying",
 			"id", s.record.ID, "attempt", attempt, "next_in", backoff,
 		)
+		if s.bus != nil {
+			s.bus.Publish(events.Event{
+				Type:      events.TypePeerSearchFailed,
+				TorrentID: s.record.ID,
+				Payload: events.PeerSearchFailedPayload{
+					AttemptCount: attempt,
+					NextRetryIn:  int(backoff / time.Second),
+					// findPeersAttempt aggregates per-tracker errors via slog
+					// rather than returning them; no single error string here.
+					Error: "",
+				},
+			})
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
