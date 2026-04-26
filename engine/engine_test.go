@@ -102,6 +102,50 @@ func TestEngineAddAndList(t *testing.T) {
 	}
 }
 
+// TestAddMagnetUsesDisplayName verifies that adding a magnet URI surfaces
+// the dn= parameter as the torrent name immediately, before metadata is
+// fetched. Without this the UI shows a blank/hash row for the entire
+// magnet resolution window (often tens of seconds), which is poor UX.
+func TestAddMagnetUsesDisplayName(t *testing.T) {
+	eng := newTestEngine(t)
+
+	const magURI = "magnet:?xt=urn:btih:d69f91e6b2ae4c542468d1073a71d4ea13879a7f" +
+		"&dn=My+Cool+Torrent" +
+		"&tr=http://tracker.example.com/announce"
+
+	id, err := eng.AddTorrent(magURI)
+	if err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+
+	info, err := eng.GetTorrent(id)
+	if err != nil {
+		t.Fatalf("GetTorrent: %v", err)
+	}
+	if info.Name != "My Cool Torrent" {
+		t.Errorf("Name = %q, want %q", info.Name, "My Cool Torrent")
+	}
+}
+
+// TestAddMagnetWithoutDisplayName verifies AddTorrent doesn't fail when
+// the magnet URI omits dn= (it just leaves Name empty until metadata).
+func TestAddMagnetWithoutDisplayName(t *testing.T) {
+	eng := newTestEngine(t)
+
+	const magURI = "magnet:?xt=urn:btih:d69f91e6b2ae4c542468d1073a71d4ea13879a7f"
+	id, err := eng.AddTorrent(magURI)
+	if err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	info, err := eng.GetTorrent(id)
+	if err != nil {
+		t.Fatalf("GetTorrent: %v", err)
+	}
+	if info.Name != "" {
+		t.Errorf("Name = %q, want empty (metadata not yet fetched)", info.Name)
+	}
+}
+
 func TestEngineAddDuplicate(t *testing.T) {
 	eng := newTestEngine(t)
 
