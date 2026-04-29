@@ -121,12 +121,16 @@ max_active = 5
 log_level = "info"    # debug, info, warn, error
 
 # Peer and tracker tuning
-max_peers = 100       # concurrent connections per torrent
-max_pipeline = 16     # outstanding block requests per peer
-dial_timeout = 3      # seconds
-numwant = 200         # peers requested per tracker announce
-dht_alpha = 8         # DHT lookup concurrency
-enable_utp = false    # experimental uTP transport; leave off unless you are testing
+max_peers = 500          # concurrent connections per torrent
+max_pipeline = 16        # outstanding block requests per peer
+dial_timeout = 8         # seconds — bumped from 3 so slow / distant peers aren't dropped
+max_global_dials = 200   # max concurrent outbound dials across all torrents.
+                          # Push to 500-1000 on business-grade routers (e.g. YAMAHA RTX
+                          # series) where the NAT session table can absorb it; leave
+                          # at 200 on stock home gear.
+numwant = 200            # peers requested per tracker announce
+dht_alpha = 8            # DHT lookup concurrency
+enable_utp = false       # experimental uTP transport; leave off unless you are testing
 
 # Observability (both /metrics and /debug/pprof require the API key)
 enable_metrics = false

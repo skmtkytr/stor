@@ -32,9 +32,10 @@ type Config struct {
 	MaxActive   int // max concurrent downloading torrents
 
 	// Peer connection tuning
-	MaxPeers    int // max concurrent peers per torrent (default: 100)
-	MaxPipeline int // outstanding requests per peer (default: 16)
-	DialTimeout int // peer dial timeout in seconds (default: 3)
+	MaxPeers       int // max concurrent peers per torrent (default: 500)
+	MaxPipeline    int // outstanding requests per peer (default: 16)
+	DialTimeout    int // peer dial timeout in seconds (default: 8)
+	MaxGlobalDials int // max concurrent outbound dials across all torrents (default: 200)
 
 	// Tracker tuning
 	NumWant int // peers requested from tracker (default: 200)
@@ -76,15 +77,16 @@ type FileEntry struct {
 
 // EngineConfig is the subset of Config exposed to API clients.
 type EngineConfig struct {
-	DownloadDir string `json:"download_dir"`
-	TmpDir      string `json:"tmp_dir"`
-	MaxActive   int    `json:"max_active"`
-	MaxPeers    int    `json:"max_peers"`
-	MaxPipeline int    `json:"max_pipeline"`
-	DialTimeout int    `json:"dial_timeout"`
-	NumWant     int    `json:"numwant"`
-	LogLevel    string `json:"log_level"`
-	EnableUTP   bool   `json:"enable_utp"`
+	DownloadDir    string `json:"download_dir"`
+	TmpDir         string `json:"tmp_dir"`
+	MaxActive      int    `json:"max_active"`
+	MaxPeers       int    `json:"max_peers"`
+	MaxPipeline    int    `json:"max_pipeline"`
+	DialTimeout    int    `json:"dial_timeout"`
+	MaxGlobalDials int    `json:"max_global_dials"`
+	NumWant        int    `json:"numwant"`
+	LogLevel       string `json:"log_level"`
+	EnableUTP      bool   `json:"enable_utp"`
 }
 
 // EngineStats is global daemon stats.
@@ -163,7 +165,20 @@ func New(cfg Config) (*Engine, error) {
 		cfg.MaxPipeline = 16
 	}
 	if cfg.DialTimeout <= 0 {
-		cfg.DialTimeout = 3
+		// 8 s gives slow / distant peers a fair chance — 3 s would
+		// timeout too aggressively on transcontinental hops or peers
+		// behind heavy NAT, where the TCP/uTP handshake can already
+		// take several seconds.
+		cfg.DialTimeout = 8
+	}
+	if cfg.MaxGlobalDials <= 0 {
+		// 200 is the libtorrent-style middle ground: large enough to
+		// reach a healthy fraction of a 200-peer swarm in a single
+		// round, small enough not to exhaust file descriptors on a
+		// stock ulimit -n = 1024 box. Bump this on hardware that
+		// can sustain more concurrent half-open TCP sessions
+		// (business-grade routers / servers).
+		cfg.MaxGlobalDials = 200
 	}
 	if cfg.NumWant <= 0 {
 		cfg.NumWant = 200
@@ -190,9 +205,9 @@ func New(cfg Config) (*Engine, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Global dial semaphore: limits total concurrent outgoing dials across all torrents
-	const maxGlobalDials = 50
-	dialSem := make(chan struct{}, maxGlobalDials)
+	// Global dial semaphore: limits total concurrent outgoing dials across
+	// all torrents. Sized from cfg.MaxGlobalDials (default 200, applied above).
+	dialSem := make(chan struct{}, cfg.MaxGlobalDials)
 
 	e := &Engine{
 		cfg:      cfg,
@@ -705,15 +720,16 @@ func (e *Engine) GetStats() *EngineStats {
 	stats.FreeSpace = diskFreeSpace(e.cfg.DownloadDir)
 
 	stats.Config = EngineConfig{
-		DownloadDir: e.cfg.DownloadDir,
-		TmpDir:      e.cfg.TmpDir,
-		MaxActive:   e.cfg.MaxActive,
-		MaxPeers:    e.cfg.MaxPeers,
-		MaxPipeline: e.cfg.MaxPipeline,
-		DialTimeout: e.cfg.DialTimeout,
-		NumWant:     e.cfg.NumWant,
-		LogLevel:    "", // filled by daemon layer
-		EnableUTP:   e.cfg.EnableUTP,
+		DownloadDir:    e.cfg.DownloadDir,
+		TmpDir:         e.cfg.TmpDir,
+		MaxActive:      e.cfg.MaxActive,
+		MaxPeers:       e.cfg.MaxPeers,
+		MaxPipeline:    e.cfg.MaxPipeline,
+		DialTimeout:    e.cfg.DialTimeout,
+		MaxGlobalDials: e.cfg.MaxGlobalDials,
+		NumWant:        e.cfg.NumWant,
+		LogLevel:       "", // filled by daemon layer
+		EnableUTP:      e.cfg.EnableUTP,
 	}
 
 	return stats

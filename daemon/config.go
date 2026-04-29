@@ -26,12 +26,13 @@ type Config struct {
 	LogLevel string `toml:"log_level"` // debug, info, warn, error (default: info)
 
 	// Performance tuning (0 = use defaults)
-	MaxPeers    int  `toml:"max_peers"`
-	MaxPipeline int  `toml:"max_pipeline"`
-	DialTimeout int  `toml:"dial_timeout"`
-	NumWant     int  `toml:"numwant"`
-	DHTAlpha    int  `toml:"dht_alpha"`
-	EnableUTP   bool `toml:"enable_utp"`
+	MaxPeers       int  `toml:"max_peers"`
+	MaxPipeline    int  `toml:"max_pipeline"`
+	DialTimeout    int  `toml:"dial_timeout"`
+	MaxGlobalDials int  `toml:"max_global_dials"`
+	NumWant        int  `toml:"numwant"`
+	DHTAlpha       int  `toml:"dht_alpha"`
+	EnableUTP      bool `toml:"enable_utp"`
 
 	// Observability: when true, the daemon exposes /metrics (Prometheus text
 	// format) and /debug/pprof/*. Both endpoints require the API key just
@@ -122,6 +123,9 @@ func (c *Config) Save() error {
 	if c.DialTimeout > 0 {
 		fmt.Fprintf(&b, "dial_timeout = %d\n", c.DialTimeout)
 	}
+	if c.MaxGlobalDials > 0 {
+		fmt.Fprintf(&b, "max_global_dials = %d\n", c.MaxGlobalDials)
+	}
 	if c.NumWant > 0 {
 		fmt.Fprintf(&b, "numwant = %d\n", c.NumWant)
 	}
@@ -191,6 +195,10 @@ func parseTOML(data string, cfg *Config) {
 		case "dial_timeout":
 			if n, err := strconv.Atoi(val); err == nil {
 				cfg.DialTimeout = n
+			}
+		case "max_global_dials":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.MaxGlobalDials = n
 			}
 		case "numwant":
 			if n, err := strconv.Atoi(val); err == nil {

@@ -122,17 +122,18 @@ func runDaemon() {
 		"max_active", cfg.MaxActive,
 	)
 	engCfg := engine.Config{
-		DownloadDir: cfg.DownloadDir,
-		TmpDir:      cfg.TmpDir,
-		StatePath:   cfg.StatePath,
-		ListenPort:  peerPort,
-		MaxActive:   cfg.MaxActive,
-		MaxPeers:    cfg.MaxPeers,
-		MaxPipeline: cfg.MaxPipeline,
-		DialTimeout: cfg.DialTimeout,
-		NumWant:     cfg.NumWant,
-		DHTAlpha:    cfg.DHTAlpha,
-		EnableUTP:   cfg.EnableUTP,
+		DownloadDir:    cfg.DownloadDir,
+		TmpDir:         cfg.TmpDir,
+		StatePath:      cfg.StatePath,
+		ListenPort:     peerPort,
+		MaxActive:      cfg.MaxActive,
+		MaxPeers:       cfg.MaxPeers,
+		MaxPipeline:    cfg.MaxPipeline,
+		DialTimeout:    cfg.DialTimeout,
+		MaxGlobalDials: cfg.MaxGlobalDials,
+		NumWant:        cfg.NumWant,
+		DHTAlpha:       cfg.DHTAlpha,
+		EnableUTP:      cfg.EnableUTP,
 	}
 
 	eng, err := engine.New(engCfg)
