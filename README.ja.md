@@ -96,12 +96,15 @@ max_active = 5
 log_level = "info"    # debug, info, warn, error
 
 # ピア・トラッカーのチューニング
-max_peers = 100       # トレントあたりの同時接続数
-max_pipeline = 16     # ピアあたりの未応答リクエスト数
-dial_timeout = 3      # 秒
-numwant = 200         # トラッカーへのピア要求数
-dht_alpha = 8         # DHT lookup の並列度
-enable_utp = false    # 実験的 uTP トランスポート。検証以外では有効化しない
+max_peers = 500          # トレントあたりの同時接続数
+max_pipeline = 16        # ピアあたりの未応答リクエスト数
+dial_timeout = 8         # 秒 — 3 から増。遠い peer / 重い NAT 相手の handshake を取り逃がさない
+max_global_dials = 200   # 全トレント合計の同時 outbound dial 数。
+                          # YAMAHA RTX 等の業務用ルータ（NAT セッション数に余裕がある環境）では
+                          # 500-1000 まで上げて良い。家庭用は 200 のまま推奨。
+numwant = 200            # トラッカーへのピア要求数
+dht_alpha = 8            # DHT lookup の並列度
+enable_utp = false       # 実験的 uTP トランスポート。検証以外では有効化しない
 
 # 可観測性（/metrics と /debug/pprof は API キー必須）
 enable_metrics = false
