@@ -42,12 +42,14 @@ Go の BitTorrent 実装の多くは anacrolix/torrent 等のラッパー。stor
 
 ## 主な機能
 
-- **ダウンロード**: rarest-first ピース選択、endgame モード、ピース検証付きレジューム、マルチファイル対応
+- **ダウンロード**: rarest-first ピース選択、endgame モード、ピース検証付きレジューム、マルチファイル対応、ファイル単位の優先度（normal / skip）
 - **アップロード**: ダウンロード完了後の自動シード、incoming ピア受付、BEP 3 チョーキングアルゴリズム
 - **ピア管理**: 動的ピア注入、定期 re-announce、ピア再接続、PEX、マルチトラッカー
 - **トランスポート**: TCP + MSE/PE 暗号化（RC4、平文フォールバック）。uTP/LEDBAT は実験的実装でデフォルト無効
+- **NAT 越え**: UPnP-IGD + NAT-PMP の自動ポートマッピング（標準ライブラリのみ、`goupnp` 等の依存なし）
 - **デーモン**: JSON-RPC 2.0 API、永続キュー、チューニング設定、Web 設定画面
-- **Web UI**: Deluge 風レイアウト、リアルタイム統計、フィルタ/ソート、設定エディタ
+- **観測バス**: 状態遷移・ピア・トラッカー・ピース・ストール等のイベントを内部で pub/sub。SSE エンドポイント、Prometheus カウンタ、Web UI Activity Log で公開
+- **Web UI**: Deluge 風レイアウト、Server-Sent Events によるライブ更新、トレント別 Activity Log、metadata 取得前でも magnet の `dn=` から名前を即時表示
 - **Chrome 拡張**: `.torrent` / `magnet:` リンク自動キャプチャ、ポップアップ管理
 - **Docker**: マルチアーキ（amd64/arm64）、約 9 MB distroless イメージ
 
@@ -127,6 +129,8 @@ enable_metrics = false
 | `torrent.get` | ID でトレント詳細取得 |
 | `torrent.list` | 全トレントの一覧と統計 |
 | `torrent.peers` | トレントの接続中ピア一覧 (アドレス、転送、クライアント、速度) |
+| `torrent.files` | トレント内ファイル一覧（パス・サイズ・ダウンロード済バイト・優先度） |
+| `torrent.setFilePriority` | ファイル単位で `normal` / `skip` を設定（実行中の torrent にも即時反映） |
 | `torrent.queueTop` | キュー先頭に移動 |
 | `torrent.queueUp` | キュー位置を1つ上へ |
 | `torrent.queueDown` | キュー位置を1つ下へ |
@@ -142,6 +146,7 @@ enable_metrics = false
 |--------------|------|
 | `POST /api/add` | フォームベースの追加（Chrome 拡張用） |
 | `GET /api/torrents` | トレント一覧（ポーリング用） |
+| `GET /api/events` | エンジンイベントの Server-Sent Events ストリーム。`?types=peer.connected,tracker.reply` でフィルタ可。フォーマット: `event: <type>\nid: <unix-nano>\ndata: <Event JSON>\n\n`、30 秒ごとに `: keepalive` コメント |
 | `GET /` | Web UI |
 
 ## 可観測性 (Observability)
@@ -154,7 +159,7 @@ enable_metrics = true
 
 | エンドポイント | 説明 |
 |--------------|------|
-| `GET /metrics` | Prometheus テキスト形式（`stor_torrents_total`、`stor_peers_total`、`stor_dht_nodes_total`、`stor_download_bytes_total`、`stor_upload_bytes_total`、`stor_*_speed_bytes_per_second`、`stor_free_space_bytes`、`stor_build_info`、加えて `go_goroutines` / `go_memstats_*`） |
+| `GET /metrics` | Prometheus テキスト形式（`stor_torrents_total`、`stor_peers_total`、`stor_dht_nodes_total`、`stor_download_bytes_total`、`stor_upload_bytes_total`、`stor_*_speed_bytes_per_second`、`stor_free_space_bytes`、`stor_events_published_total{type}`、`stor_events_dropped_total{subscriber}`、`stor_build_info`、加えて `go_goroutines` / `go_memstats_*`） |
 | `GET /debug/pprof/` | 標準 `net/http/pprof` ハンドラー（`cmdline` / `profile` / `symbol` / `trace`） |
 
 いずれも `/api/rpc` と同じ `Authorization: Bearer <api_key>` ヘッダーが必須。プロファイリングは実行時情報を暴露するため、認証なしでは一切公開しない。Prometheus からスクレイプする際は scrape job に `bearer_token` を設定する。
@@ -190,8 +195,9 @@ stor は悪意あるピア・トラッカー・トレントに対する多層防
 
 ```
 cmd/stor/       エントリポイント — デーモン / スタンドアロン
-daemon/         HTTP サーバー、JSON-RPC 2.0 API、設定管理
-engine/         トレントライフサイクル、キュースケジューリング、マグネット並列解決
+daemon/         HTTP サーバー、JSON-RPC 2.0 API、SSE イベントエンドポイント、設定管理
+engine/         トレントライフサイクル、キュースケジューリング、マグネット並列解決、NAT ポートマッピング (UPnP + NAT-PMP)、ストール検知
+events/         非同期 pub/sub バス（型付きイベント、fan-out、ドロップカウンタ）
 download/       ピース I/O、rarest-first、endgame、ピアマネージャー、チョーキング
 storage/        マルチファイル書き込み、ピース検証、ファイルハンドルキャッシュ
 peer/           ワイヤープロトコル、BEP 6/10/11 拡張、PEX

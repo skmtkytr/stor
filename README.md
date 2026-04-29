@@ -49,12 +49,14 @@ See [BEP.md](BEP.md) for detailed implementation notes and protocol format refer
 
 ## Features
 
-- **Download**: rarest-first piece selection, endgame mode, resume with piece verification, multi-file support
+- **Download**: rarest-first piece selection, endgame mode, resume with piece verification, multi-file support, per-file priority (skip / normal)
 - **Upload**: seeding after download, incoming peer listener, BEP 3 upload choking algorithm
 - **Peers**: dynamic peer injection, periodic tracker re-announce, peer reconnection, PEX, multitracker
 - **Transport**: TCP with MSE/PE encryption (RC4, automatic plaintext fallback); uTP/LEDBAT is experimental and off by default
+- **NAT traversal**: automatic UPnP-IGD + NAT-PMP port mapping for incoming peers (stdlib-only, no `goupnp` dependency)
 - **Daemon**: JSON-RPC 2.0 API, persistent queue, configurable tuning, web-based settings
-- **Web UI**: Deluge-inspired layout, real-time stats, filter/sort, settings editor
+- **Observability bus**: internal pub/sub for state, peer, tracker, piece, and stall events; surfaced via SSE endpoint, Prometheus counters, and the Web UI activity log
+- **Web UI**: Deluge-inspired layout, real-time stats via Server-Sent Events, per-torrent activity log, magnet name shown instantly from `dn=` before metadata arrives
 - **Chrome Extension**: intercepts `.torrent`/`magnet:` links, popup management
 - **Docker**: multi-arch (amd64/arm64), ~9 MB distroless image
 
@@ -153,6 +155,8 @@ The daemon exposes a JSON-RPC 2.0 endpoint at `POST /api/rpc`. Authentication us
 | `torrent.get` | Get torrent details by ID |
 | `torrent.list` | List all torrents with stats |
 | `torrent.peers` | List currently connected peers for a torrent (address, transport, client, speeds) |
+| `torrent.files` | List files inside a torrent (path, length, downloaded, priority) |
+| `torrent.setFilePriority` | Mark individual files as `normal` or `skip` (hot-applied to the piece queue) |
 | `torrent.queueTop` | Move torrent to top of queue |
 | `torrent.queueUp` | Move torrent up one position |
 | `torrent.queueDown` | Move torrent down one position |
@@ -168,6 +172,7 @@ Additional REST endpoints:
 |----------|-------------|
 | `POST /api/add` | Form-based add (for Chrome extension) |
 | `GET /api/torrents` | Torrent list (polling) |
+| `GET /api/events` | Server-Sent Events stream of engine events. Optional `?types=peer.connected,tracker.reply` filter. Frame format: `event: <type>\nid: <unix-nano>\ndata: <Event JSON>\n\n` with a 30 s `: keepalive` comment |
 | `GET /` | Web UI |
 
 ## Observability
@@ -180,7 +185,7 @@ enable_metrics = true
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /metrics` | Prometheus text format (`stor_torrents_total`, `stor_peers_total`, `stor_dht_nodes_total`, `stor_download_bytes_total`, `stor_upload_bytes_total`, `stor_*_speed_bytes_per_second`, `stor_free_space_bytes`, `stor_build_info`, plus `go_goroutines` / `go_memstats_*`) |
+| `GET /metrics` | Prometheus text format (`stor_torrents_total`, `stor_peers_total`, `stor_dht_nodes_total`, `stor_download_bytes_total`, `stor_upload_bytes_total`, `stor_*_speed_bytes_per_second`, `stor_free_space_bytes`, `stor_events_published_total{type}`, `stor_events_dropped_total{subscriber}`, `stor_build_info`, plus `go_goroutines` / `go_memstats_*`) |
 | `GET /debug/pprof/` | Standard `net/http/pprof` handler tree (`cmdline`, `profile`, `symbol`, `trace`) |
 
 Both endpoints require the same `Authorization: Bearer <api_key>` header as `/api/rpc` — profiling leaks runtime internals, so unauthenticated access is never allowed. If you scrape from Prometheus, configure a `bearer_token` on the scrape job.
@@ -216,8 +221,9 @@ Load `extension/` as an unpacked extension. Features:
 
 ```
 cmd/stor/       Entry point — daemon and standalone modes
-daemon/         HTTP server, JSON-RPC 2.0 API, configuration
-engine/         Torrent lifecycle, queue scheduling, parallel magnet resolution
+daemon/         HTTP server, JSON-RPC 2.0 API, SSE events endpoint, configuration
+engine/         Torrent lifecycle, queue scheduling, magnet resolution, NAT port mapping (UPnP + NAT-PMP), stall detector
+events/         Non-blocking pub/sub bus (typed events, fan-out, drop counters)
 download/       Piece-level I/O, rarest-first, endgame, peer manager, choking
 storage/        Multi-file writer, piece verification, file handle caching
 peer/           Wire protocol, BEP 6/10/11 extensions, PEX
