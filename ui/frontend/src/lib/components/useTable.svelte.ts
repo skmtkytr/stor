@@ -53,13 +53,28 @@ export function useTable<TData extends RowData>(opts: UseTableOptions<TData>) {
 	});
 	let sorting = $state<SortingState>(opts.initialSorting ?? []);
 
-	// table-core reads `state` and the on*Change callbacks from its
-	// options object. We give it the initial set, and then sync our
-	// reactive state slices into the options on every change via the
-	// $effect below.
+	// table-core reads every state slice it needs from a single `state`
+	// object — there is no per-slice default fallback, so any slice we
+	// omit becomes undefined at access time. getHeaderGroups in particular
+	// reads state.columnPinning.{left,right} unconditionally and will
+	// throw "Cannot read properties of undefined (reading 'left')" if it
+	// is missing. Provide defaults for every slice the bundled features
+	// touch; we only actively control the three we care about.
+	const stateDefaults = {
+		columnFilters: [] as never[],
+		columnOrder: [] as string[],
+		columnPinning: { left: [] as string[], right: [] as string[] },
+		columnVisibility: {} as Record<string, boolean>,
+		expanded: {} as Record<string, boolean>,
+		globalFilter: undefined,
+		grouping: [] as string[],
+		rowPinning: { top: [] as string[], bottom: [] as string[] },
+		rowSelection: {} as Record<string, boolean>,
+	};
+
 	const tbl: Table<TData> = createTable<TData>({
 		...opts,
-		state: { columnSizing, columnSizingInfo, sorting },
+		state: { ...stateDefaults, columnSizing, columnSizingInfo, sorting },
 		onColumnSizingChange: (u) => {
 			columnSizing = applyUpdater(u, columnSizing);
 		},
@@ -83,6 +98,7 @@ export function useTable<TData extends RowData>(opts: UseTableOptions<TData>) {
 		tbl.setOptions((prev) => ({
 			...prev,
 			state: {
+				...stateDefaults,
 				...prev.state,
 				columnSizing,
 				columnSizingInfo,

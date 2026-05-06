@@ -180,9 +180,25 @@
 		}
 	});
 
-	const sortedRows = $derived(tbl.table.getRowModel().rows);
-	const headers = $derived(tbl.table.getHeaderGroups()[0]?.headers ?? []);
-	const visibleCols = $derived(tbl.table.getVisibleLeafColumns());
+	// Explicit reactive deps: table-core's getters don't read Svelte $state
+	// internally, so the only way to make these recompute when filtered /
+	// sorting / column sizes change is to read those slices in the
+	// $derived expression. Without this, the table renders once and then
+	// freezes.
+	const sortedRows = $derived.by(() => {
+		void filtered;
+		void tbl.sorting;
+		return tbl.table.getRowModel().rows;
+	});
+	const headers = $derived.by(() => {
+		void tbl.columnSizing;
+		void tbl.sorting;
+		return tbl.table.getHeaderGroups()[0]?.headers ?? [];
+	});
+	const visibleCols = $derived.by(() => {
+		void tbl.columnSizing;
+		return tbl.table.getVisibleLeafColumns();
+	});
 
 	// --- Selection (kept from previous implementation) -------------------
 	function handleRowClick(e: MouseEvent, id: string, idx: number) {
