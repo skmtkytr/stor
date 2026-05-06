@@ -62,12 +62,12 @@
 	{oncontextmenu}
 >
 	<!-- # Queue -->
-	<td class="w-10 px-2 text-center text-xs tabular-nums text-zinc-500">
+	<td class="overflow-hidden px-2 text-center text-xs tabular-nums text-zinc-500">
 		{torrent.queue_position ?? "-"}
 	</td>
 
 	<!-- Name -->
-	<td class="truncate px-3 text-sm" title={torrent.name || torrent.id}>
+	<td class="overflow-hidden text-ellipsis whitespace-nowrap px-3 text-sm" title={torrent.name || torrent.id}>
 		<span class="font-medium">{torrent.name || torrent.id.slice(0, 16) + "..."}</span>
 		{#if torrent.error}
 			<span class="ml-2 text-xs text-red-400">{torrent.error}</span>

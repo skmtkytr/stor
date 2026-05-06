@@ -4,6 +4,14 @@
 	import { api } from "$lib/rpc";
 	import TorrentRow from "./TorrentRow.svelte";
 	import ContextActions from "./ContextActions.svelte";
+	import { useTable } from "./useTable.svelte";
+	import {
+		getCoreRowModel,
+		getSortedRowModel,
+		type ColumnDef,
+		type ColumnSizingState,
+		type SortingFn,
+	} from "@tanstack/table-core";
 
 	let {
 		filter = "all",
@@ -15,16 +23,13 @@
 
 	let selected = $state(new Set<string>());
 	let lastIdx = $state<number | null>(null);
-	let sortKey = $state<string>("queue");
-	let sortDesc = $state(false);
 	let ctxPos = $state<{ x: number; y: number } | null>(null);
 
-	// Notify parent of selection changes
 	$effect(() => {
 		onSelectionChange([...selected]);
 	});
 
-	// --- Filtering ---
+	// --- Filtering --------------------------------------------------------
 	const filterFn: Record<string, (t: TorrentInfo) => boolean> = {
 		all: () => true,
 		downloading: (t) => t.state === "downloading" || t.state === "metadata" || t.state === "adding",
@@ -36,65 +41,150 @@
 
 	const filtered = $derived(torrents.list.filter(filterFn[filter] ?? filterFn.all));
 
-	// --- Sorting (dynamic: re-sort every poll) ---
-	const stateOrder: Record<string, number> = {
-		downloading: 0, metadata: 1, adding: 2, seeding: 3, paused: 4, error: 5, complete: 6,
+	// --- Bucketing helpers (carried over from the pre-TanStack table) -----
+	// Speeds rounded to 100 KB/s and ETA to 10 s so jitter from polling
+	// doesn't reorder rows on every refresh.
+	const speedBucket = (b: number) => Math.round((b ?? 0) / 102400);
+	const etaBucket = (t: TorrentInfo): number => {
+		const p = t.progress;
+		if (t.state !== "downloading" || !p.down_speed) return Number.POSITIVE_INFINITY;
+		return Math.round((p.total - p.downloaded) / p.down_speed / 10);
 	};
 
-	function getSortValue(t: TorrentInfo, key: string): number | string {
-		switch (key) {
-			case "name": return t.name ?? t.id;
-			case "size": return t.total_bytes ?? 0;
-			case "progress": return Math.round(t.progress.percent ?? 0);
-			case "down": {
-				// Bucket by 100KB/s to avoid jitter from small speed fluctuations
-				const raw = t.state === "downloading" ? (t.progress.down_speed ?? 0) : 0;
-				return Math.round(raw / 102400);
-			}
-			case "up": {
-				const raw = t.progress.up_speed ?? 0;
-				return Math.round(raw / 102400);
-			}
-			case "eta": {
-				const p = t.progress;
-				if (t.state !== "downloading" || !p.down_speed) return Infinity;
-				// Bucket by 10s to avoid jitter
-				return Math.round((p.total - p.downloaded) / p.down_speed / 10);
-			}
-			case "peers": return t.progress.active_peers ?? 0;
-			case "state": return stateOrder[t.state] ?? 9;
-			case "queue": return t.queue_position ?? 9999;
-			default: return 0;
+	const stableNumeric: SortingFn<TorrentInfo> = (a, b, columnId) => {
+		const va = a.getValue<number>(columnId);
+		const vb = b.getValue<number>(columnId);
+		if (va === vb) return a.original.id.localeCompare(b.original.id);
+		return va - vb;
+	};
+
+	const stableString: SortingFn<TorrentInfo> = (a, b, columnId) => {
+		const va = String(a.getValue(columnId));
+		const vb = String(b.getValue(columnId));
+		const cmp = va.localeCompare(vb);
+		return cmp !== 0 ? cmp : a.original.id.localeCompare(b.original.id);
+	};
+
+	// --- Column model ----------------------------------------------------
+	const columns: ColumnDef<TorrentInfo>[] = [
+		{
+			id: "queue",
+			header: "#",
+			accessorFn: (t) => t.queue_position ?? 9999,
+			size: 40,
+			minSize: 30,
+			sortingFn: stableNumeric,
+			meta: { align: "center" },
+		},
+		{
+			id: "name",
+			header: "Name",
+			accessorFn: (t) => t.name ?? t.id,
+			size: 360,
+			minSize: 100,
+			sortingFn: stableString,
+			meta: { align: "left" },
+		},
+		{
+			id: "size",
+			header: "Size",
+			accessorFn: (t) => t.total_bytes ?? 0,
+			size: 80,
+			minSize: 60,
+			sortingFn: stableNumeric,
+			meta: { align: "right" },
+		},
+		{
+			id: "progress",
+			header: "Progress",
+			accessorFn: (t) => Math.round(t.progress.percent ?? 0),
+			size: 192,
+			minSize: 100,
+			sortingFn: stableNumeric,
+			meta: { align: "left" },
+		},
+		{
+			id: "down",
+			header: "Down",
+			accessorFn: (t) =>
+				t.state === "downloading" ? speedBucket(t.progress.down_speed) : 0,
+			size: 96,
+			minSize: 60,
+			sortingFn: stableNumeric,
+			meta: { align: "right" },
+		},
+		{
+			id: "up",
+			header: "Up",
+			accessorFn: (t) => speedBucket(t.progress.up_speed),
+			size: 96,
+			minSize: 60,
+			sortingFn: stableNumeric,
+			meta: { align: "right" },
+		},
+		{
+			id: "eta",
+			header: "ETA",
+			accessorFn: etaBucket,
+			size: 80,
+			minSize: 60,
+			sortingFn: stableNumeric,
+			meta: { align: "right" },
+		},
+		{
+			id: "peers",
+			header: "Peers",
+			accessorFn: (t) => t.progress.active_peers ?? 0,
+			size: 56,
+			minSize: 50,
+			sortingFn: stableNumeric,
+			meta: { align: "right" },
+		},
+	];
+
+	// --- Persisted column widths -----------------------------------------
+	const STORAGE_KEY = "stor.torrentTable.colSizes";
+	let initialSizes: ColumnSizingState = {};
+	if (typeof localStorage !== "undefined") {
+		try {
+			const raw = localStorage.getItem(STORAGE_KEY);
+			if (raw) initialSizes = JSON.parse(raw) as ColumnSizingState;
+		} catch {
+			/* corrupt entry, ignore */
 		}
 	}
 
-	// Always re-sort on every data update — read torrents.list directly to
-	// create a reactive dependency on the raw polling data, not just the
-	// filtered reference. This ensures progress/speed changes trigger re-sort.
-	const sorted = $derived.by(() => {
-		// Explicit dependency: read the raw list length + first item to ensure
-		// Svelte tracks the array identity change from polling.
-		const _raw = torrents.list;
-		const key = sortKey;
-		const desc = sortDesc;
-		return [...filtered].sort((a, b) => {
-			const va = getSortValue(a, key);
-			const vb = getSortValue(b, key);
-			const cmp = typeof va === "string"
-				? va.localeCompare(vb as string)
-				: (va as number) - (vb as number);
-			const result = desc ? -cmp : cmp;
-			// Stable sort: tie-break by ID to prevent row jumping
-			return result !== 0 ? result : a.id.localeCompare(b.id);
-		});
+	const tbl = useTable<TorrentInfo>({
+		data: [],
+		columns,
+		getCoreRowModel: getCoreRowModel(),
+		getSortedRowModel: getSortedRowModel(),
+		enableColumnResizing: true,
+		columnResizeMode: "onChange",
+		initialColumnSizing: initialSizes,
+		initialSorting: [{ id: "queue", desc: false }],
 	});
 
-	function toggleSort(key: string) {
-		if (sortKey === key) sortDesc = !sortDesc;
-		else { sortKey = key; sortDesc = false; }
-	}
+	$effect(() => {
+		tbl.setData(filtered);
+	});
 
-	// --- Selection ---
+	// Persist user-resized widths so they survive reloads.
+	$effect(() => {
+		const sizes = tbl.columnSizing;
+		if (typeof localStorage === "undefined") return;
+		try {
+			localStorage.setItem(STORAGE_KEY, JSON.stringify(sizes));
+		} catch {
+			/* quota or disabled */
+		}
+	});
+
+	const sortedRows = $derived(tbl.table.getRowModel().rows);
+	const headers = $derived(tbl.table.getHeaderGroups()[0]?.headers ?? []);
+	const visibleCols = $derived(tbl.table.getVisibleLeafColumns());
+
+	// --- Selection (kept from previous implementation) -------------------
 	function handleRowClick(e: MouseEvent, id: string, idx: number) {
 		if ((e.target as HTMLElement).closest("button")) return;
 		if (e.shiftKey && lastIdx !== null) {
@@ -102,11 +192,12 @@
 			const to = Math.max(lastIdx, idx);
 			if (!e.ctrlKey && !e.metaKey) selected = new Set();
 			const next = new Set(selected);
-			for (let i = from; i <= to; i++) next.add(sorted[i].id);
+			for (let i = from; i <= to; i++) next.add(sortedRows[i].original.id);
 			selected = next;
 		} else if (e.ctrlKey || e.metaKey) {
 			const next = new Set(selected);
-			if (next.has(id)) next.delete(id); else next.add(id);
+			if (next.has(id)) next.delete(id);
+			else next.add(id);
 			selected = next;
 		} else {
 			selected = new Set([id]);
@@ -120,7 +211,6 @@
 		ctxPos = { x: e.clientX, y: e.clientY };
 	}
 
-	// --- Batch actions (called from parent via exported function) ---
 	export async function batchAction(type: string) {
 		const ids = [...selected];
 		if (!ids.length) return;
@@ -141,35 +231,23 @@
 		}
 	}
 
-	const columns = [
-		{ id: "queue", label: "#", align: "center" },
-		{ id: "name", label: "Name", align: "left" },
-		{ id: "size", label: "Size", align: "right" },
-		{ id: "progress", label: "Progress", align: "left" },
-		{ id: "down", label: "Down", align: "right" },
-		{ id: "up", label: "Up", align: "right" },
-		{ id: "eta", label: "ETA", align: "right" },
-		{ id: "peers", label: "Peers", align: "right" },
-	] as const;
-
-	// Column widths
-	const colWidths: Record<string, string> = {
-		queue: "w-10",
-		name: "",
-		size: "w-20",
-		progress: "w-48",
-		down: "w-24",
-		up: "w-24",
-		eta: "w-20",
-		peers: "w-14",
-	};
+	function alignClass(align: unknown): string {
+		switch (align) {
+			case "right":
+				return "text-right";
+			case "center":
+				return "text-center";
+			default:
+				return "text-left";
+		}
+	}
 </script>
 
 <svelte:window
 	onkeydown={(e) => {
 		if (e.key === "a" && (e.ctrlKey || e.metaKey) && !(e.target instanceof HTMLInputElement)) {
 			e.preventDefault();
-			selected = new Set(sorted.map((t) => t.id));
+			selected = new Set(sortedRows.map((r) => r.original.id));
 		}
 		if (e.key === "Escape") {
 			selected = new Set();
@@ -181,38 +259,64 @@
 />
 
 <div class="flex-1 overflow-auto">
-	<table class="w-full border-collapse">
+	<table class="w-full table-fixed border-collapse">
+		<colgroup>
+			{#each visibleCols as col (col.id)}
+				<col style="width: {col.getSize()}px" />
+			{/each}
+		</colgroup>
 		<thead class="sticky top-0 z-10">
 			<tr class="bg-zinc-900 border-b border-zinc-800">
-				{#each columns as col}
+				{#each headers as header (header.id)}
+					{@const align = (header.column.columnDef.meta as { align?: string } | undefined)?.align}
 					<th
-						class="h-8 select-none px-3 text-[11px] font-medium uppercase tracking-wider text-zinc-500 {colWidths[col.id] ?? ''}
-							{col.align === 'right' ? 'text-right' : col.align === 'center' ? 'text-center' : 'text-left'}"
+						class="group relative h-8 select-none px-3 text-[11px] font-medium uppercase tracking-wider text-zinc-500 {alignClass(align)}"
+						style="width: {header.getSize()}px"
 					>
 						<button
 							class="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors"
-							onclick={() => toggleSort(col.id)}
+							onclick={header.column.getToggleSortingHandler()}
 						>
-							{col.label}
-							{#if sortKey === col.id}
-								<span class="text-zinc-200">{sortDesc ? "\u2193" : "\u2191"}</span>
+							{header.column.columnDef.header}
+							{#if header.column.getIsSorted() === "asc"}
+								<span class="text-zinc-200">&uarr;</span>
+							{:else if header.column.getIsSorted() === "desc"}
+								<span class="text-zinc-200">&darr;</span>
 							{/if}
 						</button>
+						{#if header.column.getCanResize()}
+							<!--
+								The resize handle: a thin column on the right edge of the
+								header. We attach pointerdown so a drag updates column size
+								via TanStack's getResizeHandler; double-click resets to the
+								column's default size.
+							-->
+							<div
+								role="separator"
+								aria-orientation="vertical"
+								class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize touch-none select-none bg-blue-500/0 hover:bg-blue-500/60 {header.column.getIsResizing() ? 'bg-blue-500' : ''}"
+								onpointerdown={(e) => {
+									e.stopPropagation();
+									header.getResizeHandler()(e);
+								}}
+								ondblclick={() => header.column.resetSize()}
+							></div>
+						{/if}
 					</th>
 				{/each}
 			</tr>
 		</thead>
 		<tbody>
-			{#each sorted as t, idx (t.id)}
+			{#each sortedRows as row, idx (row.original.id)}
 				<TorrentRow
-					torrent={t}
-					selected={selected.has(t.id)}
-					onclick={(e) => handleRowClick(e, t.id, idx)}
-					oncontextmenu={(e) => handleContextMenu(e, t.id)}
+					torrent={row.original}
+					selected={selected.has(row.original.id)}
+					onclick={(e) => handleRowClick(e, row.original.id, idx)}
+					oncontextmenu={(e) => handleContextMenu(e, row.original.id)}
 				/>
 			{:else}
 				<tr>
-					<td colspan={columns.length} class="h-32 text-center text-zinc-600 text-sm">
+					<td colspan={visibleCols.length} class="h-32 text-center text-zinc-600 text-sm">
 						No torrents. Add a magnet link or drop a .torrent file.
 					</td>
 				</tr>
@@ -227,8 +331,4 @@
 	</div>
 {/if}
 
-<ContextActions
-	selectedIds={[...selected]}
-	position={ctxPos}
-	onClose={() => (ctxPos = null)}
-/>
+<ContextActions selectedIds={[...selected]} position={ctxPos} onClose={() => (ctxPos = null)} />

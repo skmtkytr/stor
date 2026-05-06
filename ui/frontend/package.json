@@ -21,5 +21,8 @@
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
 	},
-	"type": "module"
+	"type": "module",
+	"dependencies": {
+		"@tanstack/table-core": "^8.21.3"
+	}
 }
