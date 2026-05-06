@@ -7,10 +7,8 @@
 	import { useTable } from "./useTable.svelte";
 	import {
 		getCoreRowModel,
-		getSortedRowModel,
 		type ColumnDef,
 		type ColumnSizingState,
-		type SortingFn,
 	} from "@tanstack/table-core";
 
 	let {
@@ -24,6 +22,22 @@
 	let selected = $state(new Set<string>());
 	let lastIdx = $state<number | null>(null);
 	let ctxPos = $state<{ x: number; y: number } | null>(null);
+	// Sort state lives outside table-core. Driving sort through TanStack
+	// would require pushing torrents.list → table.setOptions on every poll,
+	// and Svelte's $effect/$derived ordering meant the displayed rows
+	// could lag a tick behind the latest data. Doing sort in JS keeps
+	// data flow strictly inside one $derived and stays correct on every
+	// poll; TanStack's role is now scoped to columns + resizing.
+	let sortKey = $state<string>("queue");
+	let sortDesc = $state(false);
+
+	function toggleSort(key: string) {
+		if (sortKey === key) sortDesc = !sortDesc;
+		else {
+			sortKey = key;
+			sortDesc = false;
+		}
+	}
 
 	$effect(() => {
 		onSelectionChange([...selected]);
@@ -41,105 +55,61 @@
 
 	const filtered = $derived(torrents.list.filter(filterFn[filter] ?? filterFn.all));
 
-	// --- Bucketing helpers (carried over from the pre-TanStack table) -----
+	// --- Sort value extraction (with bucketing) ---------------------------
 	// Speeds rounded to 100 KB/s and ETA to 10 s so jitter from polling
 	// doesn't reorder rows on every refresh.
 	const speedBucket = (b: number) => Math.round((b ?? 0) / 102400);
-	const etaBucket = (t: TorrentInfo): number => {
-		const p = t.progress;
-		if (t.state !== "downloading" || !p.down_speed) return Number.POSITIVE_INFINITY;
-		return Math.round((p.total - p.downloaded) / p.down_speed / 10);
+	const stateOrder: Record<string, number> = {
+		downloading: 0,
+		metadata: 1,
+		adding: 2,
+		seeding: 3,
+		paused: 4,
+		error: 5,
+		complete: 6,
 	};
 
-	const stableNumeric: SortingFn<TorrentInfo> = (a, b, columnId) => {
-		const va = a.getValue<number>(columnId);
-		const vb = b.getValue<number>(columnId);
-		if (va === vb) return a.original.id.localeCompare(b.original.id);
-		return va - vb;
-	};
+	function getSortValue(t: TorrentInfo, key: string): number | string {
+		switch (key) {
+			case "queue":
+				return t.queue_position ?? 9999;
+			case "name":
+				return t.name ?? t.id;
+			case "size":
+				return t.total_bytes ?? 0;
+			case "progress":
+				return Math.round(t.progress.percent ?? 0);
+			case "down":
+				return t.state === "downloading" ? speedBucket(t.progress.down_speed) : 0;
+			case "up":
+				return speedBucket(t.progress.up_speed);
+			case "eta": {
+				const p = t.progress;
+				if (t.state !== "downloading" || !p.down_speed) return Number.POSITIVE_INFINITY;
+				return Math.round((p.total - p.downloaded) / p.down_speed / 10);
+			}
+			case "peers":
+				return t.progress.active_peers ?? 0;
+			case "state":
+				return stateOrder[t.state] ?? 9;
+			default:
+				return 0;
+		}
+	}
 
-	const stableString: SortingFn<TorrentInfo> = (a, b, columnId) => {
-		const va = String(a.getValue(columnId));
-		const vb = String(b.getValue(columnId));
-		const cmp = va.localeCompare(vb);
-		return cmp !== 0 ? cmp : a.original.id.localeCompare(b.original.id);
-	};
-
-	// --- Column model ----------------------------------------------------
+	// --- Column model (TanStack — sizing only) ---------------------------
+	// accessorFn / sortingFn are intentionally absent: sorting is done in
+	// JS (see sortedRows below) so it can't lag behind polling. TanStack
+	// here is purely the source of truth for column sizes / resize state.
 	const columns: ColumnDef<TorrentInfo>[] = [
-		{
-			id: "queue",
-			header: "#",
-			accessorFn: (t) => t.queue_position ?? 9999,
-			size: 40,
-			minSize: 30,
-			sortingFn: stableNumeric,
-			meta: { align: "center" },
-		},
-		{
-			id: "name",
-			header: "Name",
-			accessorFn: (t) => t.name ?? t.id,
-			size: 480,
-			minSize: 100,
-			sortingFn: stableString,
-			meta: { align: "left" },
-		},
-		{
-			id: "size",
-			header: "Size",
-			accessorFn: (t) => t.total_bytes ?? 0,
-			size: 80,
-			minSize: 60,
-			sortingFn: stableNumeric,
-			meta: { align: "right" },
-		},
-		{
-			id: "progress",
-			header: "Progress",
-			accessorFn: (t) => Math.round(t.progress.percent ?? 0),
-			size: 192,
-			minSize: 100,
-			sortingFn: stableNumeric,
-			meta: { align: "left" },
-		},
-		{
-			id: "down",
-			header: "Down",
-			accessorFn: (t) =>
-				t.state === "downloading" ? speedBucket(t.progress.down_speed) : 0,
-			size: 96,
-			minSize: 60,
-			sortingFn: stableNumeric,
-			meta: { align: "right" },
-		},
-		{
-			id: "up",
-			header: "Up",
-			accessorFn: (t) => speedBucket(t.progress.up_speed),
-			size: 96,
-			minSize: 60,
-			sortingFn: stableNumeric,
-			meta: { align: "right" },
-		},
-		{
-			id: "eta",
-			header: "ETA",
-			accessorFn: etaBucket,
-			size: 80,
-			minSize: 60,
-			sortingFn: stableNumeric,
-			meta: { align: "right" },
-		},
-		{
-			id: "peers",
-			header: "Peers",
-			accessorFn: (t) => t.progress.active_peers ?? 0,
-			size: 56,
-			minSize: 50,
-			sortingFn: stableNumeric,
-			meta: { align: "right" },
-		},
+		{ id: "queue", header: "#", size: 40, minSize: 30, meta: { align: "center", label: "#" } },
+		{ id: "name", header: "Name", size: 480, minSize: 100, meta: { align: "left", label: "Name" } },
+		{ id: "size", header: "Size", size: 80, minSize: 60, meta: { align: "right", label: "Size" } },
+		{ id: "progress", header: "Progress", size: 192, minSize: 100, meta: { align: "left", label: "Progress" } },
+		{ id: "down", header: "Down", size: 96, minSize: 60, meta: { align: "right", label: "Down" } },
+		{ id: "up", header: "Up", size: 96, minSize: 60, meta: { align: "right", label: "Up" } },
+		{ id: "eta", header: "ETA", size: 80, minSize: 60, meta: { align: "right", label: "ETA" } },
+		{ id: "peers", header: "Peers", size: 56, minSize: 50, meta: { align: "right", label: "Peers" } },
 	];
 
 	// --- Persisted column widths -----------------------------------------
@@ -158,15 +128,9 @@
 		data: [],
 		columns,
 		getCoreRowModel: getCoreRowModel(),
-		getSortedRowModel: getSortedRowModel(),
 		enableColumnResizing: true,
 		columnResizeMode: "onChange",
 		initialColumnSizing: initialSizes,
-		initialSorting: [{ id: "queue", desc: false }],
-	});
-
-	$effect(() => {
-		tbl.setData(filtered);
 	});
 
 	// Persist user-resized widths so they survive reloads.
@@ -180,22 +144,35 @@
 		}
 	});
 
+	// JS-side sort (no TanStack involvement). One $derived: read filtered
+	// + sort key/direction → return a freshly sorted array. No effect/
+	// derived ordering pitfalls; rows always reflect the current poll.
+	const sortedRows = $derived.by(() => {
+		const data = filtered;
+		const key = sortKey;
+		const desc = sortDesc;
+		return [...data].sort((a, b) => {
+			const va = getSortValue(a, key);
+			const vb = getSortValue(b, key);
+			const cmp =
+				typeof va === "string"
+					? va.localeCompare(vb as string)
+					: (va as number) - (vb as number);
+			const result = desc ? -cmp : cmp;
+			// Tie-break by ID so equal-key rows don't reshuffle on each poll.
+			return result !== 0 ? result : a.id.localeCompare(b.id);
+		});
+	});
+
 	// table-core memoises getHeaderGroups / getVisibleLeafColumns and
 	// returns the same array reference across renders unless the column
-	// set or pinning state changes. Width state lives in columnSizing,
-	// which is NOT a memo input, so plain `tbl.table.getHeaderGroups()`
-	// would hand back a stale array and Svelte (===-equality on $derived
-	// outputs) would skip the render. Build fresh row/header descriptors
-	// that include the live size; the new arrays force {#each} to
-	// iterate and re-emit `<col style="width:...">`.
-	const sortedRows = $derived.by(() => {
-		void filtered;
-		void tbl.sorting;
-		return [...tbl.table.getRowModel().rows];
-	});
+	// set / pinning state changes. Width lives in columnSizing, which is
+	// NOT a memo input, so the plain getter would hand back a stale array
+	// and Svelte (===-equality on $derived outputs) would skip the
+	// re-render. Build fresh descriptors that include the live size to
+	// force {#each} to iterate.
 	const headers = $derived.by(() => {
 		const sizing = tbl.columnSizing;
-		void tbl.sorting;
 		return (tbl.table.getHeaderGroups()[0]?.headers ?? []).map((h) => ({
 			id: h.id,
 			ref: h,
@@ -226,7 +203,7 @@
 			const to = Math.max(lastIdx, idx);
 			if (!e.ctrlKey && !e.metaKey) selected = new Set();
 			const next = new Set(selected);
-			for (let i = from; i <= to; i++) next.add(sortedRows[i].original.id);
+			for (let i = from; i <= to; i++) next.add(sortedRows[i].id);
 			selected = next;
 		} else if (e.ctrlKey || e.metaKey) {
 			const next = new Set(selected);
@@ -281,7 +258,7 @@
 	onkeydown={(e) => {
 		if (e.key === "a" && (e.ctrlKey || e.metaKey) && !(e.target instanceof HTMLInputElement)) {
 			e.preventDefault();
-			selected = new Set(sortedRows.map((r) => r.original.id));
+			selected = new Set(sortedRows.map((r) => r.id));
 		}
 		if (e.key === "Escape") {
 			selected = new Set();
@@ -315,13 +292,11 @@
 				>
 					<button
 						class="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors"
-						onclick={h.ref.column.getToggleSortingHandler()}
+						onclick={() => toggleSort(h.id)}
 					>
 						{h.ref.column.columnDef.header}
-						{#if h.ref.column.getIsSorted() === "asc"}
-							<span class="text-zinc-200">&uarr;</span>
-						{:else if h.ref.column.getIsSorted() === "desc"}
-							<span class="text-zinc-200">&darr;</span>
+						{#if sortKey === h.id}
+							<span class="text-zinc-200">{sortDesc ? "\u2193" : "\u2191"}</span>
 						{/if}
 					</button>
 					{#if h.ref.column.getCanResize()}
@@ -356,12 +331,12 @@
 
 		<!-- Body -->
 		<div role="rowgroup">
-			{#each sortedRows as row, idx (row.original.id)}
+			{#each sortedRows as t, idx (t.id)}
 				<TorrentRow
-					torrent={row.original}
-					selected={selected.has(row.original.id)}
-					onclick={(e) => handleRowClick(e, row.original.id, idx)}
-					oncontextmenu={(e) => handleContextMenu(e, row.original.id)}
+					torrent={t}
+					selected={selected.has(t.id)}
+					onclick={(e) => handleRowClick(e, t.id, idx)}
+					oncontextmenu={(e) => handleContextMenu(e, t.id)}
 				/>
 			{:else}
 				<div role="row" class="flex h-32 items-center justify-center text-center text-sm text-zinc-600">
