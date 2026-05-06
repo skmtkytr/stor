@@ -267,8 +267,23 @@ func (u *Uploader) serveLoop(c *Client) {
 		case peer.MsgHave:
 			idx, err := peer.ParseHave(msg.Payload)
 			if err == nil {
-				c.bitfield.SetPiece(int(idx))
+				c.safeBitfieldSet(int(idx))
 			}
+
+		case peer.MsgBitfield:
+			// First post-handshake bitfield. Without this, c.bitfield
+			// stayed nil and Snapshot.Progress reported every incoming
+			// peer as a 100% seeder — leeching peers showed up as 100%
+			// even while we were uploading to them.
+			c.bitfield = peer.Bitfield(msg.Payload)
+			c.haveAll = false
+
+		case peer.MsgHaveAll:
+			c.haveAll = true
+
+		case peer.MsgHaveNone:
+			c.bitfield = peer.Bitfield{}
+			c.haveAll = false
 		}
 	}
 }

@@ -853,17 +853,27 @@ func TestBuildWorkQueueLastPieceShorter(t *testing.T) {
 	}
 }
 
-func TestClientHavePieceNilBitfield(t *testing.T) {
-	// nil bitfield means "have all" (BEP 6 convention).
-	// SetPiece on nil bitfield should not panic.
-	c := &Client{
-		bitfield: nil, // have-all sentinel
-	}
+func TestClientHavePieceHaveAllFlag(t *testing.T) {
+	// haveAll flag (set by MsgHaveAll) means peer has every piece. The
+	// previous nil-bitfield-as-sentinel was ambiguous with "no info yet"
+	// and made every freshly-connected peer look like a seeder.
+	c := &Client{haveAll: true}
 	if !c.HasPiece(0) {
-		t.Error("nil bitfield should report having all pieces")
+		t.Error("haveAll=true should report having every piece")
 	}
-	// This must not panic
+	// safeBitfieldSet is a no-op when haveAll is set (the flag implies
+	// every bit is conceptually 1; we don't allocate a backing slice).
 	c.safeBitfieldSet(5)
+}
+
+func TestClientHavePieceNoInfoIsNotSeeder(t *testing.T) {
+	// A freshly-constructed Client (no bitfield, no haveAll) must NOT
+	// claim every piece. This was the source of the user-visible bug
+	// where leeching incoming peers showed Progress=100% in the UI.
+	c := &Client{}
+	if c.HasPiece(0) {
+		t.Error("default Client should not report having pieces")
+	}
 }
 
 func TestDeduplicatePeers(t *testing.T) {
@@ -910,6 +920,15 @@ func fakePeerDropAfterHandshake(t *testing.T, infoHash [20]byte, connectCount *i
 					InfoHash: infoHash,
 					PeerID:   [20]byte{'-', 'F', 'K', '0', '0', '0', '2', '-'},
 				})
+				// Send a full bitfield so the worker thinks this peer
+				// has every piece and tries to request from it. Without
+				// this, post-fix HasPiece returns false for any peer
+				// that hasn't announced its pieces, the worker has
+				// nothing to ask for, and the retry path under test is
+				// never exercised. (Was masked previously by the
+				// nil-bitfield-as-have-all sentinel.)
+				bf := peer.Bitfield{0x80} // 1 piece, set bit 0
+				_ = (&peer.Message{ID: peer.MsgBitfield, Payload: bf}).Write(c)
 				// Immediately close to simulate disconnect
 			}(conn)
 		}
