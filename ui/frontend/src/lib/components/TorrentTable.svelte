@@ -302,21 +302,31 @@
 						</button>
 						{#if header.column.getCanResize()}
 							<!--
-								The resize handle: a thin column on the right edge of the
-								header. We attach pointerdown so a drag updates column size
-								via TanStack's getResizeHandler; double-click resets to the
-								column's default size.
+								Resize handle. Wider hit area (3px) with a centered
+								1px divider line so it stays visible at rest and
+								highlights blue while dragging. Use onmousedown +
+								ontouchstart (the pair table-core's getResizeHandler
+								natively supports — onpointerdown fails its internal
+								touch-vs-mouse detection and ends up not attaching
+								the right document listeners). Double-click resets
+								the column to its default width.
 							-->
+							<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 							<div
 								role="separator"
 								aria-orientation="vertical"
-								class="absolute right-0 top-0 z-20 h-full w-1 cursor-col-resize touch-none select-none bg-blue-500/0 hover:bg-blue-500/60 {header.column.getIsResizing() ? 'bg-blue-500' : ''}"
-								onpointerdown={(e) => {
-									e.stopPropagation();
-									header.getResizeHandler()(e);
-								}}
+								class="absolute top-0 z-20 flex h-full w-3 cursor-col-resize touch-none select-none items-center justify-center"
+								style="right: -6px"
+								onmousedown={header.getResizeHandler()}
+								ontouchstart={header.getResizeHandler()}
 								ondblclick={() => header.column.resetSize()}
-							></div>
+							>
+								<span
+									class="h-4 w-px transition-colors {header.column.getIsResizing()
+										? 'w-0.5 bg-blue-400'
+										: 'bg-zinc-700 group-hover:bg-zinc-500'}"
+								></span>
+							</div>
 						{/if}
 					</th>
 				{/each}
