@@ -315,6 +315,14 @@ func (e *Engine) Start() error {
 		}
 	}()
 
+	// Drain queue progress events: every time a torrent leaves the active
+	// queue (download → seeding/complete/error/paused) we compact and
+	// kick the next queued one. The session goroutine doesn't return on
+	// download completion (it stays in the seed phase forever), so the
+	// existing onSessionDone path doesn't fire and someone has to watch
+	// the bus instead.
+	go e.runQueueOrchestrator(e.ctx)
+
 	return nil
 }
 
@@ -472,6 +480,9 @@ func (e *Engine) RemoveTorrent(id string, deleteFiles bool) error {
 	s.Pause()
 	delete(e.sessions, id)
 	e.store.Delete(id)
+	// Close the gap left by the deleted torrent so the remaining queue
+	// stays dense (0, 1, 2, ...) rather than developing holes.
+	e.compactQueueLocked()
 	e.mu.Unlock()
 
 	_ = e.store.Save()
@@ -899,6 +910,78 @@ func (e *Engine) maxQueuePosition() int {
 		}
 	}
 	return maxPos
+}
+
+// compactQueueLocked renumbers QueuePosition for every remaining session
+// so positions are dense (0, 1, 2, ...). Order is preserved by current
+// position, so a removal or a download finishing does not leave a hole
+// in the visible queue (e.g. [0, 2, 5] collapses back to [0, 1, 2]).
+// Caller must hold e.mu.Lock().
+func (e *Engine) compactQueueLocked() {
+	sessions := make([]*Session, 0, len(e.sessions))
+	for _, s := range e.sessions {
+		sessions = append(sessions, s)
+	}
+	sortByQueuePosition(sessions)
+	for i, s := range sessions {
+		s.mu.Lock()
+		if s.record.QueuePosition != i {
+			s.record.QueuePosition = i
+		}
+		s.mu.Unlock()
+	}
+}
+
+// isQueueActive reports whether a state counts toward MaxActive. Mirrors
+// activeCount: anything other than these is "out of the download queue"
+// and a transition from active → inactive should free a slot.
+func isQueueActive(s State) bool {
+	switch s {
+	case StateAdding, StateDownloading, StateMetadata, StateVerifying:
+		return true
+	}
+	return false
+}
+
+// runQueueOrchestrator subscribes to StateChanged events and advances the
+// download queue when a torrent leaves the active set. The session
+// goroutine does not exit on download → seeding (phaseSeed blocks until
+// pause/stop), so the existing onSessionDone path never fires for normal
+// completion. Without this, finishing a download leaves the MaxActive
+// slot held by the seeder and the next queued torrent stays pending
+// forever.
+func (e *Engine) runQueueOrchestrator(ctx context.Context) {
+	sub := e.bus.Subscribe(ctx, events.SubscribeOptions{
+		Buffer: 64,
+		Filter: func(ev events.Event) bool { return ev.Type == events.TypeStateChanged },
+		Name:   "queue-orchestrator",
+	})
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-sub.Done():
+			return
+		case ev, ok := <-sub.C:
+			if !ok {
+				return
+			}
+			p, ok := ev.Payload.(events.StateChangedPayload)
+			if !ok {
+				continue
+			}
+			if !isQueueActive(State(p.From)) || isQueueActive(State(p.To)) {
+				continue
+			}
+			// Active → inactive transition: compact and try to start the
+			// next queued torrent.
+			e.mu.Lock()
+			e.compactQueueLocked()
+			e.startQueuedLocked()
+			e.saveStateLocked()
+			e.mu.Unlock()
+		}
+	}
 }
 
 // SetMaxActive changes the max concurrent downloads and adjusts the queue.
