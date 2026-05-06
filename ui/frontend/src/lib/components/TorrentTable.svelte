@@ -180,24 +180,37 @@
 		}
 	});
 
-	// Explicit reactive deps: table-core's getters don't read Svelte $state
-	// internally, so the only way to make these recompute when filtered /
-	// sorting / column sizes change is to read those slices in the
-	// $derived expression. Without this, the table renders once and then
-	// freezes.
+	// table-core memoises getHeaderGroups / getVisibleLeafColumns and
+	// returns the same array reference across renders unless the column
+	// set or pinning state changes. Width state lives in columnSizing,
+	// which is NOT a memo input, so plain `tbl.table.getHeaderGroups()`
+	// would hand back a stale array and Svelte (===-equality on $derived
+	// outputs) would skip the render. Build fresh row/header descriptors
+	// that include the live size; the new arrays force {#each} to
+	// iterate and re-emit `<col style="width:...">`.
 	const sortedRows = $derived.by(() => {
 		void filtered;
 		void tbl.sorting;
-		return tbl.table.getRowModel().rows;
+		return [...tbl.table.getRowModel().rows];
 	});
 	const headers = $derived.by(() => {
-		void tbl.columnSizing;
+		const sizing = tbl.columnSizing;
 		void tbl.sorting;
-		return tbl.table.getHeaderGroups()[0]?.headers ?? [];
+		return (tbl.table.getHeaderGroups()[0]?.headers ?? []).map((h) => ({
+			id: h.id,
+			ref: h,
+			size: h.getSize(),
+			sizingTouch: sizing[h.id],
+		}));
 	});
 	const visibleCols = $derived.by(() => {
-		void tbl.columnSizing;
-		return tbl.table.getVisibleLeafColumns();
+		const sizing = tbl.columnSizing;
+		return tbl.table.getVisibleLeafColumns().map((c) => ({
+			id: c.id,
+			ref: c,
+			size: c.getSize(),
+			sizingTouch: sizing[c.id],
+		}));
 	});
 
 	// --- Selection (kept from previous implementation) -------------------
@@ -278,31 +291,31 @@
 	<table class="w-full table-fixed border-collapse">
 		<colgroup>
 			{#each visibleCols as col (col.id)}
-				<col style="width: {col.getSize()}px" />
+				<col style="width: {col.size}px" />
 			{/each}
 		</colgroup>
 		<thead class="sticky top-0 z-10">
 			<tr class="bg-zinc-900 border-b border-zinc-800">
-				{#each headers as header (header.id)}
-					{@const align = (header.column.columnDef.meta as { align?: string } | undefined)?.align}
+				{#each headers as h (h.id)}
+					{@const align = (h.ref.column.columnDef.meta as { align?: string } | undefined)?.align}
 					<th
 						class="group relative h-8 select-none px-3 text-[11px] font-medium uppercase tracking-wider text-zinc-500 {alignClass(align)}"
-						style="width: {header.getSize()}px"
+						style="width: {h.size}px"
 					>
 						<button
 							class="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors"
-							onclick={header.column.getToggleSortingHandler()}
+							onclick={h.ref.column.getToggleSortingHandler()}
 						>
-							{header.column.columnDef.header}
-							{#if header.column.getIsSorted() === "asc"}
+							{h.ref.column.columnDef.header}
+							{#if h.ref.column.getIsSorted() === "asc"}
 								<span class="text-zinc-200">&uarr;</span>
-							{:else if header.column.getIsSorted() === "desc"}
+							{:else if h.ref.column.getIsSorted() === "desc"}
 								<span class="text-zinc-200">&darr;</span>
 							{/if}
 						</button>
-						{#if header.column.getCanResize()}
+						{#if h.ref.column.getCanResize()}
 							<!--
-								Resize handle. Wider hit area (3px) with a centered
+								Resize handle. Wider hit area (12px) with a centered
 								1px divider line so it stays visible at rest and
 								highlights blue while dragging. Use onmousedown +
 								ontouchstart (the pair table-core's getResizeHandler
@@ -317,12 +330,12 @@
 								aria-orientation="vertical"
 								class="absolute top-0 z-20 flex h-full w-3 cursor-col-resize touch-none select-none items-center justify-center"
 								style="right: -6px"
-								onmousedown={header.getResizeHandler()}
-								ontouchstart={header.getResizeHandler()}
-								ondblclick={() => header.column.resetSize()}
+								onmousedown={h.ref.getResizeHandler()}
+								ontouchstart={h.ref.getResizeHandler()}
+								ondblclick={() => h.ref.column.resetSize()}
 							>
 								<span
-									class="h-4 w-px transition-colors {header.column.getIsResizing()
+									class="h-4 w-px transition-colors {h.ref.column.getIsResizing()
 										? 'w-0.5 bg-blue-400'
 										: 'bg-zinc-700 group-hover:bg-zinc-500'}"
 								></span>
