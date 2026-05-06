@@ -213,6 +213,11 @@
 		}));
 	});
 
+	// Grid template that drives both header and rows. Rebuilt whenever any
+	// column size changes; passed down as a CSS variable so every row picks
+	// it up without prop plumbing.
+	const gridTemplate = $derived(visibleCols.map((c) => `${c.size}px`).join(" "));
+
 	// --- Selection (kept from previous implementation) -------------------
 	function handleRowClick(e: MouseEvent, id: string, idx: number) {
 		if ((e.target as HTMLElement).closest("button")) return;
@@ -287,75 +292,70 @@
 	}}
 />
 
-<div class="flex-1 overflow-auto">
-	<!--
-		Natural width: sum of explicit <col> widths. No w-full / min-w-full
-		forcing the table to fit the viewport — that would make CSS
-		proportionally rescale every column whenever one is dragged, which
-		is exactly the unintuitive behaviour we used to have. Letting the
-		table's intrinsic width win means dragging column N's right edge
-		moves that edge with the cursor and pushes everything to its right
-		over (parent's overflow-x handles the scroll if the sum exceeds
-		the viewport).
-	-->
-	<table class="table-fixed border-collapse">
-		<colgroup>
-			{#each visibleCols as col (col.id)}
-				<col style="width: {col.size}px" />
-			{/each}
-		</colgroup>
-		<thead class="sticky top-0 z-10">
-			<tr class="bg-zinc-900 border-b border-zinc-800">
-				{#each headers as h (h.id)}
-					{@const align = (h.ref.column.columnDef.meta as { align?: string } | undefined)?.align}
-					<th
-						class="group relative h-8 select-none px-3 text-[11px] font-medium uppercase tracking-wider text-zinc-500 {alignClass(align)}"
-						style="width: {h.size}px"
+<!--
+	CSS Grid layout (not <table>). Column widths come straight from
+	grid-template-columns, which we set per-row from a single CSS
+	variable. Dragging a column updates that one entry; the other
+	entries stay literal pixel values, so no rebalancing or rescaling
+	can happen. The wrapper's overflow-x scrolls when total > viewport.
+-->
+<div class="flex-1 overflow-auto" style="--grid-cols: {gridTemplate}">
+	<div role="table" class="min-w-max">
+		<!-- Header -->
+		<div
+			role="row"
+			class="sticky top-0 z-10 grid h-8 border-b border-zinc-800 bg-zinc-900"
+			style="grid-template-columns: var(--grid-cols)"
+		>
+			{#each headers as h (h.id)}
+				{@const align = (h.ref.column.columnDef.meta as { align?: string } | undefined)?.align}
+				<div
+					role="columnheader"
+					class="group relative flex h-full select-none items-center px-3 text-[11px] font-medium uppercase tracking-wider text-zinc-500 {alignClass(align) === 'text-right' ? 'justify-end' : alignClass(align) === 'text-center' ? 'justify-center' : 'justify-start'}"
+				>
+					<button
+						class="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors"
+						onclick={h.ref.column.getToggleSortingHandler()}
 					>
-						<button
-							class="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors"
-							onclick={h.ref.column.getToggleSortingHandler()}
-						>
-							{h.ref.column.columnDef.header}
-							{#if h.ref.column.getIsSorted() === "asc"}
-								<span class="text-zinc-200">&uarr;</span>
-							{:else if h.ref.column.getIsSorted() === "desc"}
-								<span class="text-zinc-200">&darr;</span>
-							{/if}
-						</button>
-						{#if h.ref.column.getCanResize()}
-							<!--
-								Resize handle. Wider hit area (12px) with a centered
-								1px divider line so it stays visible at rest and
-								highlights blue while dragging. Use onmousedown +
-								ontouchstart (the pair table-core's getResizeHandler
-								natively supports — onpointerdown fails its internal
-								touch-vs-mouse detection and ends up not attaching
-								the right document listeners). Double-click resets
-								the column to its default width.
-							-->
-							<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-							<div
-								role="separator"
-								aria-orientation="vertical"
-								class="absolute top-0 z-20 flex h-full w-3 cursor-col-resize touch-none select-none items-center justify-center"
-								style="right: -6px"
-								onmousedown={h.ref.getResizeHandler()}
-								ontouchstart={h.ref.getResizeHandler()}
-								ondblclick={() => h.ref.column.resetSize()}
-							>
-								<span
-									class="h-4 w-px transition-colors {h.ref.column.getIsResizing()
-										? 'w-0.5 bg-blue-400'
-										: 'bg-zinc-700 group-hover:bg-zinc-500'}"
-								></span>
-							</div>
+						{h.ref.column.columnDef.header}
+						{#if h.ref.column.getIsSorted() === "asc"}
+							<span class="text-zinc-200">&uarr;</span>
+						{:else if h.ref.column.getIsSorted() === "desc"}
+							<span class="text-zinc-200">&darr;</span>
 						{/if}
-					</th>
-				{/each}
-			</tr>
-		</thead>
-		<tbody>
+					</button>
+					{#if h.ref.column.getCanResize()}
+						<!--
+							12px hit area centred on the column boundary, with a
+							1px zinc divider that brightens on hover and turns
+							blue while dragging. onmousedown + ontouchstart are
+							the pair table-core's getResizeHandler natively
+							supports (pointerdown fails its touch-vs-mouse
+							detection). Double-click resets to default width.
+						-->
+						<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+						<div
+							role="separator"
+							aria-orientation="vertical"
+							class="absolute top-0 z-20 flex h-full w-3 cursor-col-resize touch-none select-none items-center justify-center"
+							style="right: -6px"
+							onmousedown={h.ref.getResizeHandler()}
+							ontouchstart={h.ref.getResizeHandler()}
+							ondblclick={() => h.ref.column.resetSize()}
+						>
+							<span
+								class="h-4 w-px transition-colors {h.ref.column.getIsResizing()
+									? 'w-0.5 bg-blue-400'
+									: 'bg-zinc-700 group-hover:bg-zinc-500'}"
+							></span>
+						</div>
+					{/if}
+				</div>
+			{/each}
+		</div>
+
+		<!-- Body -->
+		<div role="rowgroup">
 			{#each sortedRows as row, idx (row.original.id)}
 				<TorrentRow
 					torrent={row.original}
@@ -364,14 +364,12 @@
 					oncontextmenu={(e) => handleContextMenu(e, row.original.id)}
 				/>
 			{:else}
-				<tr>
-					<td colspan={visibleCols.length} class="h-32 text-center text-zinc-600 text-sm">
-						No torrents. Add a magnet link or drop a .torrent file.
-					</td>
-				</tr>
+				<div role="row" class="flex h-32 items-center justify-center text-center text-sm text-zinc-600">
+					No torrents. Add a magnet link or drop a .torrent file.
+				</div>
 			{/each}
-		</tbody>
-	</table>
+		</div>
+	</div>
 </div>
 
 {#if selected.size > 0}
