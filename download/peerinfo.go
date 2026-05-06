@@ -41,9 +41,9 @@ func (c *Client) Snapshot(numPieces int) PeerSnap {
 	var progress float64
 	if numPieces > 0 {
 		have := 0
-		if c.bitfield == nil {
-			have = numPieces // have-all sentinel
-		} else {
+		if c.haveAll {
+			have = numPieces
+		} else if c.bitfield != nil {
 			for i := range numPieces {
 				if c.bitfield.HasPiece(i) {
 					have++

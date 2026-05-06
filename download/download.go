@@ -90,14 +90,22 @@ func newPiecePool(size int) *sync.Pool {
 
 // Client represents a connection to a single peer with buffered I/O.
 type Client struct {
-	conn           net.Conn
-	r              *bufio.Reader
-	w              *bufio.Writer
-	wmu            sync.Mutex // protects w from concurrent writes (BroadcastHave vs DownloadPiece)
-	stateMu        sync.Mutex // protects choked, choking, sentInterested
-	peerID         [20]byte
-	infoHash       [20]byte
+	conn     net.Conn
+	r        *bufio.Reader
+	w        *bufio.Writer
+	wmu      sync.Mutex // protects w from concurrent writes (BroadcastHave vs DownloadPiece)
+	stateMu  sync.Mutex // protects choked, choking, sentInterested
+	peerID   [20]byte
+	infoHash [20]byte
+	// Remote peer's piece set. The bitfield is updated as Have/Bitfield/
+	// HaveNone messages arrive; the haveAll flag is set on MsgHaveAll and
+	// short-circuits HasPiece without requiring an N-bit-wide bitfield.
+	// We deliberately do NOT use `nil bitfield` as a have-all sentinel:
+	// a freshly-constructed Client has no information yet and would be
+	// misclassified as a seeder, which leaks into UI Snapshot and into
+	// piece-selection decisions. Default = empty (have-none).
 	bitfield       peer.Bitfield
+	haveAll        bool
 	choked         bool // we are choked by peer
 	choking        bool // we are choking peer
 	sentInterested bool
@@ -410,12 +418,16 @@ func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int
 		switch msg.ID {
 		case peer.MsgBitfield:
 			c.bitfield = peer.Bitfield(msg.Payload)
+			c.haveAll = false
 		case peer.MsgHaveAll:
-			// BEP 6: peer has all pieces — set full bitfield later when numPieces is known
-			c.bitfield = nil // sentinel: nil means "have all"
+			// BEP 6: peer has all pieces. Track via the explicit flag
+			// instead of nil-bitfield sentinel so HasPiece / Snapshot
+			// can distinguish "seeder" from "no info yet".
+			c.haveAll = true
 		case peer.MsgHaveNone:
 			// BEP 6: peer has no pieces
 			c.bitfield = peer.Bitfield{}
+			c.haveAll = false
 		case peer.MsgExtended:
 			c.handleExtended(msg.Payload)
 		case peer.MsgUnchoke:
@@ -486,10 +498,10 @@ func (c *Client) Close() error {
 
 // ValidateBitfield checks that the peer's bitfield is the expected size for numPieces.
 // Returns an error if the bitfield is oversized (potential DoS).
-// nil (have-all) and empty (have-none) bitfields are always valid.
+// haveAll-via-flag and empty (have-none) bitfields are always valid.
 func (c *Client) ValidateBitfield(numPieces int) error {
-	if c.bitfield == nil || len(c.bitfield) == 0 {
-		return nil // have-all or have-none sentinels
+	if c.haveAll || len(c.bitfield) == 0 {
+		return nil
 	}
 	expected := (numPieces + 7) / 8
 	if len(c.bitfield) != expected {
@@ -499,17 +511,19 @@ func (c *Client) ValidateBitfield(numPieces int) error {
 }
 
 // HasPiece returns whether the peer has the given piece.
-// A nil bitfield means "have all" (BEP 6 have-all).
 func (c *Client) HasPiece(index int) bool {
-	if c.bitfield == nil {
-		return true // have-all
+	if c.haveAll {
+		return true
 	}
 	return c.bitfield.HasPiece(index)
 }
 
-// safeBitfieldSet sets a piece in the bitfield if it is non-nil.
-// nil bitfield means "have all", so setting individual pieces is a no-op.
+// safeBitfieldSet sets a piece in the bitfield. No-op when haveAll is
+// already true (the flag implies every bit is set, no allocation needed).
 func (c *Client) safeBitfieldSet(index int) {
+	if c.haveAll {
+		return
+	}
 	if c.bitfield != nil {
 		c.bitfield.SetPiece(index)
 	}
