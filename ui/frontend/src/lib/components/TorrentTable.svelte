@@ -83,6 +83,12 @@
 			size: 360,
 			minSize: 100,
 			sortingFn: stableString,
+			// Name is the layout's flex column: it has no explicit <col>
+			// width and absorbs whatever space the other (resizable)
+			// columns leave behind. Disable its resize handle since
+			// dragging it would update state but produce no visible
+			// change — its width is computed by the browser.
+			enableResizing: false,
 			meta: { align: "left" },
 		},
 		{
@@ -288,10 +294,22 @@
 />
 
 <div class="flex-1 overflow-auto">
-	<table class="w-full table-fixed border-collapse">
+	<table class="min-w-full table-fixed border-collapse">
 		<colgroup>
 			{#each visibleCols as col (col.id)}
-				<col style="width: {col.size}px" />
+				{#if col.id === "name"}
+					<!--
+						Auto width: this column expands to fill whatever
+						space the explicit-width columns leave behind. Drag
+						any other column's resizer and ONLY that column
+						changes; this one absorbs the difference. Without
+						this, table-layout: fixed + width: 100% forces
+						proportional rescaling of every column on each drag.
+					-->
+					<col />
+				{:else}
+					<col style="width: {col.size}px" />
+				{/if}
 			{/each}
 		</colgroup>
 		<thead class="sticky top-0 z-10">
@@ -299,8 +317,8 @@
 				{#each headers as h (h.id)}
 					{@const align = (h.ref.column.columnDef.meta as { align?: string } | undefined)?.align}
 					<th
-						class="group relative h-8 select-none px-3 text-[11px] font-medium uppercase tracking-wider text-zinc-500 {alignClass(align)}"
-						style="width: {h.size}px"
+						class="group relative h-8 select-none px-3 text-[11px] font-medium uppercase tracking-wider text-zinc-500 {alignClass(align)} {h.id === 'name' ? 'min-w-[120px]' : ''}"
+						style={h.id === "name" ? "" : `width: ${h.size}px`}
 					>
 						<button
 							class="inline-flex items-center gap-1 hover:text-zinc-200 transition-colors"
