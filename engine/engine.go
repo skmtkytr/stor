@@ -37,6 +37,13 @@ type Config struct {
 	DialTimeout    int // peer dial timeout in seconds (default: 8)
 	MaxGlobalDials int // max concurrent outbound dials across all torrents (default: 200)
 
+	// Dynamic pipeline (BDP-derived) tuning. Zero = use download-package
+	// defaults. PipelineMin == PipelineMax (or only MaxPipeline above)
+	// keeps the legacy fixed-depth scheduler.
+	PipelineMin        int // min outstanding requests per peer (default: 4)
+	PipelineMax        int // max outstanding requests per peer (default: 256)
+	PipelineWindowSecs int // BDP window in seconds (default: 3)
+
 	// Tracker tuning
 	NumWant int // peers requested from tracker (default: 200)
 
@@ -1071,12 +1078,15 @@ func (e *Engine) sessionToInfo(s *Session) *TorrentInfo {
 
 func (e *Engine) downloadConfig() download.DownloadConfig {
 	return download.DownloadConfig{
-		MaxPeers:    e.cfg.MaxPeers,
-		MaxPipeline: e.cfg.MaxPipeline,
-		DialTimeout: e.cfg.DialTimeout,
-		Encryption:  true, // always try MSE/PE in production
-		EnableUTP:   e.cfg.EnableUTP,
-		DialSem:     e.dialSem, // shared across all torrents
+		MaxPeers:           e.cfg.MaxPeers,
+		MaxPipeline:        e.cfg.MaxPipeline,
+		PipelineMin:        e.cfg.PipelineMin,
+		PipelineMax:        e.cfg.PipelineMax,
+		PipelineWindowSecs: e.cfg.PipelineWindowSecs,
+		DialTimeout:        e.cfg.DialTimeout,
+		Encryption:         true, // always try MSE/PE in production
+		EnableUTP:          e.cfg.EnableUTP,
+		DialSem:            e.dialSem, // shared across all torrents
 	}
 }
 

@@ -34,6 +34,13 @@ type Config struct {
 	DHTAlpha       int  `toml:"dht_alpha"`
 	EnableUTP      bool `toml:"enable_utp"`
 
+	// Dynamic pipeline knobs (BDP-derived; libtorrent-style).
+	// All zero = use engine defaults. PipelineMin == PipelineMax (or
+	// only MaxPipeline set above) collapses to fixed-depth behaviour.
+	PipelineMin        int `toml:"pipeline_min"`
+	PipelineMax        int `toml:"pipeline_max"`
+	PipelineWindowSecs int `toml:"pipeline_window_secs"`
+
 	// Observability: when true, the daemon exposes /metrics (Prometheus text
 	// format) and /debug/pprof/*. Both endpoints require the API key just
 	// like the RPC endpoint. Off by default.
@@ -126,6 +133,15 @@ func (c *Config) Save() error {
 	if c.MaxGlobalDials > 0 {
 		fmt.Fprintf(&b, "max_global_dials = %d\n", c.MaxGlobalDials)
 	}
+	if c.PipelineMin > 0 {
+		fmt.Fprintf(&b, "pipeline_min = %d\n", c.PipelineMin)
+	}
+	if c.PipelineMax > 0 {
+		fmt.Fprintf(&b, "pipeline_max = %d\n", c.PipelineMax)
+	}
+	if c.PipelineWindowSecs > 0 {
+		fmt.Fprintf(&b, "pipeline_window_secs = %d\n", c.PipelineWindowSecs)
+	}
 	if c.NumWant > 0 {
 		fmt.Fprintf(&b, "numwant = %d\n", c.NumWant)
 	}
@@ -199,6 +215,18 @@ func parseTOML(data string, cfg *Config) {
 		case "max_global_dials":
 			if n, err := strconv.Atoi(val); err == nil {
 				cfg.MaxGlobalDials = n
+			}
+		case "pipeline_min":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.PipelineMin = n
+			}
+		case "pipeline_max":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.PipelineMax = n
+			}
+		case "pipeline_window_secs":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.PipelineWindowSecs = n
 			}
 		case "numwant":
 			if n, err := strconv.Atoi(val); err == nil {
