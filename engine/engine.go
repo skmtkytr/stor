@@ -46,6 +46,12 @@ type Config struct {
 	// Transport
 	EnableUTP bool // enable uTP transport (try uTP before TCP)
 
+	// PrioritizeFirstLast: when true, every new download prioritizes the
+	// first and last piece before rarest-first kicks in. Useful for
+	// streaming media. Off by default (deluge parity:
+	// `prioritize_first_last_pieces`).
+	PrioritizeFirstLast bool
+
 	// Testing flags
 	DisableDHT      bool // skip DHT startup
 	DisableListener bool // skip peer TCP listener
@@ -1071,12 +1077,13 @@ func (e *Engine) sessionToInfo(s *Session) *TorrentInfo {
 
 func (e *Engine) downloadConfig() download.DownloadConfig {
 	return download.DownloadConfig{
-		MaxPeers:    e.cfg.MaxPeers,
-		MaxPipeline: e.cfg.MaxPipeline,
-		DialTimeout: e.cfg.DialTimeout,
-		Encryption:  true, // always try MSE/PE in production
-		EnableUTP:   e.cfg.EnableUTP,
-		DialSem:     e.dialSem, // shared across all torrents
+		MaxPeers:            e.cfg.MaxPeers,
+		MaxPipeline:         e.cfg.MaxPipeline,
+		DialTimeout:         e.cfg.DialTimeout,
+		Encryption:          true, // always try MSE/PE in production
+		EnableUTP:           e.cfg.EnableUTP,
+		DialSem:             e.dialSem, // shared across all torrents
+		PrioritizeFirstLast: e.cfg.PrioritizeFirstLast,
 	}
 }
 
