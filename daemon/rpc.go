@@ -418,6 +418,8 @@ func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
 		PipelineMin         *int    `json:"pipeline_min"`
 		PipelineMax         *int    `json:"pipeline_max"`
 		PipelineWindowSecs  *int    `json:"pipeline_window_secs"`
+		SocketSendBuffer    *int    `json:"socket_send_buffer_bytes"`
+		SocketRecvBuffer    *int    `json:"socket_recv_buffer_bytes"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &rpcErr{Code: -32602, Message: "invalid params"}
@@ -475,6 +477,12 @@ func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
 	if p.PipelineWindowSecs != nil && *p.PipelineWindowSecs >= 0 {
 		h.engine.SetPipelineWindowSecs(*p.PipelineWindowSecs)
 	}
+	if p.SocketSendBuffer != nil && *p.SocketSendBuffer >= 0 {
+		h.engine.SetSocketSendBuffer(*p.SocketSendBuffer)
+	}
+	if p.SocketRecvBuffer != nil && *p.SocketRecvBuffer >= 0 {
+		h.engine.SetSocketRecvBuffer(*p.SocketRecvBuffer)
+	}
 	if p.LogLevel != nil {
 		slog.SetLogLoggerLevel(ParseLogLevel(*p.LogLevel))
 	}
@@ -521,6 +529,12 @@ func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
 	}
 	if p.PipelineWindowSecs != nil && *p.PipelineWindowSecs >= 0 {
 		h.cfg.PipelineWindowSecs = *p.PipelineWindowSecs
+	}
+	if p.SocketSendBuffer != nil && *p.SocketSendBuffer >= 0 {
+		h.cfg.SocketSendBuffer = *p.SocketSendBuffer
+	}
+	if p.SocketRecvBuffer != nil && *p.SocketRecvBuffer >= 0 {
+		h.cfg.SocketRecvBuffer = *p.SocketRecvBuffer
 	}
 	if err := h.cfg.Save(); err != nil {
 		slog.Warn("config save failed", "error", err)

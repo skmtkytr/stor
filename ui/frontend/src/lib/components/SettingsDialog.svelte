@@ -21,6 +21,8 @@
 		pipeline_min: 0,
 		pipeline_max: 0,
 		pipeline_window_secs: 0,
+		socket_send_buffer_bytes: 0,
+		socket_recv_buffer_bytes: 0,
 	});
 	let saveMsg = $state("");
 	let saving = $state(false);
@@ -257,6 +259,39 @@
 				<p class="text-xs text-zinc-500">
 					Pipeline depth = clamp(min, max, downRate × window / 16KiB).
 					Leave 0 to use defaults.
+				</p>
+
+				<div class="grid grid-cols-2 gap-3">
+					<label class="space-y-1">
+						<span class="text-sm text-zinc-300">Socket Send Buffer (bytes)</span>
+						<input
+							type="number"
+							min="0"
+							step="65536"
+							bind:value={cfg.socket_send_buffer_bytes}
+							placeholder="0 (auto-tune)"
+							class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+						/>
+					</label>
+					<label class="space-y-1">
+						<span class="text-sm text-zinc-300">Socket Recv Buffer (bytes)</span>
+						<input
+							type="number"
+							min="0"
+							step="65536"
+							bind:value={cfg.socket_recv_buffer_bytes}
+							placeholder="0 (auto-tune)"
+							class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+						/>
+					</label>
+				</div>
+				<p class="text-xs text-zinc-500">
+					0 = OS auto-tuning (recommended). Setting a value disables
+					auto-tuning and pins the buffer at 2× this size, which
+					can cap throughput below the auto-tune ceiling on healthy
+					peers. Override only if you know your kernel's
+					tcp_rmem/tcp_wmem max is too low (~1 MiB is a reasonable
+					floor if you must).
 				</p>
 
 				<div class="border-t border-zinc-800"></div>

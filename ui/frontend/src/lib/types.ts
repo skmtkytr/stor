@@ -37,6 +37,12 @@ export interface EngineConfig {
 	pipeline_min?: number;
 	pipeline_max?: number;
 	pipeline_window_secs?: number;
+	// Per-peer TCP socket buffer overrides. 0 (default) = leave the
+	// kernel's TCP buffer auto-tuning enabled — recommended. Setting
+	// a positive value disables auto-tuning and pins the buffer at
+	// 2*value (Linux doubles internally for accounting).
+	socket_send_buffer_bytes?: number;
+	socket_recv_buffer_bytes?: number;
 }
 
 export interface ProgressSnap {

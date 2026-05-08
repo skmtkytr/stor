@@ -44,6 +44,15 @@ type Config struct {
 	PipelineMax        int // max outstanding requests per peer (default: 256)
 	PipelineWindowSecs int // BDP window in seconds (default: 3)
 
+	// Per-peer TCP socket buffer overrides. Zero (the default) leaves
+	// the kernel TCP auto-tuning enabled — strongly recommended.
+	// Setting a positive value pins the buffer at 2*value (Linux
+	// doubles for accounting) and disables auto-tuning, which can
+	// silently cap throughput. ~1 MiB is a reasonable starting point
+	// if you must override.
+	SocketSendBuffer int
+	SocketRecvBuffer int
+
 	// Tracker tuning
 	NumWant int // peers requested from tracker (default: 200)
 
@@ -112,6 +121,8 @@ type EngineConfig struct {
 	PipelineMin         int    `json:"pipeline_min"`
 	PipelineMax         int    `json:"pipeline_max"`
 	PipelineWindowSecs  int    `json:"pipeline_window_secs"`
+	SocketSendBuffer    int    `json:"socket_send_buffer_bytes"`
+	SocketRecvBuffer    int    `json:"socket_recv_buffer_bytes"`
 }
 
 // EngineStats is global daemon stats.
@@ -244,6 +255,12 @@ func New(cfg Config) (*Engine, error) {
 		cancel:   cancel,
 		bus:      events.New(),
 	}
+
+	// Publish socket buffer overrides to the package-level state read
+	// by tunePeerSocket. Setters update both cfg and the package state;
+	// startup must mirror that contract so the very first connection
+	// sees the configured values, not the zero default.
+	download.SetPeerSocketBuffers(cfg.SocketSendBuffer, cfg.SocketRecvBuffer)
 
 	return e, nil
 }
@@ -771,6 +788,8 @@ func (e *Engine) GetStats() *EngineStats {
 		PipelineMin:         e.cfg.PipelineMin,
 		PipelineMax:         e.cfg.PipelineMax,
 		PipelineWindowSecs:  e.cfg.PipelineWindowSecs,
+		SocketSendBuffer:    e.cfg.SocketSendBuffer,
+		SocketRecvBuffer:    e.cfg.SocketRecvBuffer,
 	}
 
 	return stats
@@ -1121,6 +1140,36 @@ func (e *Engine) SetPipelineWindowSecs(n int) {
 	e.mu.Lock()
 	e.cfg.PipelineWindowSecs = n
 	e.mu.Unlock()
+}
+
+// SetSocketSendBuffer sets SO_SNDBUF for new peer TCP connections.
+// 0 (the default) leaves Linux's TCP send-buffer auto-tuning enabled.
+// A positive value pins the buffer at 2*n (kernel doubles for
+// accounting) and disables auto-tuning — see download.SetPeerSocketBuffers
+// for the trade-off.
+func (e *Engine) SetSocketSendBuffer(n int) {
+	if n < 0 {
+		n = 0
+	}
+	e.mu.Lock()
+	e.cfg.SocketSendBuffer = n
+	recv := e.cfg.SocketRecvBuffer
+	e.mu.Unlock()
+	download.SetPeerSocketBuffers(n, recv)
+}
+
+// SetSocketRecvBuffer sets SO_RCVBUF for new peer TCP connections.
+// 0 (the default) leaves Linux's TCP receive-buffer auto-tuning enabled.
+// See SetSocketSendBuffer for the trade-off.
+func (e *Engine) SetSocketRecvBuffer(n int) {
+	if n < 0 {
+		n = 0
+	}
+	e.mu.Lock()
+	e.cfg.SocketRecvBuffer = n
+	send := e.cfg.SocketSendBuffer
+	e.mu.Unlock()
+	download.SetPeerSocketBuffers(send, n)
 }
 
 func (e *Engine) sessionToInfo(s *Session) *TorrentInfo {

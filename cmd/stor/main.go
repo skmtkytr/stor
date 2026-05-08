@@ -132,6 +132,8 @@ func runDaemon() {
 		PipelineMin:         cfg.PipelineMin,
 		PipelineMax:         cfg.PipelineMax,
 		PipelineWindowSecs:  cfg.PipelineWindowSecs,
+		SocketSendBuffer:    cfg.SocketSendBuffer,
+		SocketRecvBuffer:    cfg.SocketRecvBuffer,
 		DialTimeout:         cfg.DialTimeout,
 		MaxGlobalDials:      cfg.MaxGlobalDials,
 		NumWant:             cfg.NumWant,
