@@ -32,6 +32,16 @@ type PieceQueue struct {
 	// — this is a dynamic filter. Pieces set in skipMask are still in
 	// pq.pieces and become pickable again when the bit is cleared.
 	skipMask peer.Bitfield
+
+	// priority is the set of piece indices that should be handed out
+	// before any availability bucket is consulted. Used for the
+	// `prioritize_first_last_pieces` option (deluge parity): when
+	// enabled at construction, the first and last piece are placed
+	// here so streaming clients can decode container metadata from
+	// both ends as soon as possible. Pieces stay in the regular
+	// availability buckets too — Complete() removes them from both
+	// places, so once a priority piece is done it never comes back.
+	priority map[int]bool
 }
 
 // NewPieceQueue creates a piece queue from a list of pieces to download.
@@ -44,6 +54,26 @@ func NewPieceQueue(pieces []PieceWork) *PieceQueue {
 // calling NewPieceQueue directly. Skipped pieces are never handed out by
 // Pick and do not count toward Remaining().
 func NewPieceQueueWithSkip(pieces []PieceWork, skipMask peer.Bitfield) *PieceQueue {
+	return NewPieceQueueWithOptions(pieces, skipMask, 0, false)
+}
+
+// NewPieceQueueWithOptions is the full constructor. In addition to the
+// skipMask handling of NewPieceQueueWithSkip, it accepts:
+//
+//   - totalPieces: the original piece count of the torrent (NOT the post-skip
+//     length). Used to identify the "last" piece when
+//     prioritizeFirstLast is true. A non-positive value disables the
+//     priority logic regardless of the flag.
+//   - prioritizeFirstLast: when true, piece index 0 and piece index
+//     totalPieces-1 (if not already filtered by skipMask) are placed in
+//     a separate priority bucket that Pick consults before any
+//     availability bucket. This implements the deluge
+//     `prioritize_first_last_pieces` option, useful for streaming media
+//     where the leading/trailing pieces hold container metadata.
+//
+// numPieces==1 is a degenerate but valid case: the only piece is added
+// to the priority bucket exactly once (no double-registration).
+func NewPieceQueueWithOptions(pieces []PieceWork, skipMask peer.Bitfield, totalPieces int, prioritizeFirstLast bool) *PieceQueue {
 	filtered := pieces
 	if skipMask != nil {
 		filtered = make([]PieceWork, 0, len(pieces))
@@ -74,6 +104,22 @@ func NewPieceQueueWithSkip(pieces []PieceWork, skipMask peer.Bitfield) *PieceQue
 	if len(bucket0) > 0 {
 		pq.buckets[0] = bucket0
 	}
+
+	if prioritizeFirstLast && totalPieces > 0 {
+		pq.priority = make(map[int]bool, 2)
+		// Only add an index to the priority set if it actually exists in
+		// the queue — skipMask may have removed it.
+		if _, ok := pq.pieces[0]; ok {
+			pq.priority[0] = true
+		}
+		last := totalPieces - 1
+		if last != 0 { // numPieces==1 → first and last are the same
+			if _, ok := pq.pieces[last]; ok {
+				pq.priority[last] = true
+			}
+		}
+	}
+
 	return pq
 }
 
@@ -110,6 +156,37 @@ func (pq *PieceQueue) Pick(hasPiece func(int) bool) (PieceWork, bool) {
 		}
 		if remaining > 0 && remaining <= threshold {
 			pq.endgame = true
+		}
+	}
+
+	// Priority bucket first (when configured): if either end-piece is
+	// pickable for this peer, hand it out before consulting the
+	// availability buckets. Reservoir-sample so we don't bias toward
+	// piece 0 over piece numPieces-1 when both are eligible.
+	if len(pq.priority) > 0 {
+		var chosen int
+		count := 0
+		for idx := range pq.priority {
+			if pq.done[idx] {
+				continue
+			}
+			if !pq.endgame && pq.pending[idx] {
+				continue
+			}
+			if pq.skipMask != nil && pq.skipMask.HasPiece(idx) {
+				continue
+			}
+			if !hasPiece(idx) {
+				continue
+			}
+			count++
+			if rand.IntN(count) == 0 {
+				chosen = idx
+			}
+		}
+		if count > 0 {
+			pq.pending[chosen] = true
+			return pq.pieces[chosen], true
 		}
 	}
 
@@ -174,6 +251,12 @@ func (pq *PieceQueue) Complete(index int) {
 		if len(b) == 0 {
 			delete(pq.buckets, avail)
 		}
+	}
+	// Drop the index from the priority set too — Pick already filters
+	// done pieces, but trimming here keeps the iteration cheap once
+	// the prioritized ends are out of the way.
+	if pq.priority != nil {
+		delete(pq.priority, index)
 	}
 	delete(pq.pieces, index)
 	pq.done[index] = true

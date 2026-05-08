@@ -351,6 +351,162 @@ func TestUpdateSkipMaskUnskipRestoresInitiallyWantedPieces(t *testing.T) {
 	}
 }
 
+// TestPieceQueuePrioritizeFirstLastPicksEndsFirst checks that when the
+// PrioritizeFirstLast option is enabled, the first two Pick() calls return
+// piece 0 and piece numPieces-1 (in any order), even when a "rarer" piece
+// exists in the middle of the file. This is the deluge
+// `prioritize_first_last_pieces` behavior — useful for media files where
+// the leading/trailing pieces hold container metadata required for
+// streaming preview.
+func TestPieceQueuePrioritizeFirstLastPicksEndsFirst(t *testing.T) {
+	const n = 10
+	pieces := make([]PieceWork, n)
+	for i := range n {
+		pieces[i] = PieceWork{Index: i, Length: 100}
+	}
+	pq := NewPieceQueueWithOptions(pieces, nil, n, true)
+
+	// Make piece 5 the rarest (avail 1) and pieces 0, n-1 commonly available
+	// (avail 5). Without the priority bucket, rarest-first would hand out
+	// piece 5 before piece 0 / piece n-1.
+	pq.mu.Lock()
+	for i := range n {
+		pq.availability[i] = 5
+	}
+	pq.availability[5] = 1
+	pq.buckets = map[int]map[int]bool{
+		5: {},
+		1: {5: true},
+	}
+	for i := range n {
+		if i == 5 {
+			continue
+		}
+		pq.buckets[5][i] = true
+	}
+	pq.mu.Unlock()
+
+	hasAll := func(int) bool { return true }
+
+	first, ok := pq.Pick(hasAll)
+	if !ok {
+		t.Fatal("expected first Pick to succeed")
+	}
+	second, ok := pq.Pick(hasAll)
+	if !ok {
+		t.Fatal("expected second Pick to succeed")
+	}
+
+	gotEnds := map[int]bool{first.Index: true, second.Index: true}
+	if !gotEnds[0] || !gotEnds[n-1] {
+		t.Fatalf("expected first two picks to be {0, %d}, got {%d, %d}",
+			n-1, first.Index, second.Index)
+	}
+}
+
+// TestPieceQueuePrioritizeFirstLastDisabledPreservesRarestFirst checks
+// that when PrioritizeFirstLast is false (the default), behavior matches
+// the old rarest-first selection — the priority bucket must be inert.
+func TestPieceQueuePrioritizeFirstLastDisabledPreservesRarestFirst(t *testing.T) {
+	const n = 10
+	pieces := make([]PieceWork, n)
+	for i := range n {
+		pieces[i] = PieceWork{Index: i, Length: 100}
+	}
+	pq := NewPieceQueueWithOptions(pieces, nil, n, false)
+
+	pq.mu.Lock()
+	for i := range n {
+		pq.availability[i] = 5
+	}
+	pq.availability[5] = 1
+	pq.buckets = map[int]map[int]bool{
+		5: {},
+		1: {5: true},
+	}
+	for i := range n {
+		if i == 5 {
+			continue
+		}
+		pq.buckets[5][i] = true
+	}
+	pq.mu.Unlock()
+
+	hasAll := func(int) bool { return true }
+
+	pw, ok := pq.Pick(hasAll)
+	if !ok {
+		t.Fatal("expected first Pick to succeed")
+	}
+	if pw.Index != 5 {
+		t.Fatalf("expected rarest piece 5 first when priority disabled, got %d", pw.Index)
+	}
+}
+
+// TestPieceQueuePrioritizeFirstLastSinglePiece exercises the numPieces==1
+// edge case: there is only one piece, and it must not be double-registered
+// as both "first" and "last".
+func TestPieceQueuePrioritizeFirstLastSinglePiece(t *testing.T) {
+	pieces := []PieceWork{{Index: 0, Length: 100}}
+	pq := NewPieceQueueWithOptions(pieces, nil, 1, true)
+
+	hasAll := func(int) bool { return true }
+
+	pw, ok := pq.Pick(hasAll)
+	if !ok {
+		t.Fatal("expected the single piece to be pickable")
+	}
+	if pw.Index != 0 {
+		t.Fatalf("expected piece 0, got %d", pw.Index)
+	}
+	pq.Complete(0)
+
+	if _, ok := pq.Pick(hasAll); ok {
+		t.Fatal("expected no further pieces after the only one is complete")
+	}
+}
+
+// TestPieceQueuePrioritizeFirstLastSkipsCompleted ensures the priority
+// bucket cooperates with the rest of the bookkeeping: once a priority
+// piece is completed, Pick must move on to the next one (and ultimately
+// to the availability buckets) rather than handing out the completed
+// index again.
+func TestPieceQueuePrioritizeFirstLastSkipsCompleted(t *testing.T) {
+	const n = 6
+	pieces := make([]PieceWork, n)
+	for i := range n {
+		pieces[i] = PieceWork{Index: i, Length: 100}
+	}
+	pq := NewPieceQueueWithOptions(pieces, nil, n, true)
+
+	hasAll := func(int) bool { return true }
+
+	// Drain priority bucket: should give us 0 and n-1 in some order.
+	first, _ := pq.Pick(hasAll)
+	pq.Complete(first.Index)
+	second, _ := pq.Pick(hasAll)
+	pq.Complete(second.Index)
+
+	got := map[int]bool{first.Index: true, second.Index: true}
+	if !got[0] || !got[n-1] {
+		t.Fatalf("priority drain returned %v; want {0, %d}", got, n-1)
+	}
+
+	// Subsequent picks must come from middle pieces only. We loop until
+	// exhausted to be sure the priority bucket never resurrects a done
+	// index.
+	for range 2 * n {
+		pw, ok := pq.Pick(hasAll)
+		if !ok {
+			break
+		}
+		if pw.Index == 0 || pw.Index == n-1 {
+			t.Fatalf("priority piece %d returned again after Complete", pw.Index)
+		}
+		pq.Complete(pw.Index)
+	}
+}
+
 // TestUpdateSkipMaskDoesNotResurrectInitiallyFilteredPieces documents the
 // known limitation of the lightweight hot-requeue: pieces that were
 // filtered out at construction (NewPieceQueueWithSkip) stay out, even

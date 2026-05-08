@@ -45,6 +45,13 @@ type DownloadConfig struct {
 	DisablePEX    bool          // BEP 27: do not advertise or use PEX
 	DialSem       chan struct{} // shared global dial semaphore (nil = create per-torrent)
 	RetryInterval time.Duration // interval between peer retry sweeps (0 = default 60s)
+
+	// PrioritizeFirstLast: when true, the first and last pieces of every
+	// torrent are picked before the regular rarest-first selection. Useful
+	// for streaming media files whose container metadata lives at the
+	// edges of the file. Off by default (deluge parity:
+	// `prioritize_first_last_pieces`).
+	PrioritizeFirstLast bool
 }
 
 // DefaultDownloadConfig returns default download config.
@@ -1039,7 +1046,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 		p.Progress.SetInitial(alreadyDone, tl, int64(p.TF.Info.PieceLength))
 	}
 
-	pq := NewPieceQueueWithSkip(pieces, p.SkipMask)
+	pq := NewPieceQueueWithOptions(pieces, p.SkipMask, numPieces, p.Cfg.PrioritizeFirstLast)
 	if p.OnPieceQueue != nil {
 		p.OnPieceQueue(pq)
 	}
