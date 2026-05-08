@@ -2,10 +2,31 @@ package download
 
 import (
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// readSysctlMax reads net.core.{w,r}mem_max from /proc to figure out
+// the kernel's per-socket buffer ceiling. Returns 0 (and skips the
+// caller via t.Skip) when the file isn't readable — non-Linux
+// platforms or sandboxes — since the test below depends on knowing
+// the cap to compute its expectation.
+func readSysctlMax(t *testing.T, name string) int {
+	t.Helper()
+	b, err := os.ReadFile("/proc/sys/net/core/" + name)
+	if err != nil {
+		t.Skipf("cannot read /proc/sys/net/core/%s: %v", name, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Skipf("unparseable /proc/sys/net/core/%s: %v", name, err)
+	}
+	return n
+}
 
 // readKeepAlive reads SO_KEEPALIVE back from the kernel via SyscallConn,
 // so we can assert what the tuner actually flipped (the *net.TCPConn API
@@ -187,13 +208,32 @@ func TestTunePeerSocketDefaultLeavesBuffersAlone(t *testing.T) {
 	}
 }
 
-// TestTunePeerSocketAppliesExplicitBuffers verifies that, when a non-zero
-// buffer is configured, the kernel sees a value >= the requested size.
-// We assert >= rather than == because Linux doubles the value internally
-// for accounting (the man-page-documented "actual buffer is 2 * setsockopt
-// value"), so getsockopt returns 2*requested.
+// TestTunePeerSocketAppliesExplicitBuffers verifies that calling
+// SetPeerSocketBuffers + tunePeerSocket actually pins the kernel buffer
+// to the configured size (subject to the kernel cap).
+//
+// What the kernel does:
+//
+//   - SetWriteBuffer(n) -> setsockopt(SO_SNDBUF, n)
+//   - kernel clamps n to wmem_max
+//   - kernel doubles the result for accounting (man socket(7))
+//   - getsockopt(SO_SNDBUF) returns 2 * min(n, wmem_max)
+//
+// We can't just assert "grew vs. before": on a kernel where auto-tune
+// already pushed the initial buffer above 2*requested (common on
+// desktops with large tcp_{r,w}mem max), pinning to the requested
+// value will *shrink* it. That shrink is the documented trade-off
+// (auto-tune is now off), and the test would otherwise flake in a
+// way that depended on the host's sysctls.
+//
+// Instead we read net.core.{w,r}mem_max from /proc and assert the
+// exact post-pin size. Skips on non-Linux / sandboxed environments
+// where the sysctl files aren't readable.
 func TestTunePeerSocketAppliesExplicitBuffers(t *testing.T) {
 	resetPeerSocketBuffersForTest(t)
+
+	wmemMax := readSysctlMax(t, "wmem_max")
+	rmemMax := readSysctlMax(t, "rmem_max")
 
 	const want = 1 << 20 // 1 MiB
 	SetPeerSocketBuffers(want, want)
@@ -201,11 +241,20 @@ func TestTunePeerSocketAppliesExplicitBuffers(t *testing.T) {
 	c, _ := dialTCPPair(t)
 	tunePeerSocket(c)
 
-	if got := readSendBuf(t, c); got < want {
-		t.Errorf("SO_SNDBUF = %d, want >= %d", got, want)
+	expectedSnd := 2 * want
+	if want > wmemMax {
+		expectedSnd = 2 * wmemMax
 	}
-	if got := readRecvBuf(t, c); got < want {
-		t.Errorf("SO_RCVBUF = %d, want >= %d", got, want)
+	expectedRcv := 2 * want
+	if want > rmemMax {
+		expectedRcv = 2 * rmemMax
+	}
+
+	if got := readSendBuf(t, c); got != expectedSnd {
+		t.Errorf("SO_SNDBUF = %d, want %d (want=%d, wmem_max=%d)", got, expectedSnd, want, wmemMax)
+	}
+	if got := readRecvBuf(t, c); got != expectedRcv {
+		t.Errorf("SO_RCVBUF = %d, want %d (want=%d, rmem_max=%d)", got, expectedRcv, want, rmemMax)
 	}
 }
 
