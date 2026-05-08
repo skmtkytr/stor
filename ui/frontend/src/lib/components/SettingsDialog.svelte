@@ -16,6 +16,11 @@
 		numwant: 0,
 		log_level: "info",
 		enable_utp: false,
+		prioritize_first_last_pieces: false,
+		sequential_download: false,
+		pipeline_min: 0,
+		pipeline_max: 0,
+		pipeline_window_secs: 0,
 	});
 	let saveMsg = $state("");
 	let saving = $state(false);
@@ -180,6 +185,79 @@
 					/>
 					<span class="text-sm text-zinc-300">Enable uTP (low-latency transport)</span>
 				</label>
+
+				<div class="border-t border-zinc-800"></div>
+
+				<!-- Performance / Streaming -->
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+					Performance
+				</h3>
+				<p class="text-xs text-zinc-500">
+					Applies to torrents added (or peer connections opened) after Save.
+					Running torrents keep their current settings.
+				</p>
+
+				<label class="flex items-center gap-2">
+					<input
+						type="checkbox"
+						bind:checked={cfg.prioritize_first_last_pieces}
+						class="rounded border-zinc-600 bg-zinc-800"
+					/>
+					<span class="text-sm text-zinc-300">
+						Prioritize first &amp; last piece (streaming)
+					</span>
+				</label>
+
+				<label class="flex items-center gap-2">
+					<input
+						type="checkbox"
+						bind:checked={cfg.sequential_download}
+						class="rounded border-zinc-600 bg-zinc-800"
+					/>
+					<span class="text-sm text-zinc-300">
+						Sequential download (in-order; slower swarm)
+					</span>
+				</label>
+
+				<div class="grid grid-cols-3 gap-3">
+					<label class="space-y-1">
+						<span class="text-sm text-zinc-300">Pipeline Min</span>
+						<input
+							type="number"
+							min="0"
+							max="1024"
+							bind:value={cfg.pipeline_min}
+							placeholder="4"
+							class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+						/>
+					</label>
+					<label class="space-y-1">
+						<span class="text-sm text-zinc-300">Pipeline Max</span>
+						<input
+							type="number"
+							min="0"
+							max="1024"
+							bind:value={cfg.pipeline_max}
+							placeholder="256"
+							class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+						/>
+					</label>
+					<label class="space-y-1">
+						<span class="text-sm text-zinc-300">Window (s)</span>
+						<input
+							type="number"
+							min="0"
+							max="60"
+							bind:value={cfg.pipeline_window_secs}
+							placeholder="3"
+							class="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm outline-none focus:border-zinc-500"
+						/>
+					</label>
+				</div>
+				<p class="text-xs text-zinc-500">
+					Pipeline depth = clamp(min, max, downRate × window / 16KiB).
+					Leave 0 to use defaults.
+				</p>
 
 				<div class="border-t border-zinc-800"></div>
 

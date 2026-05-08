@@ -97,16 +97,21 @@ type FileEntry struct {
 
 // EngineConfig is the subset of Config exposed to API clients.
 type EngineConfig struct {
-	DownloadDir    string `json:"download_dir"`
-	TmpDir         string `json:"tmp_dir"`
-	MaxActive      int    `json:"max_active"`
-	MaxPeers       int    `json:"max_peers"`
-	MaxPipeline    int    `json:"max_pipeline"`
-	DialTimeout    int    `json:"dial_timeout"`
-	MaxGlobalDials int    `json:"max_global_dials"`
-	NumWant        int    `json:"numwant"`
-	LogLevel       string `json:"log_level"`
-	EnableUTP      bool   `json:"enable_utp"`
+	DownloadDir         string `json:"download_dir"`
+	TmpDir              string `json:"tmp_dir"`
+	MaxActive           int    `json:"max_active"`
+	MaxPeers            int    `json:"max_peers"`
+	MaxPipeline         int    `json:"max_pipeline"`
+	DialTimeout         int    `json:"dial_timeout"`
+	MaxGlobalDials      int    `json:"max_global_dials"`
+	NumWant             int    `json:"numwant"`
+	LogLevel            string `json:"log_level"`
+	EnableUTP           bool   `json:"enable_utp"`
+	PrioritizeFirstLast bool   `json:"prioritize_first_last_pieces"`
+	Sequential          bool   `json:"sequential_download"`
+	PipelineMin         int    `json:"pipeline_min"`
+	PipelineMax         int    `json:"pipeline_max"`
+	PipelineWindowSecs  int    `json:"pipeline_window_secs"`
 }
 
 // EngineStats is global daemon stats.
@@ -751,16 +756,21 @@ func (e *Engine) GetStats() *EngineStats {
 	stats.FreeSpace = diskFreeSpace(e.cfg.DownloadDir)
 
 	stats.Config = EngineConfig{
-		DownloadDir:    e.cfg.DownloadDir,
-		TmpDir:         e.cfg.TmpDir,
-		MaxActive:      e.cfg.MaxActive,
-		MaxPeers:       e.cfg.MaxPeers,
-		MaxPipeline:    e.cfg.MaxPipeline,
-		DialTimeout:    e.cfg.DialTimeout,
-		MaxGlobalDials: e.cfg.MaxGlobalDials,
-		NumWant:        e.cfg.NumWant,
-		LogLevel:       "", // filled by daemon layer
-		EnableUTP:      e.cfg.EnableUTP,
+		DownloadDir:         e.cfg.DownloadDir,
+		TmpDir:              e.cfg.TmpDir,
+		MaxActive:           e.cfg.MaxActive,
+		MaxPeers:            e.cfg.MaxPeers,
+		MaxPipeline:         e.cfg.MaxPipeline,
+		DialTimeout:         e.cfg.DialTimeout,
+		MaxGlobalDials:      e.cfg.MaxGlobalDials,
+		NumWant:             e.cfg.NumWant,
+		LogLevel:            "", // filled by daemon layer
+		EnableUTP:           e.cfg.EnableUTP,
+		PrioritizeFirstLast: e.cfg.PrioritizeFirstLast,
+		Sequential:          e.cfg.Sequential,
+		PipelineMin:         e.cfg.PipelineMin,
+		PipelineMax:         e.cfg.PipelineMax,
+		PipelineWindowSecs:  e.cfg.PipelineWindowSecs,
 	}
 
 	return stats
@@ -1068,6 +1078,48 @@ func (e *Engine) SetNumWant(n int) {
 func (e *Engine) SetEnableUTP(b bool) {
 	e.mu.Lock()
 	e.cfg.EnableUTP = b
+	e.mu.Unlock()
+}
+
+// SetPrioritizeFirstLast toggles the streaming-friendly piece selection
+// (deluge `prioritize_first_last_pieces`). Applies to torrents added
+// after the call — running torrents keep their original piece queue.
+func (e *Engine) SetPrioritizeFirstLast(b bool) {
+	e.mu.Lock()
+	e.cfg.PrioritizeFirstLast = b
+	e.mu.Unlock()
+}
+
+// SetSequential toggles sequential (in-index-order) downloading. Applies
+// to torrents added after the call — running torrents keep their queue.
+func (e *Engine) SetSequential(b bool) {
+	e.mu.Lock()
+	e.cfg.Sequential = b
+	e.mu.Unlock()
+}
+
+// SetPipelineMin sets the minimum outstanding-request floor for the
+// BDP-driven pipeline scheduler. Applies to peer connections opened
+// after the call.
+func (e *Engine) SetPipelineMin(n int) {
+	e.mu.Lock()
+	e.cfg.PipelineMin = n
+	e.mu.Unlock()
+}
+
+// SetPipelineMax sets the upper cap for the BDP-driven pipeline
+// scheduler. Applies to peer connections opened after the call.
+func (e *Engine) SetPipelineMax(n int) {
+	e.mu.Lock()
+	e.cfg.PipelineMax = n
+	e.mu.Unlock()
+}
+
+// SetPipelineWindowSecs sets the BDP window (in seconds) for the
+// pipeline scheduler. Applies to peer connections opened after the call.
+func (e *Engine) SetPipelineWindowSecs(n int) {
+	e.mu.Lock()
+	e.cfg.PipelineWindowSecs = n
 	e.mu.Unlock()
 }
 

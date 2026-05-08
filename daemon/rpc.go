@@ -404,15 +404,20 @@ func (h *RPCHandler) daemonSetMaxActive(params json.RawMessage) (any, *rpcErr) {
 func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
 	// Use pointers to distinguish "not set" from zero values
 	var p struct {
-		DownloadDir *string `json:"download_dir"`
-		TmpDir      *string `json:"tmp_dir"`
-		MaxActive   *int    `json:"max_active"`
-		MaxPeers    *int    `json:"max_peers"`
-		MaxPipeline *int    `json:"max_pipeline"`
-		DialTimeout *int    `json:"dial_timeout"`
-		NumWant     *int    `json:"numwant"`
-		LogLevel    *string `json:"log_level"`
-		EnableUTP   *bool   `json:"enable_utp"`
+		DownloadDir         *string `json:"download_dir"`
+		TmpDir              *string `json:"tmp_dir"`
+		MaxActive           *int    `json:"max_active"`
+		MaxPeers            *int    `json:"max_peers"`
+		MaxPipeline         *int    `json:"max_pipeline"`
+		DialTimeout         *int    `json:"dial_timeout"`
+		NumWant             *int    `json:"numwant"`
+		LogLevel            *string `json:"log_level"`
+		EnableUTP           *bool   `json:"enable_utp"`
+		PrioritizeFirstLast *bool   `json:"prioritize_first_last_pieces"`
+		Sequential          *bool   `json:"sequential_download"`
+		PipelineMin         *int    `json:"pipeline_min"`
+		PipelineMax         *int    `json:"pipeline_max"`
+		PipelineWindowSecs  *int    `json:"pipeline_window_secs"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &rpcErr{Code: -32602, Message: "invalid params"}
@@ -455,6 +460,21 @@ func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
 	if p.EnableUTP != nil {
 		h.engine.SetEnableUTP(*p.EnableUTP)
 	}
+	if p.PrioritizeFirstLast != nil {
+		h.engine.SetPrioritizeFirstLast(*p.PrioritizeFirstLast)
+	}
+	if p.Sequential != nil {
+		h.engine.SetSequential(*p.Sequential)
+	}
+	if p.PipelineMin != nil && *p.PipelineMin >= 0 {
+		h.engine.SetPipelineMin(*p.PipelineMin)
+	}
+	if p.PipelineMax != nil && *p.PipelineMax >= 0 {
+		h.engine.SetPipelineMax(*p.PipelineMax)
+	}
+	if p.PipelineWindowSecs != nil && *p.PipelineWindowSecs >= 0 {
+		h.engine.SetPipelineWindowSecs(*p.PipelineWindowSecs)
+	}
 	if p.LogLevel != nil {
 		slog.SetLogLoggerLevel(ParseLogLevel(*p.LogLevel))
 	}
@@ -486,6 +506,21 @@ func (h *RPCHandler) daemonSetConfig(params json.RawMessage) (any, *rpcErr) {
 	}
 	if p.EnableUTP != nil {
 		h.cfg.EnableUTP = *p.EnableUTP
+	}
+	if p.PrioritizeFirstLast != nil {
+		h.cfg.PrioritizeFirstLast = *p.PrioritizeFirstLast
+	}
+	if p.Sequential != nil {
+		h.cfg.Sequential = *p.Sequential
+	}
+	if p.PipelineMin != nil && *p.PipelineMin >= 0 {
+		h.cfg.PipelineMin = *p.PipelineMin
+	}
+	if p.PipelineMax != nil && *p.PipelineMax >= 0 {
+		h.cfg.PipelineMax = *p.PipelineMax
+	}
+	if p.PipelineWindowSecs != nil && *p.PipelineWindowSecs >= 0 {
+		h.cfg.PipelineWindowSecs = *p.PipelineWindowSecs
 	}
 	if err := h.cfg.Save(); err != nil {
 		slog.Warn("config save failed", "error", err)
