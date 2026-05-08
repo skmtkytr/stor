@@ -135,6 +135,45 @@ func TestConfigPrioritizeFirstLastDefaultsToFalse(t *testing.T) {
 	}
 }
 
+// TestConfigSequentialRoundTrip ensures the `sequential_download` flag
+// survives Save → LoadConfig — same shape as the prioritize_first_last
+// round-trip just above.
+func TestConfigSequentialRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := DefaultConfig()
+	cfg.path = path
+	cfg.APIKey = "sk-test"
+	cfg.Sequential = true
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Sequential {
+		t.Error("sequential_download: should be true after round-trip")
+	}
+}
+
+func TestConfigSequentialDefaultsToFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("port = 9090\napi_key = \"sk-x\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sequential {
+		t.Error("sequential_download: should default to false when absent")
+	}
+}
+
 func TestConfigPreservesHashInQuotedString(t *testing.T) {
 	// A `#` inside a quoted string must NOT be stripped as a comment.
 	dir := t.TempDir()

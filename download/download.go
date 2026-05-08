@@ -69,6 +69,14 @@ type DownloadConfig struct {
 	// edges of the file. Off by default (deluge parity:
 	// `prioritize_first_last_pieces`).
 	PrioritizeFirstLast bool
+
+	// Sequential: when true, pieces are selected in ascending index
+	// order rather than rarest-first. Useful for in-order streaming
+	// playback. Off by default (deluge parity: `sequential_download`).
+	// When both Sequential and PrioritizeFirstLast are on, Sequential
+	// wins — the first piece is already first, and downloading the
+	// last piece early would defeat the in-order intent.
+	Sequential bool
 }
 
 // DefaultDownloadConfig returns default download config.
@@ -1232,7 +1240,7 @@ func DownloadWithParams(ctx context.Context, p DownloadParams) error {
 		p.Progress.SetInitial(alreadyDone, tl, int64(p.TF.Info.PieceLength))
 	}
 
-	pq := NewPieceQueueWithOptions(pieces, p.SkipMask, numPieces, p.Cfg.PrioritizeFirstLast)
+	pq := NewPieceQueueWithOptions(pieces, p.SkipMask, numPieces, p.Cfg.PrioritizeFirstLast, p.Cfg.Sequential)
 	if p.OnPieceQueue != nil {
 		p.OnPieceQueue(pq)
 	}

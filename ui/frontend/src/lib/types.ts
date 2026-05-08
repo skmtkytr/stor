@@ -32,6 +32,11 @@ export interface EngineConfig {
 	numwant: number;
 	log_level: string;
 	enable_utp: boolean;
+	prioritize_first_last_pieces?: boolean;
+	sequential_download?: boolean;
+	pipeline_min?: number;
+	pipeline_max?: number;
+	pipeline_window_secs?: number;
 }
 
 export interface ProgressSnap {
