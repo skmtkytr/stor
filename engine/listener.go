@@ -129,6 +129,17 @@ func (pl *PeerListener) handleConn(conn net.Conn) {
 	}
 	defer func() { _ = conn.Close() }()
 
+	// Disable Nagle on accepted TCP peer connections — same rationale as
+	// the outbound dial path in download.newClientFull. uTP-accepted
+	// conns silently no-op (not *net.TCPConn). Failure isn't fatal:
+	// worst case we keep running with Nagle on, the pre-fix behaviour.
+	if tc, ok := conn.(*net.TCPConn); ok {
+		if err := tc.SetNoDelay(true); err != nil {
+			slog.Debug("listener: SetNoDelay failed",
+				"remote", conn.RemoteAddr(), "error", err)
+		}
+	}
+
 	// Read the incoming handshake to get info hash
 	hs, err := peer.ReadHandshake(conn)
 	if err != nil {
