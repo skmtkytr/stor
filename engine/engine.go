@@ -52,6 +52,13 @@ type Config struct {
 	// `prioritize_first_last_pieces`).
 	PrioritizeFirstLast bool
 
+	// Sequential: when true, every new download picks pieces in
+	// ascending index order rather than rarest-first. Useful for
+	// in-order streaming. Off by default (deluge parity:
+	// `sequential_download`). Overrides PrioritizeFirstLast when both
+	// are set.
+	Sequential bool
+
 	// Testing flags
 	DisableDHT      bool // skip DHT startup
 	DisableListener bool // skip peer TCP listener
@@ -1084,6 +1091,7 @@ func (e *Engine) downloadConfig() download.DownloadConfig {
 		EnableUTP:           e.cfg.EnableUTP,
 		DialSem:             e.dialSem, // shared across all torrents
 		PrioritizeFirstLast: e.cfg.PrioritizeFirstLast,
+		Sequential:          e.cfg.Sequential,
 	}
 }
 

@@ -37,6 +37,11 @@ type Config struct {
 	// Streaming-friendly piece selection. Off by default.
 	PrioritizeFirstLast bool `toml:"prioritize_first_last_pieces"`
 
+	// Sequential download (deluge parity). Off by default. When on,
+	// pieces are requested in ascending index order rather than
+	// rarest-first; supersedes prioritize_first_last_pieces.
+	Sequential bool `toml:"sequential_download"`
+
 	// Observability: when true, the daemon exposes /metrics (Prometheus text
 	// format) and /debug/pprof/*. Both endpoints require the API key just
 	// like the RPC endpoint. Off by default.
@@ -141,6 +146,9 @@ func (c *Config) Save() error {
 	if c.PrioritizeFirstLast {
 		fmt.Fprintf(&b, "prioritize_first_last_pieces = true\n")
 	}
+	if c.Sequential {
+		fmt.Fprintf(&b, "sequential_download = true\n")
+	}
 	if c.EnableMetrics {
 		fmt.Fprintf(&b, "\n# Observability (exposes /metrics and /debug/pprof/; both require API key)\n")
 		fmt.Fprintf(&b, "enable_metrics = true\n")
@@ -218,6 +226,8 @@ func parseTOML(data string, cfg *Config) {
 			cfg.EnableUTP = val == "true"
 		case "prioritize_first_last_pieces":
 			cfg.PrioritizeFirstLast = val == "true"
+		case "sequential_download":
+			cfg.Sequential = val == "true"
 		case "enable_metrics":
 			cfg.EnableMetrics = val == "true"
 		}

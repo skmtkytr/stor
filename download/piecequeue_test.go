@@ -364,7 +364,7 @@ func TestPieceQueuePrioritizeFirstLastPicksEndsFirst(t *testing.T) {
 	for i := range n {
 		pieces[i] = PieceWork{Index: i, Length: 100}
 	}
-	pq := NewPieceQueueWithOptions(pieces, nil, n, true)
+	pq := NewPieceQueueWithOptions(pieces, nil, n, true, false)
 
 	// Make piece 5 the rarest (avail 1) and pieces 0, n-1 commonly available
 	// (avail 5). Without the priority bucket, rarest-first would hand out
@@ -413,7 +413,7 @@ func TestPieceQueuePrioritizeFirstLastDisabledPreservesRarestFirst(t *testing.T)
 	for i := range n {
 		pieces[i] = PieceWork{Index: i, Length: 100}
 	}
-	pq := NewPieceQueueWithOptions(pieces, nil, n, false)
+	pq := NewPieceQueueWithOptions(pieces, nil, n, false, false)
 
 	pq.mu.Lock()
 	for i := range n {
@@ -448,7 +448,7 @@ func TestPieceQueuePrioritizeFirstLastDisabledPreservesRarestFirst(t *testing.T)
 // as both "first" and "last".
 func TestPieceQueuePrioritizeFirstLastSinglePiece(t *testing.T) {
 	pieces := []PieceWork{{Index: 0, Length: 100}}
-	pq := NewPieceQueueWithOptions(pieces, nil, 1, true)
+	pq := NewPieceQueueWithOptions(pieces, nil, 1, true, false)
 
 	hasAll := func(int) bool { return true }
 
@@ -477,7 +477,7 @@ func TestPieceQueuePrioritizeFirstLastSkipsCompleted(t *testing.T) {
 	for i := range n {
 		pieces[i] = PieceWork{Index: i, Length: 100}
 	}
-	pq := NewPieceQueueWithOptions(pieces, nil, n, true)
+	pq := NewPieceQueueWithOptions(pieces, nil, n, true, false)
 
 	hasAll := func(int) bool { return true }
 
@@ -504,6 +504,191 @@ func TestPieceQueuePrioritizeFirstLastSkipsCompleted(t *testing.T) {
 			t.Fatalf("priority piece %d returned again after Complete", pw.Index)
 		}
 		pq.Complete(pw.Index)
+	}
+}
+
+// TestPieceQueueSequentialPicksInIndexOrder verifies that when the
+// Sequential option is enabled, Pick hands out pieces in ascending index
+// order (0, 1, 2, ...) regardless of availability — the deluge
+// `sequential_download` behavior. Without sequential, the rarest piece
+// (here index 5) would be picked first.
+func TestPieceQueueSequentialPicksInIndexOrder(t *testing.T) {
+	const n = 8
+	pieces := make([]PieceWork, n)
+	for i := range n {
+		pieces[i] = PieceWork{Index: i, Length: 100}
+	}
+	pq := NewPieceQueueWithOptions(pieces, nil, n, false, true)
+
+	// Make piece 5 the rarest (avail 1) and the rest commonly available
+	// (avail 5). Without sequential, rarest-first would hand out piece 5
+	// first; with sequential we expect strict 0, 1, 2, ... order.
+	pq.mu.Lock()
+	for i := range n {
+		pq.availability[i] = 5
+	}
+	pq.availability[5] = 1
+	pq.buckets = map[int]map[int]bool{
+		5: {},
+		1: {5: true},
+	}
+	for i := range n {
+		if i == 5 {
+			continue
+		}
+		pq.buckets[5][i] = true
+	}
+	pq.mu.Unlock()
+
+	hasAll := func(int) bool { return true }
+	for want := range n {
+		pw, ok := pq.Pick(hasAll)
+		if !ok {
+			t.Fatalf("Pick %d: expected ok", want)
+		}
+		if pw.Index != want {
+			t.Fatalf("Pick %d: got index %d, want %d", want, pw.Index, want)
+		}
+		pq.Complete(pw.Index)
+	}
+}
+
+// TestPieceQueueSequentialDisabledPreservesRarestFirst confirms the new
+// option is inert when off — the existing rarest-first selection must
+// still apply.
+func TestPieceQueueSequentialDisabledPreservesRarestFirst(t *testing.T) {
+	const n = 6
+	pieces := make([]PieceWork, n)
+	for i := range n {
+		pieces[i] = PieceWork{Index: i, Length: 100}
+	}
+	pq := NewPieceQueueWithOptions(pieces, nil, n, false, false)
+
+	pq.mu.Lock()
+	for i := range n {
+		pq.availability[i] = 5
+	}
+	pq.availability[3] = 1
+	pq.buckets = map[int]map[int]bool{
+		5: {},
+		1: {3: true},
+	}
+	for i := range n {
+		if i == 3 {
+			continue
+		}
+		pq.buckets[5][i] = true
+	}
+	pq.mu.Unlock()
+
+	hasAll := func(int) bool { return true }
+	pw, ok := pq.Pick(hasAll)
+	if !ok {
+		t.Fatal("expected first Pick to succeed")
+	}
+	if pw.Index != 3 {
+		t.Fatalf("expected rarest piece 3 first when sequential disabled, got %d", pw.Index)
+	}
+}
+
+// TestPieceQueueSequentialSkipsPiecesPeerLacks ensures the sequential
+// pass still respects per-peer availability: if the peer doesn't have
+// piece 0, Pick must walk forward to the lowest index the peer holds.
+func TestPieceQueueSequentialSkipsPiecesPeerLacks(t *testing.T) {
+	const n = 5
+	pieces := make([]PieceWork, n)
+	for i := range n {
+		pieces[i] = PieceWork{Index: i, Length: 100}
+	}
+	pq := NewPieceQueueWithOptions(pieces, nil, n, false, true)
+
+	// Peer is missing pieces 0 and 1 — Pick must hand out 2 first.
+	hasFromTwo := func(idx int) bool { return idx >= 2 }
+
+	pw, ok := pq.Pick(hasFromTwo)
+	if !ok {
+		t.Fatal("expected Pick to succeed")
+	}
+	if pw.Index != 2 {
+		t.Fatalf("expected lowest peer-held piece 2, got %d", pw.Index)
+	}
+}
+
+// TestPieceQueueSequentialBeatsPrioritizeFirstLast verifies that when
+// both options are enabled, sequential wins: pieces come out 0, 1, 2, ...
+// rather than {0, n-1} first then middle. The spec calls this out
+// explicitly so no caller is left guessing.
+func TestPieceQueueSequentialBeatsPrioritizeFirstLast(t *testing.T) {
+	const n = 5
+	pieces := make([]PieceWork, n)
+	for i := range n {
+		pieces[i] = PieceWork{Index: i, Length: 100}
+	}
+	pq := NewPieceQueueWithOptions(pieces, nil, n, true, true)
+
+	hasAll := func(int) bool { return true }
+	for want := range n {
+		pw, ok := pq.Pick(hasAll)
+		if !ok {
+			t.Fatalf("Pick %d: expected ok", want)
+		}
+		if pw.Index != want {
+			t.Fatalf("Pick %d: got index %d, want %d (sequential must override priority)",
+				want, pw.Index, want)
+		}
+		pq.Complete(pw.Index)
+	}
+}
+
+// TestPieceQueueSequentialEndgameAllowsDuplicatePicks exercises the
+// endgame interaction: once the queue enters endgame mode (≤ threshold
+// pieces remaining), the same piece can be handed out to multiple peers
+// even under sequential, mirroring the existing behavior for rarest-first.
+func TestPieceQueueSequentialEndgameAllowsDuplicatePicks(t *testing.T) {
+	// Endgame threshold is max(5, totalPieces/100). With totalPieces=10
+	// the threshold is 5, so endgame turns on at the first Pick that
+	// observes remaining<=5 — i.e. once we've completed 5 pieces and
+	// then call Pick again.
+	const n = 10
+	pieces := make([]PieceWork, n)
+	for i := range n {
+		pieces[i] = PieceWork{Index: i, Length: 100}
+	}
+	pq := NewPieceQueueWithOptions(pieces, nil, n, false, true)
+
+	hasAll := func(int) bool { return true }
+
+	// Drain the first 5 pieces; afterwards remaining=5 but endgame is
+	// only flipped on the *next* Pick call (it's checked at entry).
+	for range 5 {
+		pw, ok := pq.Pick(hasAll)
+		if !ok {
+			t.Fatal("Pick should succeed before endgame")
+		}
+		pq.Complete(pw.Index)
+	}
+
+	// First endgame-window Pick: this call flips endgame=true at the
+	// top of Pick because remaining (5) <= threshold (5), then returns
+	// the lowest pending-allowed index.
+	first, ok := pq.Pick(hasAll)
+	if !ok {
+		t.Fatal("first endgame Pick should succeed")
+	}
+	if !pq.IsEndgame() {
+		t.Fatal("expected endgame mode after the threshold-crossing Pick")
+	}
+
+	// In endgame, a second Pick must be allowed to return the same
+	// pending piece (no Complete in between). Sequential always picks
+	// the lowest unfinished index, so both picks should match.
+	second, ok := pq.Pick(hasAll)
+	if !ok {
+		t.Fatal("second endgame Pick should succeed (duplicate allowed)")
+	}
+	if first.Index != second.Index {
+		t.Fatalf("sequential endgame: expected duplicate picks of same index, got %d and %d",
+			first.Index, second.Index)
 	}
 }
 

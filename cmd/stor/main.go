@@ -135,6 +135,7 @@ func runDaemon() {
 		DHTAlpha:            cfg.DHTAlpha,
 		EnableUTP:           cfg.EnableUTP,
 		PrioritizeFirstLast: cfg.PrioritizeFirstLast,
+		Sequential:          cfg.Sequential,
 	}
 
 	eng, err := engine.New(engCfg)

@@ -42,6 +42,15 @@ type PieceQueue struct {
 	// availability buckets too — Complete() removes them from both
 	// places, so once a priority piece is done it never comes back.
 	priority map[int]bool
+
+	// sequential, when true, makes Pick walk pq.pieces in ascending
+	// piece-index order instead of consulting the availability buckets
+	// or the priority bucket. This is the deluge `sequential_download`
+	// behavior — useful for streaming where playback wants strictly
+	// in-order data. When sequential is on, prioritize_first_last is
+	// effectively superseded (the first piece is already the first one
+	// picked, and the last only makes sense to download last).
+	sequential bool
 }
 
 // NewPieceQueue creates a piece queue from a list of pieces to download.
@@ -54,7 +63,7 @@ func NewPieceQueue(pieces []PieceWork) *PieceQueue {
 // calling NewPieceQueue directly. Skipped pieces are never handed out by
 // Pick and do not count toward Remaining().
 func NewPieceQueueWithSkip(pieces []PieceWork, skipMask peer.Bitfield) *PieceQueue {
-	return NewPieceQueueWithOptions(pieces, skipMask, 0, false)
+	return NewPieceQueueWithOptions(pieces, skipMask, 0, false, false)
 }
 
 // NewPieceQueueWithOptions is the full constructor. In addition to the
@@ -70,10 +79,16 @@ func NewPieceQueueWithSkip(pieces []PieceWork, skipMask peer.Bitfield) *PieceQue
 //     availability bucket. This implements the deluge
 //     `prioritize_first_last_pieces` option, useful for streaming media
 //     where the leading/trailing pieces hold container metadata.
+//   - sequential: when true, Pick returns the lowest piece index the
+//     peer holds instead of consulting any bucket — the deluge
+//     `sequential_download` mode. sequential overrides
+//     prioritizeFirstLast (sequential already starts from index 0), and
+//     still cooperates with endgame: in endgame the same lowest index
+//     can be handed out to multiple peers concurrently.
 //
 // numPieces==1 is a degenerate but valid case: the only piece is added
 // to the priority bucket exactly once (no double-registration).
-func NewPieceQueueWithOptions(pieces []PieceWork, skipMask peer.Bitfield, totalPieces int, prioritizeFirstLast bool) *PieceQueue {
+func NewPieceQueueWithOptions(pieces []PieceWork, skipMask peer.Bitfield, totalPieces int, prioritizeFirstLast, sequential bool) *PieceQueue {
 	filtered := pieces
 	if skipMask != nil {
 		filtered = make([]PieceWork, 0, len(pieces))
@@ -120,6 +135,8 @@ func NewPieceQueueWithOptions(pieces []PieceWork, skipMask peer.Bitfield, totalP
 		}
 	}
 
+	pq.sequential = sequential
+
 	return pq
 }
 
@@ -157,6 +174,43 @@ func (pq *PieceQueue) Pick(hasPiece func(int) bool) (PieceWork, bool) {
 		if remaining > 0 && remaining <= threshold {
 			pq.endgame = true
 		}
+	}
+
+	// Sequential mode bypasses both the priority bucket and the
+	// availability buckets: walk pq.pieces in ascending index order and
+	// hand out the first one this peer holds (and that isn't otherwise
+	// filtered). This implements the deluge `sequential_download`
+	// option. Endgame still applies — when pq.endgame is true, pending
+	// pieces are not skipped, so the same low-index piece can be handed
+	// out to multiple peers concurrently.
+	if pq.sequential {
+		// Collect candidate indices and walk ascending. We can't sort
+		// the map directly, so grab keys, sort, and scan. The cost is
+		// O(n log n) per Pick where n = remaining pieces; acceptable
+		// because sequential users opt in for streaming where peer
+		// turnover dominates the cost anyway.
+		idxs := make([]int, 0, len(pq.pieces))
+		for idx := range pq.pieces {
+			idxs = append(idxs, idx)
+		}
+		slices.Sort(idxs)
+		for _, idx := range idxs {
+			if pq.done[idx] {
+				continue
+			}
+			if !pq.endgame && pq.pending[idx] {
+				continue
+			}
+			if pq.skipMask != nil && pq.skipMask.HasPiece(idx) {
+				continue
+			}
+			if !hasPiece(idx) {
+				continue
+			}
+			pq.pending[idx] = true
+			return pq.pieces[idx], true
+		}
+		return PieceWork{}, false
 	}
 
 	// Priority bucket first (when configured): if either end-piece is
