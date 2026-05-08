@@ -30,6 +30,14 @@ const (
 	DefaultMaxPeers    = 500
 	DefaultDialTimeout = 10 // seconds
 
+	// Dynamic-pipeline (BDP-derived) defaults, libtorrent-style.
+	// target ≈ downRate * windowSecs / BlockSize, clamped to [min, max].
+	// Min keeps a freshly-connected peer (rate=0) from stalling; max
+	// caps memory and avoids tripping remote request-queue limits.
+	DefaultPipelineMin        = 4
+	DefaultPipelineMax        = 256
+	DefaultPipelineWindowSecs = 3
+
 	// maxUnexpectedMessages is the limit on unexpected/wrong-index messages
 	// per piece before aborting. Prevents DoS from malicious peers.
 	maxUnexpectedMessages = 100
@@ -37,14 +45,23 @@ const (
 
 // DownloadConfig holds tunable parameters for the download engine.
 type DownloadConfig struct {
-	MaxPeers      int           // max concurrent peer connections
-	MaxPipeline   int           // outstanding requests per peer
-	DialTimeout   int           // peer dial timeout in seconds
-	Encryption    bool          // attempt MSE/PE encryption (default: true)
-	EnableUTP     bool          // try uTP before TCP for peer connections
-	DisablePEX    bool          // BEP 27: do not advertise or use PEX
-	DialSem       chan struct{} // shared global dial semaphore (nil = create per-torrent)
-	RetryInterval time.Duration // interval between peer retry sweeps (0 = default 60s)
+	MaxPeers    int // max concurrent peer connections
+	MaxPipeline int // legacy fixed pipeline depth (used as upper bound when
+	// PipelineMax == 0; treated as both min and max when
+	// PipelineMin == 0 too — i.e. setting MaxPipeline alone
+	// gives the pre-dynamic behaviour).
+	// New BDP-driven knobs. Setting PipelineMin == PipelineMax (or leaving
+	// both at zero with a non-zero MaxPipeline) collapses to the legacy
+	// fixed-depth scheduler.
+	PipelineMin        int           // min outstanding requests per peer (0 = DefaultPipelineMin)
+	PipelineMax        int           // max outstanding requests per peer (0 = DefaultPipelineMax / MaxPipeline)
+	PipelineWindowSecs int           // window for BDP estimate (0 = DefaultPipelineWindowSecs)
+	DialTimeout        int           // peer dial timeout in seconds
+	Encryption         bool          // attempt MSE/PE encryption (default: true)
+	EnableUTP          bool          // try uTP before TCP for peer connections
+	DisablePEX         bool          // BEP 27: do not advertise or use PEX
+	DialSem            chan struct{} // shared global dial semaphore (nil = create per-torrent)
+	RetryInterval      time.Duration // interval between peer retry sweeps (0 = default 60s)
 
 	// PrioritizeFirstLast: when true, the first and last pieces of every
 	// torrent are picked before the regular rarest-first selection. Useful
@@ -57,11 +74,60 @@ type DownloadConfig struct {
 // DefaultDownloadConfig returns default download config.
 func DefaultDownloadConfig() DownloadConfig {
 	return DownloadConfig{
-		MaxPeers:    DefaultMaxPeers,
-		MaxPipeline: DefaultMaxPipeline,
-		DialTimeout: DefaultDialTimeout,
-		Encryption:  false, // enable explicitly via config
+		MaxPeers:           DefaultMaxPeers,
+		MaxPipeline:        DefaultMaxPipeline,
+		PipelineMin:        DefaultPipelineMin,
+		PipelineMax:        DefaultPipelineMax,
+		PipelineWindowSecs: DefaultPipelineWindowSecs,
+		DialTimeout:        DefaultDialTimeout,
+		Encryption:         false, // enable explicitly via config
 	}
+}
+
+// resolvePipeline normalises the pipeline-related fields against their
+// defaults and the legacy MaxPipeline value, returning the (min, max,
+// windowSecs) triple that the dynamic scheduler should use.
+//
+// Back-compat rules:
+//   - If both PipelineMin and PipelineMax are zero, fall back to
+//     MaxPipeline (or DefaultMaxPipeline) for both — i.e. the user only
+//     ever set the legacy knob, so behaviour stays fixed-depth.
+//   - If only PipelineMax is zero, derive it from MaxPipeline (or
+//     DefaultPipelineMax) — keeps the fixed-depth knob meaningful as
+//     an upper bound.
+//   - If min > max we let max win (caller misconfiguration).
+func (cfg DownloadConfig) resolvePipeline() (minP, maxP, windowSecs int) {
+	minP = cfg.PipelineMin
+	maxP = cfg.PipelineMax
+	windowSecs = cfg.PipelineWindowSecs
+	legacy := cfg.MaxPipeline
+	if legacy <= 0 {
+		legacy = DefaultMaxPipeline
+	}
+
+	switch {
+	case minP <= 0 && maxP <= 0:
+		// Pure legacy: collapse to fixed depth.
+		minP = legacy
+		maxP = legacy
+	case maxP <= 0:
+		maxP = legacy
+		if maxP < minP {
+			maxP = minP
+		}
+	case minP <= 0:
+		minP = DefaultPipelineMin
+		if minP > maxP {
+			minP = maxP
+		}
+	}
+	if windowSecs <= 0 {
+		windowSecs = DefaultPipelineWindowSecs
+	}
+	if minP > maxP {
+		minP = maxP
+	}
+	return minP, maxP, windowSecs
 }
 
 // PieceResult contains a downloaded and verified piece.
@@ -116,7 +182,14 @@ type Client struct {
 	choked         bool // we are choked by peer
 	choking        bool // we are choking peer
 	sentInterested bool
-	maxPipeline    int
+	maxPipeline    int // legacy fixed cap; also acts as PipelineMax fallback
+	// Dynamic-pipeline knobs. When pipelineMin == pipelineMax (or both
+	// are zero), DownloadPiece falls back to maxPipeline — preserving
+	// the pre-dynamic behaviour for hand-constructed Clients (tests,
+	// upload path, NewClient pre-runWorkers).
+	pipelineMin    int
+	pipelineMax    int
+	pipelineWindow int    // seconds
 	Addr           string // peer address for identification
 
 	// Peer metadata (for UI / introspection)
@@ -331,6 +404,108 @@ func dialPeer(addr string, timeout time.Duration, tryUTP bool) (net.Conn, error)
 	return net.DialTimeout("tcp", addr, timeout)
 }
 
+// setTCPNoDelay enables TCP_NODELAY on a peer connection if it is a real
+// *net.TCPConn. Nagle's algorithm coalesces our small (17-byte) request
+// messages and waits ~40 ms for a piggybacked ACK before flushing — for
+// a pipelined leech that adds a per-block round-trip stall on top of
+// the actual network RTT. NODELAY off is the right default for most
+// applications, but a BitTorrent leech is the textbook
+// many-small-requests workload that wants it on.
+//
+// Tolerant of nil, non-TCP connections (uTP, MSE-wrapped, net.Pipe), and
+// SetNoDelay errors — none are fatal: at worst the peer keeps running
+// with Nagle on, which is the pre-fix behaviour. The error is logged
+// at debug level so we can spot it in postmortems without spamming
+// info-level logs.
+func setTCPNoDelay(conn net.Conn) {
+	tc, ok := conn.(*net.TCPConn)
+	if !ok || tc == nil {
+		return
+	}
+	if err := tc.SetNoDelay(true); err != nil {
+		slog.Debug("download: SetNoDelay failed", "error", err)
+	}
+}
+
+// pipelineTarget computes the desired number of outstanding block
+// requests for a peer with the given observed download rate.
+//
+// Formula (libtorrent-style, BDP-derived):
+//
+//	target = clamp(min, max, downRate * windowSecs / BlockSize)
+//
+// In words: keep enough requests in flight to cover `windowSecs` seconds
+// of bandwidth at the peer's current rate. Too few → we stall waiting
+// for the next response (one-RTT-per-block worst case); too many →
+// memory blows up and the remote may drop us for over-requesting.
+//
+// Pure function, deterministic, no allocation — safe to call on every
+// loop iteration of DownloadPiece. Negative or zero windowSecs falls
+// back to DefaultPipelineWindowSecs so a caller passing a zero-value
+// Config doesn't divide by zero. Negative downRate is clamped to 0.
+func pipelineTarget(downRateBytesPerSec int64, windowSecs, minP, maxP int) int {
+	if windowSecs <= 0 {
+		windowSecs = DefaultPipelineWindowSecs
+	}
+	if minP < 1 {
+		minP = 1
+	}
+	if maxP < minP {
+		maxP = minP
+	}
+	if downRateBytesPerSec < 0 {
+		downRateBytesPerSec = 0
+	}
+	// int64 math: 1 GiB/s * 60 s / 16 KiB ≈ 4M, well within int range.
+	target := int(downRateBytesPerSec * int64(windowSecs) / int64(BlockSize))
+	if target < minP {
+		target = minP
+	}
+	if target > maxP {
+		target = maxP
+	}
+	return target
+}
+
+// PipelineTarget returns the desired pipeline depth for this client,
+// derived from its current EMA download rate. Callers (DownloadPiece)
+// re-read this every loop iteration — the underlying downRate atomic
+// gets updated by the rate registry on a 1 Hz cadence, so the value
+// converges quickly without per-call locking.
+//
+// When pipelineMin == pipelineMax (or both are zero), this collapses
+// to the legacy fixed maxPipeline value, preserving behaviour for
+// hand-constructed Clients that never went through runWorkers (tests,
+// the upload path, and NewClient calls before runWorkers overrides
+// the pipeline fields).
+func (c *Client) PipelineTarget() int {
+	minP := c.pipelineMin
+	maxP := c.pipelineMax
+	if minP <= 0 && maxP <= 0 {
+		// Pure legacy / not-yet-configured client: fall back to the
+		// fixed cap, never zero (which would deadlock DownloadPiece).
+		fixed := c.maxPipeline
+		if fixed <= 0 {
+			fixed = DefaultMaxPipeline
+		}
+		return fixed
+	}
+	if minP <= 0 {
+		minP = DefaultPipelineMin
+	}
+	if maxP <= 0 {
+		maxP = c.maxPipeline
+		if maxP <= 0 {
+			maxP = DefaultPipelineMax
+		}
+	}
+	window := c.pipelineWindow
+	if window <= 0 {
+		window = DefaultPipelineWindowSecs
+	}
+	return pipelineTarget(c.downRate.Load(), window, minP, maxP)
+}
+
 func newClient(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int, encrypt bool) (*Client, error) {
 	return newClientFull(p, infoHash, peerID, dialTimeoutSec, encrypt, false, false)
 }
@@ -340,6 +515,12 @@ func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int
 	if err != nil {
 		return nil, fmt.Errorf("download: connect to %s failed: %w", p, err)
 	}
+
+	// Disable Nagle on the raw socket *before* MSE wraps it — once
+	// MSE replaces the conn with its own wrapper the type assertion in
+	// setTCPNoDelay would no longer match. uTP connections silently
+	// no-op (they aren't *net.TCPConn).
+	setTCPNoDelay(rawConn)
 
 	conn := net.Conn(rawConn)
 	closeOnErr := func() { _ = rawConn.Close() }
@@ -690,8 +871,13 @@ func (c *Client) DownloadPiece(pw PieceWork) ([]byte, func(), error) {
 
 	for downloaded < pw.Length {
 		flushed := false
+		// Recompute the BDP-derived target each iteration so a peer
+		// whose throughput is climbing (or falling) gets its pipeline
+		// resized without waiting for the next piece. Atomic load,
+		// no lock — see PipelineTarget.
+		target := c.PipelineTarget()
 		c.wmu.Lock()
-		for backlog < c.maxPipeline && requested < pw.Length {
+		for backlog < target && requested < pw.Length {
 			blockSize := BlockSize
 			if requested+blockSize > pw.Length {
 				blockSize = pw.Length - requested
@@ -1098,6 +1284,12 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 	// Create piece buffer pool based on max piece size
 	piecePool := newPiecePool(pq.maxPieceLen())
 
+	// Resolve dynamic-pipeline knobs once (cfg is immutable for the
+	// duration of this download). Each spawned worker copies the
+	// triple onto the Client struct so DownloadPiece can read it
+	// without touching cfg again.
+	pipelineMin, pipelineMax, pipelineWindow := cfg.resolvePipeline()
+
 	sem := make(chan struct{}, cfg.MaxPeers)
 	// Use shared global dial semaphore if provided, otherwise create per-torrent.
 	dialSem := cfg.DialSem
@@ -1177,7 +1369,10 @@ func runWorkers(ctx context.Context, initialPeers []tracker.Peer, infoHash, peer
 				_ = client.Close()
 				return
 			}
-			client.maxPipeline = cfg.MaxPipeline
+			client.maxPipeline = pipelineMax
+			client.pipelineMin = pipelineMin
+			client.pipelineMax = pipelineMax
+			client.pipelineWindow = pipelineWindow
 			client.piecePool = piecePool
 			client.progress = progress
 			client.numPieces = numPieces
