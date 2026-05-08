@@ -41,6 +41,9 @@ type Config struct {
 	PipelineMax        int `toml:"pipeline_max"`
 	PipelineWindowSecs int `toml:"pipeline_window_secs"`
 
+	// Streaming-friendly piece selection. Off by default.
+	PrioritizeFirstLast bool `toml:"prioritize_first_last_pieces"`
+
 	// Observability: when true, the daemon exposes /metrics (Prometheus text
 	// format) and /debug/pprof/*. Both endpoints require the API key just
 	// like the RPC endpoint. Off by default.
@@ -151,6 +154,9 @@ func (c *Config) Save() error {
 	if c.EnableUTP {
 		fmt.Fprintf(&b, "enable_utp = true\n")
 	}
+	if c.PrioritizeFirstLast {
+		fmt.Fprintf(&b, "prioritize_first_last_pieces = true\n")
+	}
 	if c.EnableMetrics {
 		fmt.Fprintf(&b, "\n# Observability (exposes /metrics and /debug/pprof/; both require API key)\n")
 		fmt.Fprintf(&b, "enable_metrics = true\n")
@@ -238,6 +244,8 @@ func parseTOML(data string, cfg *Config) {
 			}
 		case "enable_utp":
 			cfg.EnableUTP = val == "true"
+		case "prioritize_first_last_pieces":
+			cfg.PrioritizeFirstLast = val == "true"
 		case "enable_metrics":
 			cfg.EnableMetrics = val == "true"
 		}

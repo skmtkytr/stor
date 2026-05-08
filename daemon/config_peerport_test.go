@@ -96,6 +96,45 @@ enable_utp = true    # try uTP first
 	}
 }
 
+// TestConfigPrioritizeFirstLastRoundTrip ensures that the
+// `prioritize_first_last_pieces` flag survives Save → LoadConfig and that
+// it defaults to false when absent — matching the deluge default.
+func TestConfigPrioritizeFirstLastRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	cfg := DefaultConfig()
+	cfg.path = path
+	cfg.APIKey = "sk-test"
+	cfg.PrioritizeFirstLast = true
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.PrioritizeFirstLast {
+		t.Error("prioritize_first_last_pieces: should be true after round-trip")
+	}
+}
+
+func TestConfigPrioritizeFirstLastDefaultsToFalse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("port = 9090\napi_key = \"sk-x\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PrioritizeFirstLast {
+		t.Error("prioritize_first_last_pieces: should default to false when absent")
+	}
+}
+
 func TestConfigPreservesHashInQuotedString(t *testing.T) {
 	// A `#` inside a quoted string must NOT be stripped as a comment.
 	dir := t.TempDir()
