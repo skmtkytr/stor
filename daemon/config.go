@@ -41,6 +41,16 @@ type Config struct {
 	PipelineMax        int `toml:"pipeline_max"`
 	PipelineWindowSecs int `toml:"pipeline_window_secs"`
 
+	// Per-peer TCP socket buffer overrides. Default 0 = leave Linux
+	// auto-tuning enabled (recommended). Setting an explicit value
+	// disables auto-tuning for the affected sockets and pins them at
+	// 2 * value (kernel doubles for accounting), so a too-low override
+	// caps throughput below what auto-tune would have reached.
+	// 1 MiB (1048576) is a reasonable starting point if you must
+	// override — it covers the BDP of a 100 ms × 80 Mbps link.
+	SocketSendBuffer int `toml:"socket_send_buffer_bytes"`
+	SocketRecvBuffer int `toml:"socket_recv_buffer_bytes"`
+
 	// Streaming-friendly piece selection. Off by default.
 	PrioritizeFirstLast bool `toml:"prioritize_first_last_pieces"`
 
@@ -150,6 +160,12 @@ func (c *Config) Save() error {
 	if c.PipelineWindowSecs > 0 {
 		fmt.Fprintf(&b, "pipeline_window_secs = %d\n", c.PipelineWindowSecs)
 	}
+	if c.SocketSendBuffer > 0 {
+		fmt.Fprintf(&b, "socket_send_buffer_bytes = %d\n", c.SocketSendBuffer)
+	}
+	if c.SocketRecvBuffer > 0 {
+		fmt.Fprintf(&b, "socket_recv_buffer_bytes = %d\n", c.SocketRecvBuffer)
+	}
 	if c.NumWant > 0 {
 		fmt.Fprintf(&b, "numwant = %d\n", c.NumWant)
 	}
@@ -241,6 +257,14 @@ func parseTOML(data string, cfg *Config) {
 		case "pipeline_window_secs":
 			if n, err := strconv.Atoi(val); err == nil {
 				cfg.PipelineWindowSecs = n
+			}
+		case "socket_send_buffer_bytes":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.SocketSendBuffer = n
+			}
+		case "socket_recv_buffer_bytes":
+			if n, err := strconv.Atoi(val); err == nil {
+				cfg.SocketRecvBuffer = n
 			}
 		case "numwant":
 			if n, err := strconv.Atoi(val); err == nil {

@@ -412,19 +412,113 @@ func dialPeer(addr string, timeout time.Duration, tryUTP bool) (net.Conn, error)
 	return net.DialTimeout("tcp", addr, timeout)
 }
 
-// setTCPNoDelay enables TCP_NODELAY on a peer connection if it is a real
-// *net.TCPConn. Nagle's algorithm coalesces our small (17-byte) request
-// messages and waits ~40 ms for a piggybacked ACK before flushing — for
-// a pipelined leech that adds a per-block round-trip stall on top of
-// the actual network RTT. NODELAY off is the right default for most
-// applications, but a BitTorrent leech is the textbook
-// many-small-requests workload that wants it on.
+// peerKeepAlivePeriod is the SO_KEEPALIVE probe interval applied to
+// every peer TCP socket. 2 minutes is well below typical NAT session
+// timeouts (consumer routers reap idle TCP entries somewhere between
+// 5 and 60 minutes; 2 min keeps the entry warm with margin) and far
+// shorter than Linux's tcp_keepalive_time default of 7200 s, which is
+// useless for the BitTorrent workload. Not exposed via config — the
+// kernel default is wrong for every realistic deployment.
+const peerKeepAlivePeriod = 2 * time.Minute
+
+// peerSendBuf / peerRecvBuf are the SO_SNDBUF / SO_RCVBUF sizes applied
+// to peer TCP sockets in tunePeerSocket. Default 0 means "leave the
+// kernel's TCP buffer auto-tuning enabled" — see SetPeerSocketBuffers
+// for the rationale.
 //
-// Tolerant of nil, non-TCP connections (uTP, MSE-wrapped, net.Pipe), and
-// SetNoDelay errors — none are fatal: at worst the peer keeps running
-// with Nagle on, which is the pre-fix behaviour. The error is logged
-// at debug level so we can spot it in postmortems without spamming
-// info-level logs.
+// Atomic so engine setters (called from the RPC layer) can publish a
+// new value without taking a lock that would have to span every dial /
+// accept site. Reads are unsynchronised by design: the worst case is a
+// torn read that lands one tune call on a stale value, which is
+// equivalent to having tuned the previous connection.
+var (
+	peerSendBuf atomic.Int64
+	peerRecvBuf atomic.Int64
+)
+
+// SetPeerSocketBuffers configures SO_SNDBUF / SO_RCVBUF for subsequent
+// peer connections. Values are in bytes; passing 0 (the default) leaves
+// Linux's TCP buffer auto-tuning enabled, which is what you want.
+//
+// IMPORTANT TRADE-OFF: calling SetReadBuffer(n) / SetWriteBuffer(n)
+// **disables auto-tuning** for that socket and pins the buffer at 2*n
+// (Linux doubles for accounting). On a kernel with the typical
+// tcp_rmem max of 6 MiB, a "1 MiB looks safe" override silently caps
+// throughput on healthy peers below the auto-tune ceiling. Only
+// override when you know your kernel's tcp_{r,w}mem max is too low —
+// e.g. embedded boxes that ship 256 KiB defaults — and want to force
+// a larger floor.
+//
+// 1 MiB (1<<20) is a reasonable starting point if you do override; the
+// BDP of a 100 ms RTT × 80 Mbps link is ~1 MB.
+func SetPeerSocketBuffers(send, recv int) {
+	if send < 0 {
+		send = 0
+	}
+	if recv < 0 {
+		recv = 0
+	}
+	peerSendBuf.Store(int64(send))
+	peerRecvBuf.Store(int64(recv))
+}
+
+// tunePeerSocket applies our standard tuning to a peer TCP connection:
+// TCP_NODELAY, SO_KEEPALIVE with a 2-minute probe interval, and
+// (optionally) SO_SNDBUF / SO_RCVBUF when the engine has explicitly
+// configured them.
+//
+// The four reasons:
+//
+//   - NODELAY: Nagle coalesces our 17-byte request messages and waits
+//     ~40 ms for a piggybacked ACK before flushing. On a pipelined
+//     leech that adds a per-block RTT stall on top of the actual
+//     network RTT.
+//
+//   - KEEPALIVE: Linux defaults to 7200 s, far longer than NAT
+//     session timeouts (5-60 min on consumer routers). Idle peers
+//     get reaped silently; the BEP-3 application-layer keep-alive
+//     (peer.WriteKeepAlive) only covers connections that are
+//     actively requesting pieces, so interested-but-choked peers
+//     can still die. Belt and suspenders.
+//
+//   - SNDBUF/RCVBUF: opt-in only — see SetPeerSocketBuffers.
+//
+//   - Robustness: tolerant of nil, non-TCP (uTP, MSE-wrapped,
+//     net.Pipe), and setsockopt errors. None are fatal; at worst we
+//     fall back to the pre-fix behaviour for that socket.
+func tunePeerSocket(conn net.Conn) {
+	tc, ok := conn.(*net.TCPConn)
+	if !ok || tc == nil {
+		return
+	}
+	if err := tc.SetNoDelay(true); err != nil {
+		slog.Debug("download: SetNoDelay failed", "error", err)
+	}
+	if err := tc.SetKeepAlive(true); err != nil {
+		slog.Debug("download: SetKeepAlive failed", "error", err)
+	} else if err := tc.SetKeepAlivePeriod(peerKeepAlivePeriod); err != nil {
+		slog.Debug("download: SetKeepAlivePeriod failed", "error", err)
+	}
+	if snd := int(peerSendBuf.Load()); snd > 0 {
+		if err := tc.SetWriteBuffer(snd); err != nil {
+			slog.Debug("download: SetWriteBuffer failed", "size", snd, "error", err)
+		}
+	}
+	if rcv := int(peerRecvBuf.Load()); rcv > 0 {
+		if err := tc.SetReadBuffer(rcv); err != nil {
+			slog.Debug("download: SetReadBuffer failed", "size", rcv, "error", err)
+		}
+	}
+}
+
+// TunePeerSocket is the exported entrypoint used by the engine
+// listener for incoming peer connections; the outbound dial path in
+// this package calls the lower-case form directly.
+func TunePeerSocket(conn net.Conn) { tunePeerSocket(conn) }
+
+// setTCPNoDelay is preserved for backwards compatibility with existing
+// tests that pin the NODELAY-only behaviour. Production code should
+// use tunePeerSocket / TunePeerSocket, which is a strict superset.
 func setTCPNoDelay(conn net.Conn) {
 	tc, ok := conn.(*net.TCPConn)
 	if !ok || tc == nil {
@@ -524,11 +618,12 @@ func newClientFull(p tracker.Peer, infoHash, peerID [20]byte, dialTimeoutSec int
 		return nil, fmt.Errorf("download: connect to %s failed: %w", p, err)
 	}
 
-	// Disable Nagle on the raw socket *before* MSE wraps it — once
-	// MSE replaces the conn with its own wrapper the type assertion in
-	// setTCPNoDelay would no longer match. uTP connections silently
-	// no-op (they aren't *net.TCPConn).
-	setTCPNoDelay(rawConn)
+	// Tune the raw socket *before* MSE wraps it — once MSE replaces the
+	// conn with its own wrapper the type assertion in tunePeerSocket
+	// would no longer match. uTP connections silently no-op (they
+	// aren't *net.TCPConn). Applies NODELAY + keepalive (+ optional
+	// SO_SNDBUF/SO_RCVBUF) — see tunePeerSocket for rationale.
+	tunePeerSocket(rawConn)
 
 	conn := net.Conn(rawConn)
 	closeOnErr := func() { _ = rawConn.Close() }

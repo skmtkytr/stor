@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/skmtkytr/stor/download"
 	"github.com/skmtkytr/stor/peer"
 	"github.com/skmtkytr/stor/utp"
 )
@@ -129,16 +130,13 @@ func (pl *PeerListener) handleConn(conn net.Conn) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Disable Nagle on accepted TCP peer connections — same rationale as
-	// the outbound dial path in download.newClientFull. uTP-accepted
-	// conns silently no-op (not *net.TCPConn). Failure isn't fatal:
-	// worst case we keep running with Nagle on, the pre-fix behaviour.
-	if tc, ok := conn.(*net.TCPConn); ok {
-		if err := tc.SetNoDelay(true); err != nil {
-			slog.Debug("listener: SetNoDelay failed",
-				"remote", conn.RemoteAddr(), "error", err)
-		}
-	}
+	// Tune accepted TCP peer connections — NODELAY + keepalive (+ optional
+	// socket buffers, opt-in via engine config). Same rationale as the
+	// outbound dial path in download.newClientFull. uTP-accepted conns
+	// silently no-op (not *net.TCPConn). Failures aren't fatal: worst
+	// case we fall back to Nagle on / kernel-default keepalive timer
+	// for that one socket.
+	download.TunePeerSocket(conn)
 
 	// Read the incoming handshake to get info hash
 	hs, err := peer.ReadHandshake(conn)
