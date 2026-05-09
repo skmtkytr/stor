@@ -23,8 +23,11 @@ type Uploader struct {
 	bitfield peer.Bitfield
 	pm       *PeerManager
 
-	mu      sync.Mutex
-	clients []*Client
+	mu        sync.Mutex
+	clients   []*Client
+	stopped   bool
+	runCancel context.CancelFunc
+	serveWg   sync.WaitGroup // tracks in-flight HandleIncoming goroutines
 }
 
 // NewUploader creates an uploader for a completed torrent.
@@ -38,9 +41,44 @@ func NewUploader(tf *torrent.TorrentFile, filePath string, peerID [20]byte, bitf
 	}
 }
 
-// Run starts the upload choking algorithm. Blocks until ctx is cancelled.
+// Run starts the upload choking algorithm. Blocks until ctx is cancelled
+// or Stop is called.
 func (u *Uploader) Run(ctx context.Context) {
-	u.pm.Run(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
+	u.mu.Lock()
+	u.runCancel = cancel
+	stopped := u.stopped
+	u.mu.Unlock()
+	if stopped {
+		cancel()
+		return
+	}
+	u.pm.Run(runCtx)
+}
+
+// Stop closes all connected client conns and blocks until every in-flight
+// serve goroutine has fully exited (so the file descriptors they hold against
+// filePath are released). Required before renaming filePath on filesystems
+// that reject rename while files in the source tree are open (notably
+// SMB/CIFS — Windows ERROR_SHARING_VIOLATION). Idempotent.
+func (u *Uploader) Stop() {
+	u.mu.Lock()
+	if u.stopped {
+		u.mu.Unlock()
+		return
+	}
+	u.stopped = true
+	cancel := u.runCancel
+	clients := append([]*Client(nil), u.clients...)
+	u.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	for _, c := range clients {
+		_ = c.conn.Close()
+	}
+	u.serveWg.Wait()
 }
 
 // SetPiece marks a piece as available for upload and notifies all connected
@@ -65,6 +103,19 @@ func (u *Uploader) SetPiece(index int) {
 // HandleIncoming handles an incoming peer connection.
 // The remote peer has already sent their handshake; conn is the raw TCP connection.
 func (u *Uploader) HandleIncoming(conn net.Conn, remoteHS *peer.Handshake) {
+	// Refuse new connections after Stop. The Add(1) below must happen under
+	// the same lock as the stopped check, otherwise Stop's serveWg.Wait could
+	// race with a late HandleIncoming and miss its goroutine.
+	u.mu.Lock()
+	if u.stopped {
+		u.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	u.serveWg.Add(1)
+	u.mu.Unlock()
+	defer u.serveWg.Done()
+
 	// Complete handshake: send our side
 	ourHS := &peer.Handshake{
 		InfoHash:      u.tf.InfoHash,

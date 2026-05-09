@@ -884,6 +884,21 @@ func (s *Session) phaseDownload(ctx context.Context) error {
 	// Move from tmpDir if configured
 	finalPath := filepath.Join(s.downloadDir, s.tf.Info.Name)
 	if s.tmpDir != "" && savePath != finalPath {
+		// Stop the uploader so its per-peer serveLoop goroutines release every
+		// file descriptor they hold against savePath before the rename runs.
+		// SMB/CIFS rejects rename while any file in the source tree is open
+		// (Windows ERROR_SHARING_VIOLATION), which manifested as intermittent
+		// "move to download dir" failures whenever incoming peers were active
+		// at completion time. Clearing s.uploader under lock also makes the
+		// session-level HandleIncoming drop new conns during the rename window.
+		s.mu.Lock()
+		oldUp := s.uploader
+		s.uploader = nil
+		s.mu.Unlock()
+		if oldUp != nil {
+			oldUp.Stop()
+		}
+
 		slog.Info("moving completed download", "id", s.record.ID, "from", savePath, "to", finalPath)
 		if err := os.Rename(savePath, finalPath); err != nil {
 			return fmt.Errorf("session: move to download dir: %w", err)
@@ -1097,7 +1112,8 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 		return fmt.Errorf("session: parse magnet: %w", err)
 	}
 
-	slog.Info("resolving magnet",
+	slog.Info(
+		"resolving magnet",
 		"id", s.record.ID,
 		"info_hash", hex.EncodeToString(m.InfoHash[:]),
 		"trackers", len(m.Trackers),
@@ -1120,7 +1136,8 @@ func (s *Session) resolveMetadata(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		slog.Warn("metadata fetch attempt failed, retrying",
+		slog.Warn(
+			"metadata fetch attempt failed, retrying",
 			"id", s.record.ID, "attempt", attempt, "next_in", backoff,
 		)
 		if s.bus != nil {
@@ -1338,7 +1355,8 @@ func (s *Session) fetchMetadataAttempt(ctx context.Context, m *magnet.Magnet) (*
 	peers := append([]tracker.Peer(nil), allPeers...)
 	peerMu.Unlock()
 	if !ok {
-		slog.Warn("metadata attempt yielded no result",
+		slog.Warn(
+			"metadata attempt yielded no result",
 			"id", s.record.ID,
 			"peers_found", tried,
 			"attempted", statAttempted.Load(),
@@ -1352,7 +1370,8 @@ func (s *Session) fetchMetadataAttempt(ctx context.Context, m *magnet.Magnet) (*
 			// loop; this inner emit signals a single metadata round failed.
 			// TODO: thread attempt number through fetchMetadataAttempt args
 			// if a future consumer needs it.
-			errMsg := fmt.Sprintf("attempted=%d dial_fail=%d no_ext=%d no_meta=%d fetch_fail=%d peers_found=%d",
+			errMsg := fmt.Sprintf(
+				"attempted=%d dial_fail=%d no_ext=%d no_meta=%d fetch_fail=%d peers_found=%d",
 				statAttempted.Load(), statDialFail.Load(), statNoExt.Load(),
 				statNoMeta.Load(), statFetchFail.Load(), tried,
 			)
@@ -1455,7 +1474,8 @@ func (s *Session) findPeers(ctx context.Context) ([]tracker.Peer, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		slog.Warn("no peers found, retrying",
+		slog.Warn(
+			"no peers found, retrying",
 			"id", s.record.ID, "attempt", attempt, "next_in", backoff,
 		)
 		if s.bus != nil {
